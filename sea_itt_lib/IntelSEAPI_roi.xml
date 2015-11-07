@@ -1,0 +1,38 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes'?>
+
+<InstrumentationManifest>
+    <Instrumentation>
+        <Regions>
+            <RegionRoot Guid="{4E07710B-1A65-496C-89E4-A9C70C56FC34}"
+                        Name="Root"
+                        FriendlyName="Intel SEAPI Regions">
+                <Region Guid="{5234C612-9840-4C33-BF89-2530FCE2EF15}"
+                        Name="Root-itt_task"
+                        FriendlyName="ITT Task">
+                    <Start>
+                        <Event Provider="{13863EEB-81B3-4F34-8962-FACAFB230475}" Id="3" Version="0" />
+                    </Start>
+                    <Stop>
+                        <Event Provider="{13863EEB-81B3-4F34-8962-FACAFB230475}" Id="4" Version="0" />
+                    </Stop>
+                    <Naming>
+                        <PayloadBased NameField="name"/>
+                    </Naming>
+                    <Match>
+                        <Event PID="true" TID="true">
+                            <Payload FieldName="id" TargetFieldName="id"/>
+                        </Event>
+                        <!--
+                        <Parent PID="true" TID="true">
+                            <Payload FieldName="parent_level" TargetFieldName="level" />
+                        </Parent>
+                        -->
+                        <SelfNest PID="true" TID="true">
+                           <Payload FieldName="parent_level" TargetFieldName="level" />
+                        </SelfNest>
+                    </Match>
+                </Region>
+            </RegionRoot>
+        </Regions>
+    </Instrumentation>
+</InstrumentationManifest>

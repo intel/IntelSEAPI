@@ -1,0 +1,125 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes'?>
+<WindowsPerformanceRecorder
+    Author="Alexander A Raud"
+    Comments="Intel(R) SEAPI ITT Provider"
+    Company="Intel"
+    Copyright="Intel(R) 2015"
+    Team="GPA"
+    Version="1.0"
+>
+    <Profiles>
+        <SystemCollector
+        Id="SystemCollector_FileIO"
+        Name="NT Kernel Logger"
+        >
+            <BufferSize Value="128"/>
+            <Buffers Value="80"/>
+        </SystemCollector>
+
+        <EventCollector Id="EventCollector_Intel_SEAPI_Provider" Name="Intel_SEAPI_Provider Event Collector" ProcessPrivate="false" Secure="false" Realtime="false">
+            <BufferSize Value="64"/>
+            <Buffers Value="64"/>
+        </EventCollector>
+        <!--System-->
+        <EventCollector
+            Id="EventCollector_KernelPower"
+            Name="WPR Sample Event Collector"
+        >
+            <BufferSize Value="128"/>
+            <Buffers Value="32"/>
+        </EventCollector>
+        <SystemProvider Id="SystemProvider_FileIO">
+            <Keywords>
+                <Keyword Value="DiskIO"/>
+                <Keyword Value="FileIO"/>
+                <Keyword Value="FileIOInit"/>
+                <Keyword Value="HardFaults"/>
+            </Keywords>
+            <Stacks>
+                <Stack Value="FileCleanup"/>
+                <Stack Value="FileClose"/>
+                <Stack Value="FileCreate"/>
+                <Stack Value="FileDelete"/>
+                <Stack Value="FileDirEnum"/>
+                <Stack Value="FileDirNotify"/>
+                <Stack Value="FileFlush"/>
+                <Stack Value="FileFSCTL"/>
+                <Stack Value="FileOpEnd"/>
+                <Stack Value="FileQueryInformation"/>
+                <Stack Value="FileRead"/>
+                <Stack Value="FileRename"/>
+                <Stack Value="FileSetInformation"/>
+                <Stack Value="FileWrite"/>
+            </Stacks>
+        </SystemProvider>
+        <EventProvider Id="EventProvider_Intel_SEAPI_Provider" Name="13863EEB-81B3-4F34-8962-FACAFB230475" Stack="true" NonPagedMemory="true"/>
+
+        <EventProvider
+          Id="EventProvider_Microsoft-Windows-Kernel-Power_AC-DC-State"
+          Name="Microsoft-Windows-Kernel-Power"
+          NonPagedMemory="true"
+        >
+            <Keywords>
+                <Keyword Value="0x4"/>
+            </Keywords>
+            <CaptureStateOnSave>
+                <Keyword Value="0x4"/>
+            </CaptureStateOnSave>
+        </EventProvider>
+        <!--
+        A fully specified .wprp file should have four profiles, with DetailLevel set to Verbose and Light and with Logging Mode set to Memory and File.
+        WPR enforces that the name conforms to <name>Profile.Level.OutputType
+    -->
+        <Profile
+          Id="Intel_SEAPI_ProviderProfile.Verbose.File"
+          LoggingMode="File"
+          Name="Intel_SEAPI_ProviderProfile"
+          DetailLevel="Verbose"
+          Description="Intel(R) Single Event Api Provider for Diagnostic trace">
+            <Collectors>
+                <!-- EventCollectorId must match the EventCollector ID specified above -->
+                <SystemCollectorId Value="SystemCollector_FileIO">
+                    <SystemProviderId Value="SystemProvider_FileIO"/>
+                </SystemCollectorId>
+                <EventCollectorId Value="EventCollector_Intel_SEAPI_Provider">
+                    <EventProviders>
+                        <EventProviderId Value="EventProvider_Intel_SEAPI_Provider"/>
+                    </EventProviders>
+                </EventCollectorId>
+                <EventCollectorId Value="EventCollector_KernelPower">
+                    <EventProviders>
+                        <EventProviderId Value="EventProvider_Microsoft-Windows-Kernel-Power_AC-DC-State"/>
+                    </EventProviders>
+                </EventCollectorId>
+            </Collectors>
+        </Profile>
+
+        <!-- Now we can just subclass our base profile to get the other (mostly redundant) configurations -->
+        <Profile
+            Id="Intel_SEAPI_ProviderProfile.Verbose.Memory"
+            LoggingMode="Memory"
+            Name="Intel_SEAPI_ProviderProfile"
+            DetailLevel="Verbose"
+            Description="Intel(R) Single Event Api Provider for Diagnostic trace"
+            Base="Intel_SEAPI_ProviderProfile.Verbose.File"
+    />
+
+        <Profile
+            Id="Intel_SEAPI_ProviderProfile.Light.File"
+            LoggingMode="File"
+            Name="Intel_SEAPI_ProviderProfile"
+            DetailLevel="Light"
+            Description="Intel(R) Single Event Api Provider for Diagnostic trace"
+            Base="Intel_SEAPI_ProviderProfile.Verbose.File"
+    />
+
+        <Profile
+            Id="Intel_SEAPI_ProviderProfile.Light.Memory"
+            LoggingMode="Memory"
+            Name="Intel_SEAPI_ProviderProfile"
+            DetailLevel="Light"
+            Description="Intel(R) Single Event Api Provider for Diagnostic trace"
+            Base="Intel_SEAPI_ProviderProfile.Verbose.File"/>
+    </Profiles>
+
+</WindowsPerformanceRecorder>
