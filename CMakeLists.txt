@@ -79,18 +79,6 @@ else()
     endif()
 endif()
 
-if (EXISTS "${PROJECT_SOURCE_DIR}/metricsframework")
-    MESSAGE("Found: Intel(R) Metrics Framework")
-    if (NOT ANDROID)
-        set (METRICS_FRAMEWORK_DIR ${PROJECT_SOURCE_DIR}/metricsframework)
-    endif()
-endif()
-
-if (EXISTS "${PROJECT_SOURCE_DIR}/ConcurrencyVisualizerSDK")
-    MESSAGE("Found: Concurrency Visualizer SDK")
-    set (CONCURRENCY_VISUALIZER_SDK_DIR ${PROJECT_SOURCE_DIR}/ConcurrencyVisualizerSDK)
-endif()
-
 add_subdirectory(sea_itt_lib)
 add_subdirectory(ittnotify)
 
@@ -115,6 +103,5 @@ else()
     TARGET_LINK_LIBRARIES(IntelSEAPI dl)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -fPIC -pthread")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pie -Wl,--no-undefined")
-    #SET_TARGET_PROPERTIES(IntelSEAPI PROPERTIES COMPILE_FLAGS "-finstrument-functions")
 endif()
 

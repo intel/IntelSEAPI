@@ -20,7 +20,7 @@ Bulding:
     All platforms except Android:
         >> python buildall.py -i
         this will produce installer
-        on windows demands NSIS installed
+        on Windows demands Visual Studio 2013 and NSIS (http://nsis.sourceforge.net/) installed
     Android:
         demands ANDROID_NDK to be set in environment to the Android NDK path
         >> python buildall.py -a

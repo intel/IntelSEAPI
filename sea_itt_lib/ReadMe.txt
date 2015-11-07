@@ -30,15 +30,6 @@ Open Source Intel® SEAPI currently supports these formats:
         Include driver/sea_itt_driver.c from IntelSEAPI sources.
         Call __itt_event_start(0) in DriverEntry to init itt, AND __itt_event_end(0) in UnloadDriver to clean up everything.
 
-* Visual Studio Concurrency Visualizer: https://msdn.microsoft.com/en-us/library/dd537632.aspx
-    Cons: Only immediate tasks and markers are supported (currently)
-    Pros: correlation with all its metrics
-    To enable:
-        Make sure you have Concurrency Visualizer extension installed (if not, please go to Tools->Extensions and Updates)
-        Generate headers and put them to <Intel® SEAPI source code Project Root>/ConcurrencyVisualizerSDK folder, build Intel® SEAPI
-        Set INTEL_LIBITTNOTIFY32/INTEL_LIBITTNOTIFY64 with paths as your Visual Studio project Environment
-        Run Concurrency Visualizer from "ANALYZE" menu item of VS
-
 * Systrace - Android: http://developer.android.com/tools/help/systrace.html
     Cons: only immediate tasks and counters are supported (currently).
     Pros: corellation with all system metric systrace can collect on the phone.

@@ -35,8 +35,6 @@ if (WIN32)
         COMMENT "Generating ${PROJECT_BINARY_DIR}/IntelSEAPI_km.h"
     )
 
-    MESSAGE("FOR REGISTRATION: wevtutil.exe im ${CUR_DIR}/IntelSEAPI.man /rf:\"${PROJECT_BINARY_DIR}/sea_itt_lib/Debug/sea_itt_lib.dll\" /mf:\"${PROJECT_BINARY_DIR}/sea_itt_lib/Debug/sea_itt_lib.dll\"")
-
     set(EXTRA_SOURCE
         ETWHandler.cpp
         ${PROJECT_BINARY_DIR}/IntelSEAPI.rc
@@ -49,10 +47,6 @@ if (WIN32)
         register.bat
     )
     
-    if(CONCURRENCY_VISUALIZER_SDK_DIR)
-        set(EXTRA_SOURCE ${EXTRA_SOURCE} ConcurrencyVisualizer.cpp)
-    endif()
-
 elseif(APPLE)
     set(EXTRA_SOURCE
         DTraceHandler.cpp
@@ -65,15 +59,6 @@ elseif(ANDROID)
     )
 else()
     set(EXTRA_SOURCE)
-endif()
-
-if(METRICS_FRAMEWORK_DIR)
-    set(EXTRA_SOURCE ${EXTRA_SOURCE}
-        publisher.cpp
-        publisher.h
-        MfConsumer.h
-        MfConsumer.cpp
-    )
 endif()
 
 add_library(sea_itt_lib SHARED
@@ -101,12 +86,6 @@ else()
     endif()
 endif()
 
-if(METRICS_FRAMEWORK_DIR)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DENABLE_MF=1")
-else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DENABLE_MF=0")
-endif()
-
 if (ARCH_64)
     set(METRICSFRAMEWORK_LIBRARY "x64")
 else()
@@ -114,36 +93,14 @@ else()
 endif()
 
 if (WIN32)
-
-    if(METRICS_FRAMEWORK_DIR)
-        set(GM_LIB_PATH_DEBUG "${METRICS_FRAMEWORK_DIR}/lib/windows/${METRICSFRAMEWORK_LIBRARY}/vs2013/debug")
-        set(GM_LIB_PATH_RELEASE "${METRICS_FRAMEWORK_DIR}/lib/windows/${METRICSFRAMEWORK_LIBRARY}/vs2013/release")
-        set(GM_LIBS
-            debug ${GM_LIB_PATH_DEBUG}/gmframework.lib
-            debug ${GM_LIB_PATH_DEBUG}/building_blocks.lib
-            optimized ${GM_LIB_PATH_RELEASE}/gmframework.lib
-            optimized ${GM_LIB_PATH_RELEASE}/building_blocks.lib
-        )
-    else()
-        set(GM_LIBS "")
-    endif()
     TARGET_LINK_LIBRARIES(sea_itt_lib
         ws2_32.lib Shlwapi.lib Dbghelp.lib
-        ${GM_LIBS}
     )
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi") #in release as well
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG") #in release as well
 elseif (APPLE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++11 -g -fPIC -framework Cocoa")
-    if(METRICS_FRAMEWORK_DIR)
-        set(GM_LIB_PATH "${METRICS_FRAMEWORK_DIR}/lib/mac")
-        TARGET_LINK_LIBRARIES(sea_itt_lib ${GM_LIB_PATH}/libgmframework.a ${GM_LIB_PATH}/libbuilding_blocks.a)
-    endif()
 elseif (ANDROID)
-    if(METRICS_FRAMEWORK_DIR)
-        set(GM_LIB_PATH "${METRICS_FRAMEWORK_DIR}/lib/android/${METRICSFRAMEWORK_LIBRARY}")
-        TARGET_LINK_LIBRARIES(sea_itt_lib ${GM_LIB_PATH}/libgmframework.a ${GM_LIB_PATH}/libbuilding_blocks.a ${GM_LIB_PATH}/libdm_parser.a log)
-    endif()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -fPIC -pthread")
 else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -fPIC -pthread")
@@ -152,9 +109,7 @@ endif()
 target_include_directories(sea_itt_lib PUBLIC
     . ..
     ../ittnotify ../ittnotify/include
-    ${CONCURRENCY_VISUALIZER_SDK_DIR}
     ${PROJECT_BINARY_DIR}
-    ${METRICS_FRAMEWORK_DIR}/include
 )
 
 ################################################### INSTALLER #########################################################
