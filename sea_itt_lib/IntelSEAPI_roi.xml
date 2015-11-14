@@ -26,10 +26,10 @@
                         <Parent PID="true" TID="true">
                             <Payload FieldName="parent_level" TargetFieldName="level" />
                         </Parent>
-                        -->
                         <SelfNest PID="true" TID="true">
                            <Payload FieldName="parent_level" TargetFieldName="level" />
                         </SelfNest>
+                        -->
                     </Match>
                 </Region>
             </RegionRoot>

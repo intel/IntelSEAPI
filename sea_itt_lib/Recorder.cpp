@@ -58,16 +58,16 @@ void CRecorder::Init(const std::string& path, uint64_t time, void* pCut)
     m_pCut = pCut;
 }
 
-bool CRecorder::CheckCapacity(size_t size)
+size_t CRecorder::CheckCapacity(size_t size)
 {
     size_t nWroteBytes = (char*)m_pCurPos - (char*)m_memmap->GetPtr();
     if (nWroteBytes + size > m_memmap->GetSize())
     {
         m_pCurPos = m_memmap->Remap(ChunkSize, m_nWroteTotal);
         if (!m_pCurPos)
-            return false;
+            return 0;
     }
-    return true;
+    return (std::max<size_t>)(m_nWroteTotal, 1);
 }
 
 void* CRecorder::Allocate(size_t size)
@@ -139,7 +139,8 @@ void WriteRecord(ERecordType type, const SRecord& record)
         CHECK_REPORT_STRING(record.pName);
     }
     const size_t MaxSize = sizeof(STinyRecord) + 2*sizeof(__itt_id) + 3*sizeof(uint64_t) + sizeof(double) + sizeof(void*);
-    if (!stream.CheckCapacity(MaxSize + record.length))
+    size_t size = stream.CheckCapacity(MaxSize + record.length);
+    if (!size)
         return;
 
     STinyRecord* pRecord = WriteToBuff(stream, STinyRecord{record.rf.nanoseconds, type});
@@ -192,6 +193,12 @@ void WriteRecord(ERecordType type, const SRecord& record)
         WriteToBuff(stream, (uint64_t)record.function);
         pRecord->flags |= efHasFunction;
     }
+
+    if (sea::g_nAutoCut && (size >= sea::g_nAutoCut))
+    {
+        static size_t autocut = 0;
+        sea::SetCutName(std::string("autocut#") + std::to_string(autocut++));
+    }
 }
 
 CMemMap::CMemMap(const std::string &path, size_t size, size_t offset)
@@ -227,6 +234,9 @@ void* CMemMap::Remap(size_t size, size_t offset)
     m_pView = ::MapViewOfFile(m_hMapping, FILE_MAP_WRITE, uliOffset.HighPart, uliOffset.LowPart, m_size);
 #else
     m_pView = mmap(0, m_size, PROT_READ|PROT_WRITE, MAP_SHARED, m_fdin, nRoundOffset);
+    if (m_pView == MAP_FAILED)
+        throw std::runtime_error("Failed to map file: err=" + std::to_string(errno));
+
 #endif
     return (char*)m_pView + offset % PageSize;
 }
@@ -275,11 +285,11 @@ class CSEARecorder: public IHandler
     {
         if (bOverlapped)
         {
-            WriteRecord(ERecordType::BeginOverlappedTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName});
+            WriteRecord(ERecordType::BeginOverlappedTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, nullptr, 0, oTask.fn});
         }
         else
         {
-            WriteRecord(ERecordType::BeginTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName});
+            WriteRecord(ERecordType::BeginTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, nullptr, 0, oTask.fn});
         }
     }
     void TaskBeginFn(STaskDescriptor& oTask, void* fn) override
@@ -290,6 +300,12 @@ class CSEARecorder: public IHandler
     {
         WriteRecord(ERecordType::Metadata, SRecord{oTask.rf, *oTask.pDomain, oTask.id, __itt_null, pKey, nullptr, data, length});
     }
+
+    void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, double value) override
+    {
+        WriteRecord(ERecordType::Metadata, SRecord{ oTask.rf, *oTask.pDomain, oTask.id, __itt_null, pKey, &value});
+    }
+
     void TaskEnd(STaskDescriptor& oTask, const CTraceEventFormat::SRegularFields& rf, bool bOverlapped) override
     {
         if (bOverlapped)
@@ -364,4 +380,5 @@ void ReportModule(void* fn)
     write(fd, module_info.second.c_str(), (unsigned int)module_info.second.size());
     close(fd);
 }
+
 } //namespace sea

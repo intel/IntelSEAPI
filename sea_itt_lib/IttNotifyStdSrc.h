@@ -52,13 +52,14 @@ __itt_global* GetITTGlobal(__itt_global* pGlob = nullptr);
 
 namespace sea {
     extern std::string g_savepath;
+    extern uint64_t g_nAutoCut;
 #ifdef __linux
     void WriteFTraceTimeSyncMarkers();
 #endif
     void InitSEA();
     void FillApiList(__itt_api_info* pApiInfo);
     void FinitaLaComedia();
-    void Counter(const __itt_domain *pDomain, __itt_string_handle *pName, double delta, __itt_clock_domain* clock_domain = nullptr, unsigned long long timestamp = 0, bool bMetricsFramework = false);
+    void Counter(const __itt_domain *pDomain, __itt_string_handle *pName, double value, __itt_clock_domain* clock_domain = nullptr, unsigned long long timestamp = 0);
     __itt_clock_domain* clock_domain_create(__itt_get_clock_info_fn fn, void* fn_data);
     void SetCutName(const std::string& path);
     void SetFolder(const std::string& path);
@@ -147,6 +148,7 @@ struct STaskDescriptor
     const __itt_string_handle *pName;
     __itt_id id;
     __itt_id parent;
+    void* fn;
     struct SCookie
     {
         void* pCookie;
@@ -241,6 +243,7 @@ public:
     virtual void TaskBegin(STaskDescriptor& oTask, bool bOverlapped) {}
     virtual void TaskBeginFn(STaskDescriptor& oTask, void* fn) {}
     virtual void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length) {}
+    virtual void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, double value) {}
     virtual void TaskEnd(STaskDescriptor& oTask, const CTraceEventFormat::SRegularFields& rf, bool bOverlapped) {}
     virtual void Marker(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope scope) {}
     virtual void CreateCounter(const __itt_counter& id, const __itt_domain *pDomain, const __itt_string_handle *pName) {}
@@ -254,12 +257,13 @@ class COverlapped;
 
 struct SThreadRecord
 {
-    std::map<const __itt_domain*, CRecorder> files;
+    std::map<std::string/*domain*/, CRecorder> files;
     bool bRemoveFiles = false;
     __itt_track* pTrack = nullptr;
     SThreadRecord* pNext = nullptr;
     STaskDescriptor* pTask = nullptr;
     COverlapped* pOverlapped = nullptr;
+    bool bAllocRecursion = false;
 };
 
 void TraverseDomains(const std::function<void(___itt_domain&)>& callback);

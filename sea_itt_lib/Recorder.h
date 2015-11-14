@@ -111,7 +111,7 @@ class CRecorder
 public:
     CRecorder();
     void Init(const std::string& path, uint64_t time, void* pCut);
-    bool CheckCapacity(size_t size);
+    size_t CheckCapacity(size_t size);
     void* Allocate(size_t size);
     uint64_t GetCount(){return m_counter;}
     uint64_t GetCreationTime(){return m_time;}
@@ -142,7 +142,7 @@ enum class ERecordType: uint8_t
     ObjectNew,
     ObjectSnapshot,
     ObjectDelete,
-    Relation,
+    Relation
 };
 
 struct SRecord

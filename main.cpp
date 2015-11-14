@@ -36,8 +36,6 @@
     #pragma GCC diagnostic pop
 #endif
 
-
-
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -61,6 +59,9 @@
     #include <Dbghelp.h>
     #pragma comment(lib, "dbghelp")
 #else
+    #include <sys/types.h>
+    #include <unistd.h>
+
     #define setenv putenv
     #define _strdup strdup
 #endif
@@ -126,6 +127,11 @@ int GlobalInit()
         setenv(_strdup(INTEL_LIBITTNOTIFY "=" LIB_ITT));
         VerbosePrint("MAIN: setting %s = %s\n", INTEL_LIBITTNOTIFY, LIB_ITT);
     }
+
+#ifdef __linux__
+    if (get_environ_value("INTEL_SEA_SAVE_TO").empty())
+        setenv(_strdup("INTEL_SEA_SAVE_TO=/tmp/ISEA"));
+#endif
     return 1;
 }
 
@@ -326,7 +332,7 @@ void workerthread(int data)
         __itt_sync_acquired((void*)&workerthread);
 
         __itt_counter_inc_delta_v3(domain, handle_counter, rand());
-        double sinus_value = 10000. * sin(counter / 3.14);
+        double sinus_value = std::abs(10000. * sin(counter / 3.14));
         __itt_metadata_add(domain, __itt_null, sinus_handle, __itt_metadata_double, 1, &sinus_value);
         bool bOverlapped = !(rand() % 2);
         unsigned long long start = TClock::now().time_since_epoch().count();
@@ -360,19 +366,6 @@ void workerthread(int data)
     TaskStack(5);
     __itt_id_destroy(domain, id);
     __itt_task_end(domain);
-}
-
-void MakeCuts()
-{
-    std::string path = get_environ_value("INTEL_SEA_SAVE_TO");
-    if (path.empty()) return;
-    __itt_string_handle* handle = __itt_string_handle_create("__sea_cut");
-    int counter = 0;
-    while (!g_done)
-    {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-        __itt_metadata_str_add(domain, __itt_null, handle, std::to_string(counter++).c_str(), 0);
-    }
 }
 
 void ChangePaths()
@@ -432,12 +425,15 @@ int main(int argc, char* argv[])
         {
             threads.push_back(new std::thread(
                 [&total_count](){
-                    const uint64_t count = 100000;
+                    const uint64_t count = 1000000;
                     for(;;)
                     {
                         for (uint64_t i = 0; i < count; ++i)
                         {
-                            __itt_task_begin(domain, __itt_null, __itt_null, handle_main);
+                            __itt_id id = __itt_id_make(const_cast<uint64_t*>(&count), i);
+                            __itt_task_begin(domain, id, __itt_null, handle_main);
+                            double value = double(i);
+                            __itt_metadata_add(domain, id, metadata_handle, __itt_metadata_double, 1, &value);
                             __itt_task_end(domain);
                         }
                         total_count += count;
@@ -498,7 +494,6 @@ int main(int argc, char* argv[])
         __itt_task_end(domain);
     }
 
-    threads.push_back(new std::thread(MakeCuts));
     threads.push_back(new std::thread(ChangePaths));
 
     __itt_region_end(domain, region1id);
@@ -536,7 +531,6 @@ int main(int argc, char* argv[])
 
     __itt_clock_domain_reset();
     clock_domain = nullptr;
-
     return 0;
 }
 

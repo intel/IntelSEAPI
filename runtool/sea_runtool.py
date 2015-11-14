@@ -23,7 +23,11 @@ from glob import glob
 
 from subprocess import Popen, PIPE
 
-#FIXME: if you have end and don't have begin, count that begin is the time of trace begin
+def format_time(time):
+    for coeff, suffix in [(10**3, 'ns'), (10**6, 'us'), (10**9, 'ms')]:
+        if time < coeff:
+            return "%.3f%s" % (time * 1000.0 / coeff , suffix)
+    return "%.3fs" % (float(time) / 10**9)
 
 class DummyWith(): #for conditional with statements
     def __enter__(self):
@@ -34,7 +38,7 @@ class DummyWith(): #for conditional with statements
 def parse_args(args):
     import argparse
     parser = argparse.ArgumentParser(epilog="After this command line add ! followed by command line of your program")
-    format_choices = ["gt", "mfc", "mfp", "qt", "fd", "btf"]
+    format_choices = ["gt", "mfc", "mfp", "qt", "fd", "btf", "gv"]
     if sys.platform == 'win32':
         format_choices.append("etw")
     elif sys.platform == 'darwin':
@@ -50,7 +54,9 @@ def parse_args(args):
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-c", "--cuts", nargs='*')
     parser.add_argument("-s", "--sync")
+    parser.add_argument("-l", "--limit", nargs='*')
     parser.add_argument("--dry", action="store_true")
+    parser.add_argument("--sampling")
 
     if "!" in args:
         separator = args.index("!")
@@ -145,6 +151,10 @@ def launch(args, victim):
                 print key + "=" + val
         return
 
+    if args.verbose:
+        print "Running:", victim
+        print "Environment:", str(env)
+      
     new_env = dict(os.environ)
     new_env.update(env)
     env = new_env
@@ -160,7 +170,8 @@ def launch(args, victim):
         args.trace = ftrace.stop()
     if args.output:
         args.input = "%s-%d" % (args.output, proc.pid)
-        transform(args)
+        output = transform(args)
+        print "result:", output
 
 def extract_cut(filename):
     return (filename.split("!")[1].split("-")[0]) if ('!' in filename) else None
@@ -245,6 +256,8 @@ def read_chunk_header(file):
     return struct.unpack('Qbb', chunk)
 
 def transform(args):
+    if args.verbose:
+        print "Transform:", str(args)
     tree = sea_reader(args.input) #parse the structure
     if args.cuts and args.cuts == ['all']:
         return transform2(args, tree)
@@ -272,7 +285,7 @@ def transform(args):
 TaskTypes = [
     "task_begin", "task_end",
     "task_begin_overlapped", "task_end_overlapped",
-    "metadata_str_add",
+    "metadata_add",
     "marker",
     "counter",
     "frame_begin", "frame_end",
@@ -281,8 +294,8 @@ TaskTypes = [
 ]
 
 class Callbacks:
-    callbacks = [] #while parsing we might have one to many 'listeners' - output format writers
     def __init__(self, args, tree):
+        self.callbacks = [] #while parsing we might have one to many 'listeners' - output format writers
         if "qt" in args.format:
             self.callbacks.append(QTProfiler(args, tree))
         if "gt" in args.format:
@@ -291,6 +304,8 @@ class Callbacks:
             self.callbacks.append(FrameDebugger(args, tree))
         if "btf" in args.format:
             self.callbacks.append(BestTraceFormat(args, tree))
+        if "gv" in args.format:
+            self.callbacks.append(GraphViz(args, tree))
 
     def is_empty(self):
         return 0 == len(self.callbacks)
@@ -308,81 +323,143 @@ class Callbacks:
         [callback(type, data.copy()) for callback in self.callbacks]
 
     def get_result(self):
-        return [callback.get_target() for callback in self.callbacks]
+        res = []
+        for callback in self.callbacks:
+            res += callback.get_targets()
+        return res
+
+def check_time_in_limits(time, left, right):
+    if left != None and time < left:
+        return False
+    if right != None and time > right:
+        return False
+    return True
+
+class FileWrapper:
+    def __init__(self, path, args, tree, domain, tid):
+        self.args = args
+        self.tree = tree
+        self.domain = domain
+        self.tid = tid
+        self.file = open(path, "rb")
+        self.record = self.read()
+
+    def next(self):
+        self.record = self.read()
+
+    def get_record(self):
+        return self.record
+
+    def get_pos(self):
+        return self.file.tell()
+
+    def get_size(self):
+        return os.path.getsize(self.file.name)
+
+    def read(self):
+        call = {"tid": self.tid, "pid": self.tree["pid"], "domain": self.domain}
+
+        tuple = read_chunk_header(self.file)
+        if tuple == (0,0,0): #mem mapping wasn't trimed on close, zero padding goes further
+            return None
+        call["time"] = tuple[0]
+
+        assert(tuple[1] < len(TaskTypes)); #sanity check
+        call["type"] = tuple[1]
+
+        flags = tuple[2]
+        assert(flags < 0x80); #sanity check
+        if flags & 0x1: #has id
+            chunk = self.file.read(3*8)
+            call["id"] = struct.unpack('QQQ', chunk)[0]
+        if flags & 0x2: #has parent
+            chunk = self.file.read(3*8)
+            call["parent"] = struct.unpack('QQQ', chunk)[0]
+        if flags & 0x4: #has string
+            chunk = self.file.read(8)
+            str_id = struct.unpack('Q', chunk)[0] #string handle
+            call["str"] = self.tree["strings"][str_id]
+        if flags & 0x8: #has tid, that differs from the calling thread (virtual tracks)
+            chunk = self.file.read(8)
+            call["tid"] = struct.unpack('Q', chunk)[0]
+
+        if self.tree["threads"].has_key(str(call["tid"])):
+            call["thread_name"] = self.tree["threads"][str(call["tid"])]
+        else:
+            call["thread_name"] = hex(call["tid"])
+
+        if flags & 0x10: #has data
+            chunk = self.file.read(8)
+            length = struct.unpack('Q', chunk)[0]
+            call["data"] = self.file.read(length)
+        if flags & 0x20: #has delta
+            chunk = self.file.read(8)
+            call["delta"] = struct.unpack('d', chunk)[0]
+
+        if flags & 0x40: #has pointer
+            chunk = self.file.read(8)
+            ptr = struct.unpack('Q', chunk)[0]
+            if not resolve_pointer(self.args, self.tree, ptr, call):
+                call["pointer"] = ptr
+
+        return call
 
 def transform2(args, tree, skip_fn = None):
+
+    left_limit = None
+    right_limit = None
+    if args.limit:
+        limits = args.limit.split(":")
+        if limits[0]:
+            left_limit = int(limits[0])
+        if limits[1]:
+            right_limit = int(limits[1])
 
     with Callbacks(args, tree) as callbacks:
         if callbacks.is_empty():
             return callbacks.get_result()
 
-        count = 0
+        files = []
         for domain, content in tree["domains"].iteritems(): #go thru domains
             for tid, path in content["files"]: #go thru per thread files
 
                 if skip_fn and skip_fn(path): #for "cut" support
                     continue
 
+                files.append(FileWrapper(path, args, tree, domain, tid))
+
+        if args.verbose:
+            print path
+            progress = DummyWith()
+        else:
+            progress = Progress(sum([file.get_size() for file in files]), 50, "Progress")
+
+        with progress:
+            count = 0
+            while True: #records iteration
+                record = None
+                earliest = None
+                for file in files:
+                    rec = file.get_record()
+                    if not rec: #finished
+                        continue
+                    if not record or rec['time'] < record['time']:
+                        record = rec
+                        earliest = file
+                if not record: ##all finished
+                    break
+                earliest.next()
+
                 if args.verbose:
-                    print path
-                    progress = DummyWith()
-                else:
-                    progress = Progress(os.path.getsize(path), 10, path)
+                    print "%d\t%s\t%s" % (count, TaskTypes[record['type']], record)
+                elif count % 1000 == 0:
+                    progress.tick(sum([file.get_pos() for file in files]))
+                if check_time_in_limits(record["time"], left_limit, right_limit):
+                    callbacks.on_event(TaskTypes[record['type']], record)
+                elif args.verbose:
+                    print "skipped due to limits"
 
-                with progress:
-                    with open(path, "rb") as file:
-                        while True: #records iteration
-                            call = {"tid": tid, "pid": tree["pid"], "domain": domain}
-
-                            tuple = read_chunk_header(file)
-                            if tuple == (0,0,0): #mem mapping wasn't trimed on close, zero padding goes further
-                                break
-                            call["time"] = tuple[0]
-                            type = tuple[1]
-
-                            assert(type < len(TaskTypes)); #sanity check
-                            flags = tuple[2]
-                            assert(flags < 0x80); #sanity check
-                            if flags & 0x1: #has id
-                                chunk = file.read(3*8)
-                                call["id"] = struct.unpack('QQQ', chunk)[0]
-                            if flags & 0x2: #has parent
-                                chunk = file.read(3*8)
-                                call["parent"] = struct.unpack('QQQ', chunk)[0]
-                            if flags & 0x4: #has string
-                                chunk = file.read(8)
-                                str_id = struct.unpack('Q', chunk)[0] #string handle
-                                call["str"] = tree["strings"][str_id]
-                            if flags & 0x8: #has tid, that differs from the calling thread (virtual tracks)
-                                chunk = file.read(8)
-                                call["tid"] = struct.unpack('Q', chunk)[0]
-
-                            if tree["threads"].has_key(str(call["tid"])):
-                                call["thread_name"] = tree["threads"][str(call["tid"])]
-                            else:
-                                call["thread_name"] = hex(call["tid"])
-
-                            if flags & 0x10: #has data
-                                chunk = file.read(8)
-                                length = struct.unpack('Q', chunk)[0]
-                                call["data"] = file.read(length)
-                            if flags & 0x20: #has delta
-                                chunk = file.read(8)
-                                call["delta"] = struct.unpack('d', chunk)[0]
-
-                            if flags & 0x40: #has pointer
-                                chunk = file.read(8)
-                                ptr = struct.unpack('Q', chunk)[0]
-                                if not resolve_pointer(args, tree, ptr, call):
-                                    call["pointer"] = ptr
-
-                            if args.verbose:
-                                print "%d\t%s\t%s" % (count, TaskTypes[type], call)
-                            elif count % 10 == 0:
-                                progress.tick(file.tell())
-
-                            callbacks.on_event(TaskTypes[type], call)
-                            count += 1
+                count += 1
 
     return callbacks.get_result()
 
@@ -444,10 +521,6 @@ def attachme():
 
 
 class TaskCombiner:
-
-    no_begin = [] #for the ring buffer case when we get task end but no task begin
-    time_bounds = [2**64, 0] #left and right time bounds
-
     def __enter__(self):
         return self
     def __exit__(self, type, value, traceback):
@@ -456,10 +529,13 @@ class TaskCombiner:
         return False
 
     def __init__(self, tree):
+        self.no_begin = [] #for the ring buffer case when we get task end but no task begin
+        self.time_bounds = [2**64, 0] #left and right time bounds
         self.tree = tree
         self.domains = {}
         self.events = []
         self.event_map = {}
+        self.prev_sample = 0
 
     def global_metadata(self, data):
         pass
@@ -471,22 +547,24 @@ class TaskCombiner:
         for end in self.no_begin:
             begin = end.copy()
             begin['time'] = self.time_bounds[0]
-            self.complete_task("task", begin, end)
+            self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
         for domain, threads in self.domains.iteritems():
-            for tid, records in threads.iteritems():
+            for tid, records in threads['tasks'].iteritems():
                 for id, per_id_records in records['byid'].iteritems():
                     for begin in per_id_records:
                         end = begin.copy()
                         end['time'] = self.time_bounds[1]
-                        self.complete_task("task", begin, end)
+                        self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
                 for begin in records['stack']:
                     end = begin.copy()
                     end['time'] = self.time_bounds[1]
-                    self.complete_task("task", begin, end)
+                    self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
+            if self.prev_sample:
+                self.flush_counters(threads, {'tid':0, 'pid': self.tree['pid'], 'domain': domain})
 
     def __call__(self, fn, data):
-        domain = self.domains.setdefault(data['domain'], {})
-        thread = domain.setdefault(data['tid'], {'byid':{}, 'stack':[]})
+        domain = self.domains.setdefault(data['domain'], {'tasks': {}, 'counters':{}})
+        thread = domain['tasks'].setdefault(data['tid'], {'byid':{}, 'stack':[]})
 
         def get_tasks(id):
             if not id:
@@ -508,7 +586,7 @@ class TaskCombiner:
                 return None
 
         def find_task(id):
-            for _, thread_stacks in domain.iteritems(): #look in all threads
+            for _, thread_stacks in domain['tasks'].iteritems(): #look in all threads
                 if thread_stacks['byid'].has_key(id) and len(thread_stacks['byid'][id]):
                     return thread_stacks['byid'][id][-1]
                 else:
@@ -517,6 +595,7 @@ class TaskCombiner:
                             return item
 
         if fn == "task_begin" or fn == "task_begin_overlapped":
+            assert(data.has_key('str') or data.has_key('pointer'))
             self.time_bounds[0] = min(self.time_bounds[0], data['time'])
             get_tasks(None if fn == "task_begin" else data['id']).append(data)
         elif fn == "task_end" or fn == "task_end_overlapped":
@@ -527,7 +606,8 @@ class TaskCombiner:
                 self.complete_task("task", item, data)
             else:
                 assert(self.tree["ring_buffer"] or self.tree['cuts'])
-                self.no_begin.append(data)
+                if data.has_key('str'): #nothing to show without name
+                    self.no_begin.append(data)
         elif fn == "frame_begin":
             get_tasks(data['id'] if data.has_key('id') else None).append(data)
         elif fn == "frame_end":
@@ -537,11 +617,11 @@ class TaskCombiner:
                 self.complete_task("frame", item, data)
             else:
                 assert(self.tree["ring_buffer"] or self.tree['cuts'])
-        elif fn=="metadata_str_add":
+        elif fn=="metadata_add":
             task = get_task(data['id'] if data.has_key('id') else None)
             if task:
                 args = task.setdefault('args', {})
-                args[data['str']] = data['data']
+                args[data['str']] = data['data'] if data.has_key('data') else data['delta']
             else:#global metadata
                 self.global_metadata(data)
         elif fn == "object_snapshot":
@@ -563,6 +643,18 @@ class TaskCombiner:
                     item = markers.pop()
                     self.complete_task("task", item, data)
                 markers.append(data)
+            elif fn == "counter" and self.args.sampling:
+                if (data['time'] - self.prev_sample) > (int(self.args.sampling) * 1000):
+                    if not self.prev_sample:
+                        self.prev_sample = data['time']
+                    else:
+                        self.flush_counters(domain, data)
+                        self.prev_sample = data['time']
+                        domain['counters'] = {}
+                counter = domain['counters'].setdefault(data['str'], {'begin':data['time'], 'end': data['time'], 'values': []})
+                counter['values'].append(data['delta'])
+                counter['begin'] = min(counter['begin'], data['time'])
+                counter['end'] = max(counter['end'], data['time'])
             else:
                 self.complete_task(fn, data, data)
         elif fn == "relation":
@@ -574,32 +666,48 @@ class TaskCombiner:
         else:
             assert(not "Unsupported type:" + fn)
 
+    def flush_counters(self, domain, data):
+        for name, counter in domain['counters'].iteritems():
+            common_data = data.copy()
+            common_data['time'] = counter['begin'] + (counter['end'] - counter['begin']) / 2
+            common_data['str'] = name
+            common_data['delta'] = sum(counter['values']) / len(counter['values'])
+            self.complete_task('counter', common_data, common_data)
+        
 def to_hex(value):
     return "0x" + hex(value).rstrip('L').replace("0x", "").upper()
 
+MAX_GT_SIZE = 100*1024*1024
 class GoogleTrace(TaskCombiner):
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, tree)
         self.args = args
-        self.file = open(self.get_target(), "w")
         self.target_scale_start = 0
         self.source_scale_start = 0
         self.ratio = 1 / 1000.
+        self.size_keeper = None
+        self.targets = []
+        self.trace_number = 0
+        self.start_new_trace()
 
+    def start_new_trace(self):
+        self.targets.append("%s-%d.json" % (self.args.output, self.trace_number))
+        self.trace_number += 1
+        self.file = open(self.targets[-1], "w")
         self.file.write('{')
-        if args.trace:
-            self.handle_ftrace(args.trace)
-        elif args.sync:
-            self.apply_time_sync(args.sync)
+        if self.args.trace:
+            self.handle_ftrace(self.args.trace)
+        elif self.args.sync:
+            self.apply_time_sync(self.args.sync)
         self.file.write('\n"traceEvents": [\n')
 
-        for key, value in tree["threads"].iteritems():
+        for key, value in self.tree["threads"].iteritems():
             self.file.write(
-                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (tree['pid'], key, value)
+                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (self.tree['pid'], key, value)
             )
 
-    def get_target(self):
-        return self.args.output + ".json"
+    def get_targets(self):
+        return self.targets
 
     def convert_time(self, time):
         return (time - self.source_scale_start) * self.ratio + self.target_scale_start
@@ -608,7 +716,8 @@ class GoogleTrace(TaskCombiner):
     def read_ftrace_lines(trace, time_sync):
         write_chrome_time_sync = True
         with open(trace) as file:
-            with Progress(os.path.getsize(trace), 10, "Loading ftrace") as progress:
+            count = 0
+            with Progress(os.path.getsize(trace), 50, "Loading ftrace") as progress:
                 for line in file:
                     if 'IntelSEAPI_Time_Sync' in line:
                         parts = line.split()
@@ -618,7 +727,9 @@ class GoogleTrace(TaskCombiner):
                             write_chrome_time_sync = False #one per trace is enough
                     else:
                         yield line
-                    progress.tick(file.tell())
+                    if count % 1000 == 0:
+                        progress.tick(file.tell())
+                    count += 1
 
     def handle_ftrace(self, trace):
         time_sync = []
@@ -704,9 +815,6 @@ class GoogleTrace(TaskCombiner):
             return '"%s"' % str(arg).replace("\\", "\\\\")
 
     def complete_task(self, type, begin, end):
-        #TODO:
-        #obj tracking: g_TraceEventFormat.WriteEvent(CTraceEventFormat::ObjectNew, std::string(objtype) + ":" + objname, CTraceEventFormat::CArgs(), &rf, kind, &id);
-
         res = []
         phase = {'task':'X', 'counter':'C', 'marker':'i', 'object_new':'N', 'object_snapshot':'O', 'object_delete':'D', 'frame':'X'}
         assert(phase.has_key(type))
@@ -773,9 +881,11 @@ class GoogleTrace(TaskCombiner):
         if args:
             res.append(', "args":')
             res.append(self.format_value(args))
-            res.append(' ');
         res.append('}, ');
         self.file.write("".join(res + ['\n']))
+        if (self.file.tell() > MAX_GT_SIZE):
+            self.finish()
+            self.start_new_trace()
 
     def finish(self):
         self.file.write("{}]}")
@@ -794,14 +904,14 @@ class QTProfiler(TaskCombiner): #https://github.com/danimo/qt-creator/blob/maste
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, tree)
         self.args = args
-        self.file_name = self.get_target()
+        self.file_name = self.get_targets()[-1]
         self.file = open(self.file_name, "w")
         self.notes = []
         self.start_time = None
         self.end_time = None
 
-    def get_target(self):
-        return self.args.output + ".qtd"
+    def get_targets(self):
+        return [self.args.output + ".qtd"]
 
     def set_times(self, start, end):
         if self.start_time is None:
@@ -946,11 +1056,11 @@ class FrameDebugger(TaskCombiner):
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, tree)
         sefl.args = args
-        self.file = open(self.get_target(), "w+b")
+        self.file = open(self.get_targets()[-1], "w+b")
         self.file.write('name, time\n')
 
-    def get_target(self):
-        return self.args.output + ".gpa_csv"
+    def get_targets(self):
+        return [self.args.output + ".gpa_csv"]
 
     def complete_task(self, type, begin, end):
         start_time = round(begin['time'] / 1000)
@@ -964,6 +1074,103 @@ class FrameDebugger(TaskCombiner):
     def join_traces(traces, output):
         raise NotImplementedError()
 
+class GraphViz(TaskCombiner):
+    def __init__(self, args, tree):
+        TaskCombiner.__init__(self, tree)
+        self.args = args
+        self.file = open(self.get_targets()[-1], "w+b")
+        self.per_domain = {}
+        self.relations = set()
+        self.threads = set()
+
+        self.file.write("digraph G{\nedge [labeldistance=0];\nnode [shape=record];\n")
+
+    def get_targets(self):
+        return [self.args.output + ".gv"]
+
+    def complete_task(self, type, begin, end):
+        self.threads.add(begin['tid'])
+        domain = self.per_domain.setdefault(begin['domain'], {'counters': {}, 'objects':{}, 'frames': {}, 'tasks': {}, 'markers': {}})
+        if type == 'task':
+            domain['tasks'].setdefault(begin['str'], []).append(end['time'] - begin['time'])
+            self.relations.add(("executes", "threads", str(begin['tid']), begin['domain'], begin['str']))
+
+        elif type == 'marker':
+            domain['markers'].setdefault(begin['str'], [])
+        elif type == 'frame':
+            pass
+        elif type == 'counter':
+            domain['counters'].setdefault(begin['str'], []).append(begin['delta'])
+        elif 'object' in type:
+            if 'snapshot' in type:
+                return
+            objects = domain['objects'].setdefault(begin['str'], {})
+            object = objects.setdefault(begin['id'], {})
+            if 'new' in type:
+                object['create'] = begin['time']
+            elif 'delete' in type:
+                object['destroy'] = begin['time']
+        else:
+            print "Unhabdled:", type
+
+    def relation(self, data, head, tail):
+        self.relations.add((data['str'], head['domain'], head['str'], tail['domain'], tail['str']))
+
+    def make_id(self, domain, name):
+        import re
+        res = "%s_%s" % (domain, name)
+        return re.sub("[^a-z0-9]", "_", res.lower())
+
+    def escape(self, name):
+        return cgi.escape(name)
+
+    def finish(self):
+        cluster_index = 0
+        clusters = {}
+        for domain, data in self.per_domain.iteritems():
+            cluster = clusters.setdefault(cluster_index, [])
+            cluster.append('subgraph cluster_%d {\nlabel = "%s";' % (cluster_index, domain))
+            #counters
+            for counter_name, counter_data in data['counters'].iteritems():
+                id = self.make_id(domain, counter_name)
+                self.file.write('%s [label="{COUNTER: %s|min=%g|max=%g|avg=%g}"];\n' % (id, self.escape(counter_name), min(counter_data), max(counter_data), sum(counter_data) / len(counter_data)))
+                cluster.append("%s;" % (id))
+            #tasks
+            for task_name, task_data in data['tasks'].iteritems():
+                id = self.make_id(domain, task_name)
+                self.file.write('%s [label="{TASK: %s|min=%s|max=%s|avg=%s|count=%d}"];\n' % (id, self.escape(task_name), format_time(min(task_data)), format_time(max(task_data)), format_time(sum(task_data) / len(task_data)), len(task_data)))
+                cluster.append("%s;" % (id))
+            #: {}, 'objects':{}, 'frames': {}, 'markers': {}
+            cluster_index += 1
+        #threads
+        clusters[cluster_index] = []
+        cluster = clusters[cluster_index]
+        cluster.append('subgraph cluster_%d {\nlabel = "%s";' % (cluster_index, "threads"))
+        thread_names = self.tree['threads']
+        for tid in self.threads:
+            tid_str, tid_hex = str(tid), to_hex(tid)
+            id = self.make_id("threads", tid_str)
+            thread_name = thread_names[tid_str] if thread_names.has_key(tid_str) else ""
+            self.file.write('%s [label="{THREAD: %s|%s}"];\n' % (id, tid_hex, self.escape(thread_name)))
+            cluster.append("%s;" % (id))
+
+        #clusters
+        for _, cluster in clusters.iteritems():
+            for line in cluster:
+                self.file.write(line + "\n")
+            self.file.write("}\n")
+        #relations
+        for relation in self.relations:
+            from_id = self.make_id(relation[1], relation[2])
+            to_id = self.make_id(relation[3], relation[4])
+            color = 'gray' if relation[0] == 'executes' else 'black'
+            self.file.write('edge [label="%s" color=%s fontcolor=%s];\n%s->%s;\n' % (relation[0], color, color, from_id, to_id))
+        self.file.write("}\n")
+        self.file.close()
+
+    @staticmethod
+    def join_traces(traces, output):
+        pass
 
 ###################################
 # TODO: add OS events (sched/vsync)
@@ -976,14 +1183,14 @@ class BestTraceFormat(TaskCombiner):
         """Open the .btf file and write its header."""
         TaskCombiner.__init__(self, tree)
         self.args = args
-        self.file = open(self.get_target(), "w+b")
+        self.file = open(self.get_targets()[-1], "w+b")
         self.file.write('#version 2.1.3\n')
         self.file.write('#creator GDP-SEA\n')
         self.file.write('#creationDate 2014-02-19T11:39:20Z\n')
         self.file.write('#timeScale ns\n')
 
-    def get_target(self):
-        return self.args.output + ".btf"
+    def get_targets(self):
+        return [self.args.output + ".btf"]
 
     def complete_task(self, type, b, e):
         """
@@ -1091,9 +1298,12 @@ def transform_etw_xml(args):
         if callbacks.is_empty():
             return callbacks.get_result()
         with open(args.input) as file:
-            with Progress(os.path.getsize(args.input), 100, "Parsing ETW XML: " + args.input) as progress:
+            count = 0
+            with Progress(os.path.getsize(args.input), 50, "Parsing ETW XML: " + args.input) as progress:
                 def on_event(system, data, info):
-                    progress.tick(file.tell())
+                    if count % 1000 == 0:
+                        progress.tick(file.tell())
+                        count += 1
                     if not info or not data:
                         return
                     call_data = {

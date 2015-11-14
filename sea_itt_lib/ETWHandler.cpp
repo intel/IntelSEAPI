@@ -54,5 +54,5 @@ public:
         EventWriteCOUNTER(pDomain->nameA, pName->strA, value);
     }
 
-}* g_pETWHandler = IHandler::Register<CETW>(!!IntelSEAPI_Context.IsEnabled);
+}* g_pETWHandler = IHandler::Register<CETW>(true);
 

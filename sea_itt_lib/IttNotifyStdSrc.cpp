@@ -117,10 +117,11 @@ public:
     }
 };
 
-#define ITT_FUNCTION_STAT() CIttFnStat oIttFnStat(__FUNCTION__)
-
-uint64_t g_nRingBuffer = 1000000000ull * atoi(get_environ_value("INTEL_SEA_RING").c_str()); //in nanoseconds
-uint64_t g_features = sea::GetFeatureSet();
+#ifdef _DEBUG
+    #define ITT_FUNCTION_STAT() CIttFnStat oIttFnStat(__FUNCTION__)
+#else
+    #define ITT_FUNCTION_STAT()
+#endif
 
 #ifdef _WIN32
 #include <io.h>
@@ -175,6 +176,9 @@ inline bool operator == (const __itt_id& left, const __itt_id& right)
 
 namespace sea {
 
+uint64_t g_nRingBuffer = 1000000000ull * atoi(get_environ_value("INTEL_SEA_RING").c_str()); //in nanoseconds
+uint64_t g_nAutoCut = 1024ull * 1024 * atoi(get_environ_value("INTEL_SEA_AUTOCUT").c_str()); //in MB
+uint64_t g_features = sea::GetFeatureSet();
 
 struct DomainExtra
 {
@@ -311,7 +315,7 @@ CRecorder* GetFile(const SRecord& record)
         pThreadRecord->files.clear();
     }
 
-    auto it = pThreadRecord->files.find(&record.domain);
+    auto it = pThreadRecord->files.find(record.domain.nameA);
     CRecorder* pRecorder = nullptr;
     if (it != pThreadRecord->files.end())
     {
@@ -328,7 +332,7 @@ CRecorder* GetFile(const SRecord& record)
 
     if (!pRecorder)
     {
-        pRecorder = &pThreadRecord->files[&record.domain];
+        pRecorder = &pThreadRecord->files[record.domain.nameA];
     }
     CIttLocker lock; //locking only on file creation
     if (pDomainExtra->strDomainPath.empty()) //this is theoretically possible because we check pDomainExtra->bHasDomainPath without lock above
@@ -344,12 +348,13 @@ CRecorder* GetFile(const SRecord& record)
             (g_nRingBuffer ? ((pRecorder->GetCount() % 2) ? "-1" : "-0") : "")
     );
     try {
+        VerbosePrint("Opening: %s\n", path);
         pRecorder->Init(path, rf.nanoseconds, spCutName.get());
     }
     catch (const std::exception& exc)
     {
         VerbosePrint("Exception: %s\n", exc.what());
-        pThreadRecord->files.erase(&record.domain);
+        pThreadRecord->files.erase(record.domain.nameA);
         return nullptr;
     }
 
@@ -507,7 +512,8 @@ void task_begin_fn(const __itt_domain *pDomain, __itt_id taskid, __itt_id parent
         pThreadRecord->pTask, //chaining the previous task inside
         rf,
         pDomain, nullptr,
-        taskid, parentid
+        taskid, parentid,
+        fn
     };
 
     for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
@@ -542,7 +548,7 @@ void task_end(const __itt_domain *pDomain)
     pThreadRecord->pTask = prev;
 }
 
-void Counter(const __itt_domain *pDomain, __itt_string_handle *pName, double value, __itt_clock_domain* clock_domain, unsigned long long timestamp, bool bMetricsFramework)
+void Counter(const __itt_domain *pDomain, __itt_string_handle *pName, double value, __itt_clock_domain* clock_domain, unsigned long long timestamp)
 {
     CTraceEventFormat::SRegularFields rf = GetRegularFields(clock_domain, timestamp);
 
@@ -775,8 +781,6 @@ void task_end_ex(const __itt_domain* pDomain, __itt_clock_domain* clock_domain, 
     FIX_DOMAIN(pDomain);
 
     CTraceEventFormat::SRegularFields rf = GetRegularFields(clock_domain, timestamp);
-    WriteRecord(ERecordType::EndTask, SRecord{rf, *pDomain, __itt_null, __itt_null});
-
 
     SThreadRecord* pThreadRecord = GetThreadRecord();
     if (!pThreadRecord->pTask)
@@ -893,6 +897,18 @@ public:
         return true;
     }
 
+    bool AddArg(const __itt_domain *domain, __itt_id id, __itt_string_handle *key, double value)
+    {
+        TTaskMap::iterator it = m_map.find(id);
+        if (m_map.end() == it)
+            return false;
+        for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
+        {
+            g_handlers[i]->AddArg(*m_map[id], key, value);
+        }
+        return true;
+    }
+
     void End(__itt_id taskid, const CTraceEventFormat::SRegularFields& rf, const __itt_domain* domain)
     {
         TTaskMap::iterator it = m_map.find(taskid);
@@ -964,19 +980,19 @@ void task_end_overlapped(const __itt_domain *pDomain, __itt_id taskid)
     task_end_overlapped_ex(pDomain, nullptr, 0, taskid);
 }
 
-void MetadataStrAdd(const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pKey, const char *data, size_t length)
+template<class ... Args>
+void MetadataAdd(const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pKey, Args ... args)
 {
     CTraceEventFormat::SRegularFields rf = GetRegularFields();
-    if (!length) length = data ? strlen(data) : 0;
 
     if (id.d1 || id.d2) //task can have id and not be overlapped, it would be stored in pThreadRecord->pTask then
     {
         SThreadRecord* pThreadRecord = GetThreadRecord();
-        if (!COverlapped::Get().AddArg(pDomain, id, pKey, data, length) && pThreadRecord->pTask->id == id)
+        if (!COverlapped::Get().AddArg(pDomain, id, pKey, args...) && pThreadRecord->pTask->id == id)
         {
             for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
             {
-                g_handlers[i]->AddArg(*pThreadRecord->pTask, pKey, data, length);
+                g_handlers[i]->AddArg(*pThreadRecord->pTask, pKey, args...);
             }
         }
     }
@@ -1014,7 +1030,9 @@ void UNICODE_AGNOSTIC(metadata_str_add)(const __itt_domain *pDomain, __itt_id id
             return;
         }
     }
-    MetadataStrAdd(pDomain, id, pKey, data, length);
+    if (!length)
+        length = data ? strlen(data) : 0;
+    MetadataAdd(pDomain, id, pKey, data, length);
 }
 
 #ifdef _WIN32
@@ -1024,27 +1042,18 @@ void metadata_str_addW(const __itt_domain *pDomain, __itt_id id, __itt_string_ha
 }
 #endif
 
-std::string ConvertPtr(void* ptr, size_t)
+std::string ConvertPtr(void* ptr)
 {
     char str[100] = {};
     _sprintf(str, "0x%p", ptr);
     return str;
 }
 template<class T>
-std::string Convert(void* ptr, size_t count)
+double Convert(void* ptr)
 {
-    std::string res;
-    if (T* pData = reinterpret_cast<T*>(ptr))
-    {
-        while (count--)
-        {
-            res += std::to_string(*pData++) + " ";
-        }
-        return res;
-    }
-    return ConvertPtr(ptr, 0);
+    return double(*reinterpret_cast<T*>(ptr));
 }
-typedef std::string (*FConvert)(void* ptr, size_t count);
+typedef double (*FConvert)(void* ptr);
 
 template<class T>
 double ConvertNumber(void* ptr)
@@ -1063,20 +1072,28 @@ void metadata_add(const __itt_domain *pDomain, __itt_id id, __itt_string_handle 
 
     if (id.d1 || id.d2)
     {
-        static FConvert formats[] = {
-            ConvertPtr,
-            Convert<uint64_t>,
-            Convert<int64_t>,
-            Convert<uint32_t>,
-            Convert<int32_t>,
-            Convert<uint16_t>,
-            Convert<int16_t>,
-            Convert<float>,
-            Convert<double>,
-        };
-        FConvert fnConvert = formats[type];
-        std::string res = fnConvert(data, count);
-        MetadataStrAdd(pDomain, id, pKey, res.c_str(), res.size());
+        if (__itt_metadata_unknown != type && data)
+        {
+            static FConvert formats[] = {
+                nullptr,
+                Convert<uint64_t>,
+                Convert<int64_t>,
+                Convert<uint32_t>,
+                Convert<int32_t>,
+                Convert<uint16_t>,
+                Convert<int16_t>,
+                Convert<float>,
+                Convert<double>,
+            };
+            FConvert fnConvert = formats[type];
+            double res = fnConvert(data);
+            MetadataAdd(pDomain, id, pKey, res);
+        }
+        else
+        {
+            std::string res = ConvertPtr(data);
+            MetadataAdd(pDomain, id, pKey, res.c_str(), res.size());
+        }
     }
     else //it's a counter
     {
@@ -1252,6 +1269,124 @@ void relation_add_to_current_ex(const __itt_domain *pDomain, __itt_clock_domain*
     relation_add_ex(pDomain, clock_domain, timestamp, __itt_null, relation, tail);
 }
 
+struct SHeapFunction
+{
+    __itt_domain* pDomain;
+    std::string name;
+    ___itt_string_handle* pName;
+};
+
+__itt_heap_function ITTAPI UNICODE_AGNOSTIC(heap_function_create)(const char* name, const char* domain)
+{
+    ITT_FUNCTION_STAT();
+    std::string counter_name = std::string(name) + ":ALL(bytes)";
+    return new SHeapFunction
+    {
+        UNICODE_AGNOSTIC(domain_create)(domain),
+        name,
+        UNICODE_AGNOSTIC(string_handle_create)(counter_name.c_str())
+    };
+}
+
+#ifdef _WIN32
+__itt_heap_function ITTAPI heap_function_createW(const wchar_t* name, const wchar_t* domain)
+{
+    return UNICODE_AGNOSTIC(heap_function_create)(W2L(name).c_str(), W2L(domain).c_str());
+}
+#endif
+
+class CMemoryTracker
+{
+protected:
+    TCritSec m_cs;
+    std::map<const void*, size_t> m_size_map;
+    std::map<size_t, std::pair<__itt_string_handle*, size_t>> m_counter_map;
+    bool m_bInitialized = false;
+    size_t m_common_size = 0;
+public:
+    CMemoryTracker()
+        : m_bInitialized(true)
+    {}
+    void Alloc(SHeapFunction* pHeapFunction, const void* addr, size_t size)
+    {
+        if (!m_bInitialized) return;
+        std::lock_guard<TCritSec> lock(m_cs);
+        m_size_map[addr] = size;
+        auto it = m_counter_map.find(size);
+        if (m_counter_map.end() == it)
+        {
+            std::string name = pHeapFunction->name + std::string(":size<") + std::to_string(size) + ">(count)";
+            __itt_string_handle* pName = UNICODE_AGNOSTIC(string_handle_create)(name.c_str());
+            it = m_counter_map.insert(m_counter_map.end(), std::make_pair(size, std::make_pair(pName, size_t(1))));
+        }
+        else
+        {
+            ++it->second.second;
+        }
+        m_common_size += size;
+        Counter(pHeapFunction->pDomain, it->second.first, double(it->second.second));
+/*XXX
+        Counter(pHeapFunction->pDomain, pHeapFunction->pName, double(m_common_size));
+        if (STaskDescriptor* pTask = GetThreadRecord()->pTask)
+        {
+            for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
+            {
+                //TODO: this show blocks allocated by this task with their number on this moment
+                //but user needs to know how many is allocated by this task, not common value on this moment
+                std::string data = std::to_string(it->second.second);
+                g_handlers[i]->AddArg(*pTask, it->second.first, data.c_str(), data.size());
+            }
+        }
+*/
+    }
+
+    void Free(SHeapFunction* pHeapFunction, const void* addr)
+    {
+        if (!m_bInitialized) return;
+        std::lock_guard<TCritSec> lock(m_cs);
+        size_t size = m_size_map[addr];
+        m_size_map.erase(addr);
+        auto it = m_counter_map.find(size);
+        if (m_counter_map.end() == it)
+        {
+            return; //how come?
+        }
+        else
+        {
+            --it->second.second;
+        }
+        m_common_size -= size;
+        Counter(pHeapFunction->pDomain, it->second.first, double(it->second.second));
+    }
+
+    ~CMemoryTracker()
+    {
+        m_bInitialized = false;
+    }
+} g_oMemoryTracker;
+
+void heap_allocate_begin(__itt_heap_function h, size_t size, int initialized)
+{
+    ITT_FUNCTION_STAT();
+}
+
+void heap_allocate_end(__itt_heap_function h, void** addr, size_t size, int)
+{
+    ITT_FUNCTION_STAT();
+    g_oMemoryTracker.Alloc(reinterpret_cast<SHeapFunction*>(h), *addr, size);
+}
+
+void heap_free_begin(__itt_heap_function h, void* addr)
+{
+    ITT_FUNCTION_STAT();
+    g_oMemoryTracker.Free(reinterpret_cast<SHeapFunction*>(h), addr);
+}
+
+void heap_free_end(__itt_heap_function h, void* addr)
+{
+    ITT_FUNCTION_STAT();
+}
+
 #ifdef _WIN32
     #define WIN(something) something
 #else
@@ -1313,8 +1448,13 @@ _AW(ITT_STUB_IMPL,sync_rename)\
     ITT_STUB_IMPL(sync_cancel)\
     ITT_STUB_IMPL(relation_add_to_current)\
     ITT_STUB_IMPL(relation_add)\
-    ITT_STUB_NO_IMPL(relation_add_to_current_ex)\
-    ITT_STUB_NO_IMPL(relation_add_ex)\
+    ITT_STUB_IMPL(relation_add_to_current_ex)\
+    ITT_STUB_IMPL(relation_add_ex)\
+_AW(ITT_STUB_IMPL,heap_function_create)\
+    ITT_STUB_IMPL(heap_allocate_begin)\
+    ITT_STUB_IMPL(heap_allocate_end)\
+    ITT_STUB_IMPL(heap_free_begin)\
+    ITT_STUB_IMPL(heap_free_end)\
     ORIGINAL_FUNCTIONS()\
     ITT_STUB_NO_IMPL(thread_ignore)\
 _AW(ITT_STUB_NO_IMPL,thr_name_set)\
@@ -1356,11 +1496,6 @@ WIN(ITT_STUB_NO_IMPL(model_iteration_taskW))\
     ITT_STUB_NO_IMPL(model_aggregate_task)\
     ITT_STUB_NO_IMPL(model_disable_push)\
     ITT_STUB_NO_IMPL(model_disable_pop)\
-_AW(ITT_STUB_NO_IMPL,heap_function_create)\
-    ITT_STUB_NO_IMPL(heap_allocate_begin)\
-    ITT_STUB_NO_IMPL(heap_allocate_end)\
-    ITT_STUB_NO_IMPL(heap_free_begin)\
-    ITT_STUB_NO_IMPL(heap_free_end)\
     ITT_STUB_NO_IMPL(heap_reallocate_begin)\
     ITT_STUB_NO_IMPL(heap_reallocate_end)\
     ITT_STUB_NO_IMPL(heap_internal_access_begin)\
@@ -1472,10 +1607,10 @@ void TraverseThreadRecords(const std::function<void(SThreadRecord&)>& callback)
     );
 }
 
-void SetCutName(const std::string& path)
+void SetCutName(const std::string& name)
 {
     CIttLocker lock;
-    g_spCutName = std::make_shared<std::string>(Escape4Path(path));
+    g_spCutName = std::make_shared<std::string>(Escape4Path(name));
 }
 
 //in global scope variables are initialized from main thread

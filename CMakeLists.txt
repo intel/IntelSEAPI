@@ -65,8 +65,10 @@ endforeach( OUTPUTCONFIG CMAKE_CONFIGURATION_TYPES )
 
 add_executable(IntelSEAPI
     main.cpp
+    memory.cpp
     buildall.py
     runtool/sea_runtool.py
+    README.txt
 )
 
 if(APPLE)
@@ -103,5 +105,6 @@ else()
     TARGET_LINK_LIBRARIES(IntelSEAPI dl)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -fPIC -pthread")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pie -Wl,--no-undefined")
+    #SET_TARGET_PROPERTIES(IntelSEAPI PROPERTIES COMPILE_FLAGS "-finstrument-functions")
 endif()
 

@@ -19,6 +19,123 @@
 #pragma once
 #include <cstdlib>
 #include <vector>
+#include <string>
+#include <stdint.h>
+#include <sstream>
+#include <fstream>
+#include <assert.h>
+#include <mutex>
+#include <future>
+#include <chrono>
+#include <map>
+
+
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <sys/types.h>
+    #include <sys/stat.h>
+    #include <fcntl.h>
+#endif
+
+#if defined(__ANDROID__)
+    #include <sstream>
+    namespace std { //android NDK is missing this functionality
+        template <typename T>
+        std::string to_string(T value)
+        {
+            std::ostringstream os ;
+            os << value ;
+            return os.str() ;
+        }
+    }
+
+#endif
+
+static std::string get_environ_value(const std::string& name)
+{
+#ifdef _WIN32
+    size_t sz;
+    char *v = NULL;
+    _dupenv_s(&v, &sz, name.c_str());
+
+    std::string ret = v ? v : "";
+    free(v);
+
+    return ret;
+#else
+    const char *v = getenv(name.c_str());
+    return v ? v : "";
+#endif
+}
+
+#ifdef _WIN32
+
+    //there is bug in VS2012 implementation: high_resolution_clock is in fact not high res...
+    struct SHiResClock
+    {
+        typedef uint64_t                                rep;
+        typedef std::nano                               period;
+        typedef std::chrono::duration<rep, period>      duration;
+        typedef std::chrono::time_point<SHiResClock>    time_point;
+        static const bool is_steady = true;
+        static uint64_t now64() //in nanoseconds
+        {
+            static long long frequency = 0;
+            if (!frequency)
+            {
+                QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
+            }
+
+            LARGE_INTEGER count = {};
+            QueryPerformanceCounter(&count);
+            return count.QuadPart * static_cast<rep>(period::den) / frequency;
+        }
+        static time_point now()
+        {
+            static long long frequency = 0;
+            if (!frequency)
+            {
+                QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
+            }
+
+            LARGE_INTEGER count = {};
+            QueryPerformanceCounter(&count);
+            return time_point(duration(count.QuadPart * static_cast<rep>(period::den) / frequency));
+        }
+    };
+
+#else
+
+    typedef std::chrono::high_resolution_clock SHiResClock;
+#endif
+
+#ifdef _MSC_VER //std::mutex won't work in static constructors due to MS bug
+    class CCriticalSection
+    {
+        CRITICAL_SECTION m_cs;
+    public:
+        CCriticalSection()
+        {
+            InitializeCriticalSection(&m_cs);
+        }
+        void lock()
+        {
+            EnterCriticalSection(&m_cs);
+        }
+        void unlock()
+        {
+            LeaveCriticalSection(&m_cs);
+        }
+        ~CCriticalSection()
+        {
+            DeleteCriticalSection(&m_cs);
+        }
+    };
+    typedef CCriticalSection TCritSec;
+#else
+    typedef std::recursive_mutex TCritSec;
+#endif
 
 #ifdef _MSC_VER
     #define thread_local __declspec(thread)
@@ -83,5 +200,19 @@ inline void placement_free(T* ptr)
 {
     CPlacementPool<sizeof(T)>::Free(ptr);
 }
+
+class CScope
+{
+protected:
+    std::function<void(void)> m_fn;
+public:
+    CScope(const std::function<void(void)>& fn)
+        : m_fn(fn)
+    {}
+    ~CScope()
+    {
+        m_fn();
+    }
+};
 
 

@@ -34,6 +34,8 @@ class CDTrace: public IHandler
 
     void TaskEnd(STaskDescriptor& oTask, const CTraceEventFormat::SRegularFields&, bool bOverlapped) override
     {
+        if (!oTask.pName) //TODO: task_begin_fn is not yet supported
+            return;
         if (bOverlapped)
         {
             DTraceTaskEndOverlapped(oTask.pDomain->nameA, oTask.id.d1, Cookie<CTraceEventFormat::CArgs>(oTask).Str().c_str(), oTask.pName->strA);
