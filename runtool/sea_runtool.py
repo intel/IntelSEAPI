@@ -1141,7 +1141,10 @@ class GraphViz(TaskCombiner):
         self.threads.add(begin['tid'])
         domain = self.per_domain.setdefault(begin['domain'], {'counters': {}, 'objects':{}, 'frames': {}, 'tasks': {}, 'markers': {}})
         if type == 'task':
-            domain['tasks'].setdefault(begin['str'], []).append(end['time'] - begin['time'])
+            task = domain['tasks'].setdefault(begin['str'], {'time': []})
+            task['time'].append(end['time'] - begin['time'])
+            if begin.has_key('__file__'):
+                task['src'] = begin['__file__'] + ":" + begin['__line__']
             stack = self.domains[begin['domain']]['tasks'][begin['tid']]['stack']
             if len(stack):
                 parent = stack[-1]
@@ -1197,21 +1200,23 @@ class GraphViz(TaskCombiner):
             #tasks
             for task_name, task_data in data['tasks'].iteritems():
                 id = self.make_id(domain, task_name)
-                self.file.write('%s [label="{TASK: %s|min=%s|max=%s|avg=%s|count=%d}"];\n' % (id, self.escape(task_name), format_time(min(task_data)), format_time(max(task_data)), format_time(sum(task_data) / len(task_data)), len(task_data)))
+                time = task_data['time']
+                self.file.write('%s [label="{TASK: %s|min=%s|max=%s|avg=%s|count=%d%s}"];\n' % (
+                        id,
+                        self.escape(task_name), format_time(min(time)), format_time(max(time)), format_time(sum(time) / len(time)), len(time),
+                        (("|%s" % task_data['src'].replace('\\','/')) if task_data.has_key('src') else "")
+                    )
+                )
                 cluster.append("%s;" % (id))
             #: {}, 'objects':{}, 'frames': {}, 'markers': {}
             cluster_index += 1
         #threads
-        #clusters[cluster_index] = []
-        #cluster = clusters[cluster_index]
-        #cluster.append('subgraph cluster_%d {\nlabel = "%s";' % (cluster_index, "threads"))
         thread_names = self.tree['threads']
         for tid in self.threads:
             tid_str, tid_hex = str(tid), to_hex(tid)
             id = self.make_id("threads", tid_str)
             thread_name = thread_names[tid_str] if thread_names.has_key(tid_str) else ""
             self.file.write('%s [label="{THREAD: %s|%s}" color=gray fontcolor=gray];\n' % (id, tid_hex, self.escape(thread_name)))
-            #cluster.append("%s;" % (id))
 
         #clusters
         for _, cluster in clusters.iteritems():
