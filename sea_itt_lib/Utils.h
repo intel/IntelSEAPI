@@ -89,19 +89,11 @@ static std::string get_environ_value(const std::string& name)
 
             LARGE_INTEGER count = {};
             QueryPerformanceCounter(&count);
-            return count.QuadPart * static_cast<rep>(period::den) / frequency;
+            return uint64_t(double(count.QuadPart) / frequency * static_cast<rep>(period::den));
         }
         static time_point now()
         {
-            static long long frequency = 0;
-            if (!frequency)
-            {
-                QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
-            }
-
-            LARGE_INTEGER count = {};
-            QueryPerformanceCounter(&count);
-            return time_point(duration(count.QuadPart * static_cast<rep>(period::den) / frequency));
+            return time_point(duration(now64()));
         }
     };
 

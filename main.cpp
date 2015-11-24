@@ -481,7 +481,21 @@ int main(int argc, char* argv[])
 #endif
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     // Create a task associated with the "main" routine.
-    __itt_task_begin(domain, __itt_null, __itt_null, handle_main);
+
+    __itt_id task_id = __itt_id_make(&task_id, 0);
+    __itt_task_begin(domain, task_id, __itt_null, handle_main);
+
+#ifdef _WIN32
+    static long long frequency = 0;
+    if (!frequency)
+        QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
+    __itt_metadata_add(domain, task_id, __itt_string_handle_create("freq"), __itt_metadata_s64, 1, &frequency);
+
+
+    LARGE_INTEGER qpc = {};
+    QueryPerformanceCounter(&qpc);
+    __itt_metadata_add(domain, task_id, __itt_string_handle_create("begin"), __itt_metadata_s64, 1, &qpc);
+#endif
     // Save the name of the app's exe that we can show when analyzing traces.
     __itt_metadata_str_add(domain, __itt_null, handle_exe_name, argv[0], 0);
     // Now we'll create 3 worker threads
@@ -505,6 +519,10 @@ int main(int argc, char* argv[])
     __itt_region_begin(domain, region2id, __itt_null, handle_region2);
 
     g_done = true;
+#ifdef _WIN32
+    QueryPerformanceCounter(&qpc);
+    __itt_metadata_add(domain, task_id, __itt_string_handle_create("end"), __itt_metadata_s64, 1, &qpc);
+#endif
     // Mark the end of the main task
     __itt_task_end(domain);
 

@@ -20,6 +20,8 @@ public:
     //TODO: It can be called from task_begin_ex. May be ROI allows taking time from records?
     void TaskBegin(STaskDescriptor& oTask, bool bOverlapped) override
     {
+        if (!oTask.pName)
+            return;
         if (bOverlapped)
         {
             EventWriteTASK_BEGIN(oTask.pDomain->nameA, oTask.pName->strA, &IdCaster{oTask.id}.to, &IdCaster{oTask.parent}.to, ~0x0, ~0x0);

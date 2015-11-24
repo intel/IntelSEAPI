@@ -123,6 +123,23 @@ def start_ftrace(args):
     echo("*:*", "/sys/kernel/debug/tracing/set_event") #enabling all events
     return FTrace(args)
 
+class ETWTrace:
+    def __init__(self, args):
+        self.file = args.output + ".etl"
+
+    def start(self):
+        process = Popen('logman start "NT Kernel Logger" -p "Windows Kernel Trace" (process,thread,cswitch) -ct perf -o "%s" -ets' % (self.file), shell=True)
+        process.wait()
+        return 0 == process.returncode
+
+    def stop(self):
+        Popen('logman stop "NT Kernel Logger" -ets', shell=True).wait()
+        return self.file
+
+def start_etw(args):
+    trace = ETWTrace(args)
+    return trace if trace.start() else None
+
 def launch(args, victim):
     env={}
     script_dir = os.path.abspath(args.bindir) if args.bindir else os.path.dirname(os.path.realpath(__file__))
@@ -162,12 +179,17 @@ def launch(args, victim):
     if 'kernelshark' in args.format:
         victim = 'trace-cmd record -e IntelSEAPI/* ' + victim
 
-    ftrace = start_ftrace(args) if ('gt' in args.format and 'linux' in sys.platform and args.output) else False
+    tracer = None
+    if ('gt' in args.format and args.output):
+        if 'linux' in sys.platform:
+            tracer = start_ftrace(args)
+        elif 'win32' == sys.platform:
+            tracer = start_etw(args)
 
     proc = Popen(victim, env=env, shell=False, cwd=args.dir)
     proc.wait()
-    if ftrace:
-        args.trace = ftrace.stop()
+    if tracer:
+        args.trace = tracer.stop()
     if args.output:
         args.input = "%s-%d" % (args.output, proc.pid)
         output = transform(args)
@@ -242,6 +264,7 @@ class Progress:
             g_progress_interceptor(self.message, self.total, self.total)
         self.show_progress(self.steps)
         print "]"
+        return False
 
     @staticmethod
     def set_interceptor(interceptor):
@@ -344,6 +367,9 @@ class FileWrapper:
         self.file = open(path, "rb")
         self.record = self.read()
 
+    def __del__(self):
+        self.file.close()
+
     def next(self):
         self.record = self.read()
 
@@ -432,7 +458,7 @@ def transform2(args, tree, skip_fn = None):
             print path
             progress = DummyWith()
         else:
-            progress = Progress(sum([file.get_size() for file in files]), 50, "Progress")
+            progress = Progress(sum([file.get_size() for file in files]), 50, "Translation")
 
         with progress:
             count = 0
@@ -458,7 +484,6 @@ def transform2(args, tree, skip_fn = None):
                     callbacks.on_event(TaskTypes[record['type']], record)
                 elif args.verbose:
                     print "skipped due to limits"
-
                 count += 1
 
     return callbacks.get_result()
@@ -519,8 +544,8 @@ def attachme():
     import time
     time.sleep(1)
 
-
 class TaskCombiner:
+    disable_handling_leftovers = False
     def __enter__(self):
         return self
     def __exit__(self, type, value, traceback):
@@ -544,6 +569,8 @@ class TaskCombiner:
         pass
 
     def handle_leftovers(self):
+        if TaskCombiner.disable_handling_leftovers:
+            return
         for end in self.no_begin:
             begin = end.copy()
             begin['time'] = self.time_bounds[0]
@@ -689,6 +716,7 @@ class GoogleTrace(TaskCombiner):
         self.targets = []
         self.trace_number = 0
         self.start_new_trace()
+        self.counters = {}
 
     def start_new_trace(self):
         self.targets.append("%s-%d.json" % (self.args.output, self.trace_number))
@@ -696,7 +724,10 @@ class GoogleTrace(TaskCombiner):
         self.file = open(self.targets[-1], "w")
         self.file.write('{')
         if self.args.trace:
-            self.handle_ftrace(self.args.trace)
+            if self.args.trace.endswith(".etl"):
+                self.handle_etw_trace(self.args.trace)
+            else:
+                self.handle_ftrace(self.args.trace)
         elif self.args.sync:
             self.apply_time_sync(self.args.sync)
         self.file.write('\n"traceEvents": [\n')
@@ -740,6 +771,9 @@ class GoogleTrace(TaskCombiner):
         self.file.write('",\n')
         self.apply_time_sync(time_sync)
 
+    def handle_etw_trace(self, trace):
+        pass
+
     def apply_time_sync(self, time_sync):
         Target = 0
         Source = 1
@@ -781,14 +815,17 @@ class GoogleTrace(TaskCombiner):
 
 
     def global_metadata(self, data):
-        if data['str'] == "__process__":
+        if data['str'] == "__process__": #this is the very first record in the trace
             self.file.write(
                 '{"name": "process_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], data['data'].replace("\\", "\\\\"))
             )
-            if not self.tree['threads'].has_key(str(data['tid'])):
+            if data['tid'] != -1 and not self.tree['threads'].has_key(str(data['tid'])):
                 self.file.write(
                     '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], "<main>")
                 )
+            self.file.write(
+                '{"name": "start of trace", "dur":0, "ph":"X", "pid":%d, "tid":%s, "ts":%.3f},\n' % (data['pid'], data['tid'], self.convert_time(data['time']))
+            )
 
     def relation(self, data, head, tail):
         if not head or not tail:
@@ -797,8 +834,8 @@ class GoogleTrace(TaskCombiner):
         template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%.3f, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
         if not data.has_key('str'):
             data['str'] = "unknown"
-        self.file.write(template % ("s", data['pid'], items[0]['tid'], self.convert_time(items[0]['time']), data['parent'], data['str'], data['domain']))
-        self.file.write(template % ("f", data['pid'], items[1]['tid'], self.convert_time(items[1]['time']), data['parent'], data['str'], data['domain']))
+        self.file.write(template % ("s", items[0]['pid'], items[0]['tid'], self.convert_time(items[0]['time']), data['parent'], data['str'], data['domain']))
+        self.file.write(template % ("f", items[1]['pid'], items[1]['tid'], self.convert_time(items[1]['time']), data['parent'], data['str'], data['domain']))
 
     def format_value(self, arg): #this function must add quotes if value is string, and not number/float, do this recursively for dictionary
         if type(arg) == type({}):
@@ -821,7 +858,8 @@ class GoogleTrace(TaskCombiner):
         res.append('{"ph":"%s"' % (phase[type]))
         res.append(', "pid":%(pid)d, "tid":%(tid)d' % begin)
         res.append(', "ts":%.3f' % (self.convert_time(begin['time'])))
-
+        if "counter" == type: #workaround of chrome issue with forgetting the last counter value
+            self.counters.setdefault(begin['domain'], {})[begin['str']] = begin #remember the last counter value
         if "marker" == type:
             name = begin['str']
             markers = {
@@ -887,6 +925,13 @@ class GoogleTrace(TaskCombiner):
             self.finish()
             self.start_new_trace()
 
+    def handle_leftovers(self):
+        TaskCombiner.handle_leftovers(self)
+        for counters in self.counters.itervalues(): #workaround: google trace forgets counter last value
+            for counter in counters.itervalues():
+                counter['time'] += 1 #so, we repeat it on the end of the trace
+                self.complete_task("counter", counter, counter)
+
     def finish(self):
         self.file.write("{}]}")
         self.file.close()
@@ -894,9 +939,13 @@ class GoogleTrace(TaskCombiner):
     @staticmethod
     def join_traces(traces, output):
         import zipfile
-        with zipfile.ZipFile(output + ".zip", 'w') as zip:
-            for file in traces:
-                zip.write(file, os.path.basename(file))
+        with zipfile.ZipFile(output + ".zip", 'w', zipfile.ZIP_DEFLATED, allowZip64 = True) as zip:
+            count = 0
+            with Progress(len(traces), 50, "Merging traces") as progress:
+                for file in traces:
+                    progress.tick(count)
+                    zip.write(file, os.path.basename(file))
+                    count += 1
         return output + ".zip"
 
 
@@ -1016,10 +1065,10 @@ class QTProfiler(TaskCombiner): #https://github.com/danimo/qt-creator/blob/maste
     def join_traces(traces, output):
         import xml.dom.minidom as minidom
         output += ".qtd"
-        with open(output, "w") as file:
+        with open(output, "w") as file: #FIXME: doesn't work on huge traces, consider using "iterparse" approach
             print >>file, '<?xml version="1.0" encoding="UTF-8"?>'
             traces = [minidom.parse(trace) for trace in traces] #parse all traces right away
-            traceStarts = sorted([int(dom.documentElement.attributes['traceStart'].nodeValue) for dom in traces]) #earlist start time
+            traceStarts = sorted([int(dom.documentElement.attributes['traceStart'].nodeValue) for dom in traces]) #earliest start time
             traceEnds = sorted([int(dom.documentElement.attributes['traceEnd'].nodeValue) for dom in traces], reverse = True)#latest end time
             print >>file, '<trace version="1.02" traceStart="%d" traceEnd="%d">' % (traceStarts[0], traceEnds[0])
             print >>file, '<eventData totalTime="%d">' % (traceEnds[0] - traceStarts[0])
@@ -1080,7 +1129,7 @@ class GraphViz(TaskCombiner):
         self.args = args
         self.file = open(self.get_targets()[-1], "w+b")
         self.per_domain = {}
-        self.relations = set()
+        self.relations = {}
         self.threads = set()
 
         self.file.write("digraph G{\nedge [labeldistance=0];\nnode [shape=record];\n")
@@ -1093,8 +1142,12 @@ class GraphViz(TaskCombiner):
         domain = self.per_domain.setdefault(begin['domain'], {'counters': {}, 'objects':{}, 'frames': {}, 'tasks': {}, 'markers': {}})
         if type == 'task':
             domain['tasks'].setdefault(begin['str'], []).append(end['time'] - begin['time'])
-            self.relations.add(("executes", "threads", str(begin['tid']), begin['domain'], begin['str']))
-
+            stack = self.domains[begin['domain']]['tasks'][begin['tid']]['stack']
+            if len(stack):
+                parent = stack[-1]
+                self.add_relation({'label':'calls', 'from': self.make_id(parent['domain'], parent['str']), 'to': self.make_id(begin['domain'], begin['str'])})
+            else:
+                self.add_relation({'label':'executes', 'from': self.make_id("threads", str(begin['tid'])), 'to': self.make_id(begin['domain'], begin['str']), 'color': 'gray'})
         elif type == 'marker':
             domain['markers'].setdefault(begin['str'], [])
         elif type == 'frame':
@@ -1111,10 +1164,16 @@ class GraphViz(TaskCombiner):
             elif 'delete' in type:
                 object['destroy'] = begin['time']
         else:
-            print "Unhabdled:", type
+            print "Unhandled:", type
 
     def relation(self, data, head, tail):
-        self.relations.add((data['str'], head['domain'], head['str'], tail['domain'], tail['str']))
+        self.add_relation({'label': data['str'], 'from': self.make_id(head['domain'], head['str']), 'to': self.make_id(tail['domain'], tail['str']), 'color': 'red'})
+
+    def add_relation(self, relation):
+        key = frozenset(relation.iteritems())
+        if self.relations.has_key(key):
+            return
+        self.relations[key] = relation
 
     def make_id(self, domain, name):
         import re
@@ -1143,16 +1202,16 @@ class GraphViz(TaskCombiner):
             #: {}, 'objects':{}, 'frames': {}, 'markers': {}
             cluster_index += 1
         #threads
-        clusters[cluster_index] = []
-        cluster = clusters[cluster_index]
-        cluster.append('subgraph cluster_%d {\nlabel = "%s";' % (cluster_index, "threads"))
+        #clusters[cluster_index] = []
+        #cluster = clusters[cluster_index]
+        #cluster.append('subgraph cluster_%d {\nlabel = "%s";' % (cluster_index, "threads"))
         thread_names = self.tree['threads']
         for tid in self.threads:
             tid_str, tid_hex = str(tid), to_hex(tid)
             id = self.make_id("threads", tid_str)
             thread_name = thread_names[tid_str] if thread_names.has_key(tid_str) else ""
-            self.file.write('%s [label="{THREAD: %s|%s}"];\n' % (id, tid_hex, self.escape(thread_name)))
-            cluster.append("%s;" % (id))
+            self.file.write('%s [label="{THREAD: %s|%s}" color=gray fontcolor=gray];\n' % (id, tid_hex, self.escape(thread_name)))
+            #cluster.append("%s;" % (id))
 
         #clusters
         for _, cluster in clusters.iteritems():
@@ -1160,17 +1219,33 @@ class GraphViz(TaskCombiner):
                 self.file.write(line + "\n")
             self.file.write("}\n")
         #relations
-        for relation in self.relations:
-            from_id = self.make_id(relation[1], relation[2])
-            to_id = self.make_id(relation[3], relation[4])
-            color = 'gray' if relation[0] == 'executes' else 'black'
-            self.file.write('edge [label="%s" color=%s fontcolor=%s];\n%s->%s;\n' % (relation[0], color, color, from_id, to_id))
+        for relation in self.relations.itervalues():
+            if not relation.has_key('color'):
+                relation['color'] = 'black'
+            self.file.write('edge [label="{label}" color={color} fontcolor={color}];\n{from}->{to};\n'.format(**relation))
+
         self.file.write("}\n")
         self.file.close()
 
     @staticmethod
     def join_traces(traces, output):
-        pass
+        with open(output + ".gv", 'wb') as outfile:
+            outfile.write("digraph G{\n")
+            index = 0
+            for file in traces:
+                index += 1
+                with open(file, 'rb') as infile:
+                    lines = infile.readlines()
+                    del lines[0] #first line is digraph G{
+                    del lines[-1] #last line is } #digraph G
+                    for line in lines:
+                        if line.startswith("subgraph cluster_"):
+                            number = line.split('_')[1].split(' ')[0]
+                            line = "subgraph cluster_%d%s {" % (index, number)
+                        outfile.write(line)
+            outfile.write("}\n")
+        return output + ".gv"
+
 
 ###################################
 # TODO: add OS events (sched/vsync)
@@ -1227,7 +1302,10 @@ class ETWXML:
         return tag
 
     def iterate_events(self, file):
-        import xml.etree.ElementTree as ET
+        try:
+            import xml.etree.cElementTree as ET
+        except:
+            import xml.etree.ElementTree as ET
         level = 0
         for event, elem in ET.iterparse(file, events=('start','end')):
             if event == 'start':
@@ -1291,24 +1369,36 @@ class ETWXML:
                     unhandled_providers.add(system['provider'])
         return unhandled_providers
 
+DMA_PACKET_TYPE = ["CLIENT_RENDER", "CLIENT_PAGING", "SYSTEM_PAGING", "SYSTEM_PREEMTION"]
+QUEUE_PACKET_TYPE = ["RENDER", "DEFERRED", "SYSTEM", "MMIOFLIP", "WAIT", "SIGNAL", "DEVICE", "SOFTWARE", "PAGING"]
+QUANTUM_STATUS = ["READY", "RUNNING", "EXPIRED", "PROCESSED_EXPIRE"]
+
 def transform_etw_xml(args):
     tree = default_tree()
     tree['ring_buffer'] = True
+    TaskCombiner.disable_handling_leftovers = True
     with Callbacks(args, tree) as callbacks:
         if callbacks.is_empty():
             return callbacks.get_result()
         with open(args.input) as file:
-            count = 0
-            with Progress(os.path.getsize(args.input), 50, "Parsing ETW XML: " + args.input) as progress:
-                def on_event(system, data, info):
-                    if count % 1000 == 0:
+            transform_etw_xml.count = 0
+            with Progress(os.path.getsize(args.input), 50, "Parsing ETW XML: " + os.path.basename(args.input)) as progress:
+
+                def on_event(system, data, info, static={'context_to_node':{}, 'queue':{}, 'frames':{}}):
+                    if transform_etw_xml.count % 1000 == 0:
                         progress.tick(file.tell())
-                        count += 1
+                    transform_etw_xml.count += 1
                     if not info or not data:
                         return
+                    if system['provider'] == '{9e814aad-3204-11d2-9a82-006008a86939}': #MSNT_SystemTrace
+                        static['PerfFreq'] = int(data['PerfFreq'])
+                        for callback in callbacks.callbacks:
+                            callback("metadata_add", {'domain':'GPU', 'str':'__process__', 'pid':-1, 'tid':-1, 'data':'GPU Engines', 'time': 1000000000 * int(system['time']) / static['PerfFreq']})
+                    if data.has_key('QuantumStatus'):
+                        data['QuantumStatusStr'] = QUANTUM_STATUS[int(data['QuantumStatus'])]
                     call_data = {
                         'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': system['provider'],
-                        'time': int(data['SyncQPCTime'] if data.has_key('SyncQPCTime') else system['time']),
+                        'time': 1000000000 * int(data['SyncQPCTime'] if data.has_key('SyncQPCTime') else system['time']) / static['PerfFreq'],
                         'str': info['Task'] if info.has_key('Task') and info['Task'] else 'Unknown',
                         'args': data,
                     }
@@ -1316,26 +1406,97 @@ def transform_etw_xml(args):
 
                     opcode = info['Opcode'] if info.has_key('Opcode') else ""
                     if 'Start' in opcode:
-                        type = "task_begin"
+                        call_data["type"] = 0
+                        type = "task_begin_overlapped"
                     elif 'Stop' in opcode:
-                        type = "task_end"
+                        call_data["type"] = 1
+                        type = "task_end_overlapped"
                     else:
+                        call_data["type"] = 5
                         type = "marker"
-                        call_data['data'] = 'task'
+                        call_data['data'] = 'track'
+                    relation = None
+                    if call_data['str'] == 'SelectContext':
+                        context = data['hContext']
+                        node = data['NodeOrdinal']
+                        static['context_to_node'][context] = node
+                        return
+                    elif call_data['str'] == 'DmaPacket':
+                        context = data['hContext']
+                        if not static['context_to_node'].has_key(context) or 'Info' in opcode:
+                            return #no node info at this moment, just skip it. Or may be keep until it is known?
+                        call_data['pid'] = -1
+                        call_data['tid'] = int(static['context_to_node'][context])
+                        call_data['str'] = DMA_PACKET_TYPE[int(data['PacketType'])]
+
+                        if 'Start' in opcode:
+                            call_data['id'] = int(data['uliSubmissionId'])
+                            if static['queue'].has_key(int(data['ulQueueSubmitSequence'])):
+                                relation = (call_data.copy(), static['queue'][int(data['ulQueueSubmitSequence'])], call_data)
+                                relation[0]['parent'] = call_data['id']
+                        else:
+                            call_data['id'] = int(data['uliCompletionId'])
+                    elif call_data['str'] == 'QueuePacket':
+                        if 'Info' in opcode:
+                            return
+                        id = int(data['SubmitSequence'])
+                        if not data.has_key('PacketType'):
+                            call_data['str'] = 'WAIT'
+                            assert(data.has_key('FenceValue'))
+                        else:
+                            call_data['str'] = QUEUE_PACKET_TYPE[int(data['PacketType'])]
+                        if 'Start' in opcode:
+                            if static['queue'].has_key(id): #forcefully closing the previous one
+                                closing = call_data.copy()
+                                #closing['pid'] = static['queue'][id]['pid']
+                                #closing['tid'] = static['queue'][id]['tid']
+                                closing['type'] = 1
+                                closing['id'] = id
+                                callbacks.on_event("task_end_overlapped", closing)
+                            static['queue'][id] = call_data
+                        elif 'Stop' in opcode:
+                            if not static['queue'].has_key(id):
+                                return
+                            call_data['pid'] = static['queue'][id]['pid']
+                            call_data['tid'] = static['queue'][id]['tid']
+                            del static['queue'][id]
+                        call_data['id'] = id
+                    #elif call_data['str'] == 'SignalSynchronizationObjectFromGpu':
+                    #    context = data['hContext']
+                    #    if not static['context_to_node'].has_key(context):
+                    #        return #no node info at this moment, just skip it. Or may be keep until it is known?
+                    #    call_data['pid'] = -1
+                    #    call_data['tid'] = int(static['context_to_node'][context])
+                    elif call_data['str'] == 'SCHEDULE_FRAMEINFO':
+                        presented = int(data['qpcPresented'], 16)
+                        if presented:
+                            begin = int(data['qpcBegin'], 16)
+                            call_data['time'] = begin
+                            for callback in callbacks.callbacks:
+                                callback.complete_task('task', call_data, {'time': 1000000000 * int(data['qpcFrame'], 16) / static['PerfFreq']})
+                        return
+                    else:
+                        return
 
                     callbacks.on_event(type, call_data)
+                    if relation:
+                        for callback in callbacks.callbacks:
+                            callback.relation(*relation)
+
                 etwxml = ETWXML(on_event, [
-                    'Microsoft-Windows-DXGI',
-                    'Microsoft-Windows-Direct3D11',
-                    'Microsoft-Windows-D3D10Level9',
-                    'Microsoft-Windows-Win32k',
+                    #'Microsoft-Windows-DXGI',
+                    #'Microsoft-Windows-Direct3D11',
+                    #'Microsoft-Windows-D3D10Level9',
+                    #'Microsoft-Windows-Win32k',
                     'Microsoft-Windows-DxgKrnl',
                     'Microsoft-Windows-Dwm-Core',
-                    'Microsoft-Windows-Shell-Core'
+                    '{9e814aad-3204-11d2-9a82-006008a86939}',
+                    #'Microsoft-Windows-Shell-Core'
                 ])
                 unhandled_providers = etwxml.parse(file)
             print "Unhandled providers:", str(unhandled_providers)
-
+    TaskCombiner.disable_handling_leftovers = False
+    return callbacks.get_result()
 
 if __name__ == "__main__":
     main()
