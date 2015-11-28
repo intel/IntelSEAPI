@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!--
 #   Intel® Single Event API
 #
@@ -16,7 +17,6 @@
 #
 #********************************************************************************************************************************************************************************************************************************************************************************************
 -->
-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <plugin id="com.apple.dtrace.instrument.IntelSEAPI" name="IntelSEAPI" version="1.0">
     <activation>
         <rule kind="extension" id="com.apple.powertrace.dtrace-instrument-plugin.main"/>
