@@ -1,6 +1,10 @@
 Wellcome to Intel® Single Event API (Intel® SEAPI)!
 
+Before reading further please visit wiki to see examples of visualization. https://github.com/01org/IntelSEAPI/wiki
+
 Intel® SEAPI is the translator of itt_notify calls into several OS specific and third party tracing formats.
+You can use it as memory/performance/whatever profiler.
+
 itt_notify is open-source cross-platform plain C library for instrumentation of C/C++ code with tasks/markers/counters/etc...
 Some documentation can be found here: https://software.intel.com/en-us/node/544201
 For usage examples please see main.cpp and memory.cpp of Intel® SEAPI package
@@ -48,8 +52,8 @@ Open Source Intel® SEAPI currently supports these formats:
     To enable: use systrace from AndroidStudio/Eclipse.
 
 * Json google trace format - All platforms: https://www.chromium.org/developers/how-tos/trace-event-profiling-tool
-    Cons: no correlation with Win and OSX system events (yet)
-    Pros: any platform; Corellation with ftrace (Android, Linux). Supported: object state tracing, counters, tasks (sync and async) - immediate and with clock domains...
+    Cons: no correlation with OSX system events (yet)
+    Pros: any platform; Corellation with ftrace (Android, Linux), ETW. Supported: object state tracing, counters, tasks (sync and async) - immediate and with clock domains...
     To enable set environment variable INTEL_SEA_SAVE_TO=<any path>/<trace name>
     Use runtool to transform the SEA directory into json format with next command:
         python <InstalDir>IntelSEAPI\bin\sea_runtool.py -o <target> -f gt -i <source folder>
