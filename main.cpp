@@ -464,6 +464,10 @@ int main(int argc, char* argv[])
     __itt_timestamp end_frame = __itt_get_timestamp();
     __itt_frame_submit_v3(domain, nullptr, begin_frame, end_frame);
 
+    __itt_id id = __itt_id_make(domain, 0); //just any arbitrary id, domain here is just a pointer
+    __itt_metadata_str_add(domain, id, nullptr, "Named before call", 0); //it's possible to assign name to id (if key==nullptr)
+    __itt_frame_submit_v3(domain, &id, begin_frame, end_frame); //this name is later used as name of submitted frame
+
     track_group = __itt_track_group_create(handle_track_group, __itt_track_group_type_normal);
     gpu_track = __itt_track_create(track_group, gpu_track_name, __itt_track_type_normal);
 
@@ -529,7 +533,7 @@ int main(int argc, char* argv[])
 
     __itt_marker(domain, __itt_null, handle_marker, __itt_marker_scope_thread);
 
-    __itt_frame frame = __itt_frame_create("aaa");
+    __itt_frame frame = __itt_frame_create("Frame");
     __itt_frame_begin(frame);
 
     for (std::thread* pThread: threads)

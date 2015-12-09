@@ -125,19 +125,93 @@ T* WriteToBuff(CRecorder& recorder, const T& value)
         *ptr = value;
     return ptr;
 }
+namespace sea {
+
+    extern uint64_t g_nRingBuffer;
+
+    extern std::shared_ptr<std::string> g_spCutName;
+
+    inline CRecorder* GetFile(const SRecord& record)
+    {
+        DomainExtra* pDomainExtra = reinterpret_cast<DomainExtra*>(record.domain.extra2);
+        if (!pDomainExtra || !pDomainExtra->bHasDomainPath)
+            return nullptr;
+
+        static thread_local SThreadRecord* pThreadRecord = nullptr;
+        if (pThreadRecord) {} else pThreadRecord = GetThreadRecord();
+
+
+        if (pThreadRecord->bRemoveFiles)
+        {
+            pThreadRecord->pLastRecorder = nullptr;
+            pThreadRecord->pLastDomain = nullptr;
+            pThreadRecord->bRemoveFiles = false;
+            pThreadRecord->files.clear();
+        }
+        //with very high probability the same thread will write into the same domain
+        if (pThreadRecord->pLastRecorder && pThreadRecord->pLastDomain == record.domain.nameA && (10 > pThreadRecord->nSpeedupCounter++))
+            return reinterpret_cast<CRecorder*>(pThreadRecord->pLastRecorder);
+        pThreadRecord->nSpeedupCounter = 0; //we can't avoid checking cuts, ring and such
+        pThreadRecord->pLastDomain = record.domain.nameA;
+
+        auto it = pThreadRecord->files.find(record.domain.nameA);
+        CRecorder* pRecorder = nullptr;
+        if (it != pThreadRecord->files.end())
+        {
+            pRecorder = &it->second;
+            uint64_t diff = record.rf.nanoseconds - pRecorder->GetCreationTime();
+            //just checking pointer of g_spCutName.get() is thread safe without any locks: we don't access internals. And if it's the same we work with the old path.
+            //but if it's changed we will lock and access the value below
+            if (pRecorder->SameCut(g_spCutName.get()) && (!g_nRingBuffer || (diff < g_nRingBuffer)))
+            {
+                pThreadRecord->pLastRecorder = pRecorder;
+                return pRecorder; //normal flow
+            }
+            pRecorder->Close(); //time to create new file
+        }
+
+        if (!pRecorder)
+        {
+            pRecorder = &pThreadRecord->files[record.domain.nameA];
+        }
+        CIttLocker lock; //locking only on file creation
+        if (pDomainExtra->strDomainPath.empty())//this is theoretically possible because we check pDomainExtra->bHasDomainPath without lock above
+        {
+            pThreadRecord->pLastRecorder = nullptr;
+            return nullptr;
+        }
+        std::shared_ptr<std::string> spCutName = g_spCutName;
+
+        CTraceEventFormat::SRegularFields rf = CTraceEventFormat::GetRegularFields();
+        char path[1024] = {};
+        _sprintf(path, "%s%llu%s%s.sea",
+            pDomainExtra->strDomainPath.c_str(),
+            (unsigned long long)rf.tid,
+            spCutName ? (std::string("!") + *spCutName).c_str() : "",
+            (g_nRingBuffer ? ((pRecorder->GetCount() % 2) ? "-1" : "-0") : "")
+        );
+        try {
+            VerbosePrint("Opening: %s\n", path);
+            pRecorder->Init(path, rf.nanoseconds, spCutName.get());
+        }
+        catch (const std::exception& exc)
+        {
+            VerbosePrint("Exception: %s\n", exc.what());
+            pThreadRecord->files.erase(record.domain.nameA);
+            pRecorder = nullptr;
+        }
+        pThreadRecord->pLastRecorder = pRecorder;
+        return pRecorder;
+    }
+}
 
 void WriteRecord(ERecordType type, const SRecord& record)
 {
-    CHECK_INIT_DOMAIN(&record.domain);
     CRecorder* pFile = sea::GetFile(record);
     if (!pFile) return;
 
     CRecorder& stream = *pFile;
 
-    if (record.pName)
-    {
-        CHECK_REPORT_STRING(record.pName);
-    }
     const size_t MaxSize = sizeof(STinyRecord) + 2*sizeof(__itt_id) + 3*sizeof(uint64_t) + sizeof(double) + sizeof(void*);
     size_t size = stream.CheckCapacity(MaxSize + record.length);
     if (!size)
@@ -170,22 +244,20 @@ void WriteRecord(ERecordType type, const SRecord& record)
         pRecord->flags |= efHasTid;
     }
 
-    if (record.pDelta)
-    {
-        WriteToBuff(stream, *record.pDelta);
-        pRecord->flags |= efHasDelta;
-    }
-
     if (record.pData)
     {
         WriteToBuff(stream, (uint64_t)record.length);
 
-        if (void* ptr = stream.Allocate(record.length))
-        {
-            memcpy(ptr, record.pData, (unsigned int)record.length);
+        void* ptr = stream.Allocate(record.length);
+        memcpy(ptr, record.pData, (unsigned int)record.length);
 
-            pRecord->flags |= efHasData;
-        }
+        pRecord->flags |= efHasData;
+    }
+
+    if (record.pDelta)
+    {
+        WriteToBuff(stream, *record.pDelta);
+        pRecord->flags |= efHasDelta;
     }
 
     if (record.function)
@@ -278,7 +350,8 @@ class CSEARecorder: public IHandler
             UNICODE_AGNOSTIC(domain_create)("IntelSEAPI");
             assert(pGlobal->domain_list);
         }
-        WriteRecord(ERecordType::Metadata, SRecord{main, *pGlobal->domain_list, __itt_null, __itt_null, pKey, nullptr, name, strlen(name)});
+        double delta = -1;//sort order - highest for processes written thru SEA
+        WriteRecord(ERecordType::Metadata, SRecord{ main, *pGlobal->domain_list, __itt_null, __itt_null, pKey, &delta, name, strlen(name) });
     }
 
     void TaskBegin(STaskDescriptor& oTask, bool bOverlapped) override
@@ -356,7 +429,6 @@ void WriteThreadName(uint64_t tid, const char* name)
 void ReportString(__itt_string_handle* pStr)
 {
     CIttLocker lock;
-    pStr->extra1 = 1;
     if (g_savepath.empty()) return;
     std::string path = g_savepath + "/";
     path += std::to_string((uint64_t)pStr) + ".str";

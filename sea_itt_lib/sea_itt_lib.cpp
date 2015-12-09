@@ -84,6 +84,32 @@ __itt_global* GetITTGlobal(__itt_global* pGlob)
     return pGlobal;
 }
 
+#ifdef _WIN32
+#include <windows.h>
+
+#define FIX_STR(type, ptr, name)\
+    if (!ptr->name##A) {\
+        if (ptr->name##W) {\
+            size_t len = lstrlenW((const wchar_t*)ptr->name##W);\
+            char* dest = (char*)malloc(len + 2);\
+            wcstombs_s(&len, dest, len + 1, (const wchar_t*)ptr->name##W, len + 1);\
+            const_cast<type*>(ptr)->name##A = dest;\
+                }\
+                else\
+        {\
+            const_cast<type*>(ptr)->name##A = _strdup("null");\
+        }\
+        }
+
+#else
+#define FIX_STR(type, ptr, name)
+
+#endif
+
+#define FIX_DOMAIN(ptr) FIX_STR(__itt_domain, ptr, name)
+#define FIX_STRING(ptr) FIX_STR(__itt_string_handle, ptr, str)
+
+
 extern "C" {
 
     EXPORT void ITTAPI __itt_api_init(__itt_global* pGlob, __itt_group_id id)
@@ -93,6 +119,16 @@ extern "C" {
         VerbosePrint("IntelSEAPI init is called from process '%s' at module '%s'\n", procname, mdlinfo.second.c_str());
         GetITTGlobal(pGlob);
         sea::FillApiList(pGlob->api_list_ptr);
+        for (___itt_domain* pDomain = pGlob->domain_list; pDomain; pDomain = pDomain->next)
+        {
+            FIX_DOMAIN(pDomain);
+            sea::InitDomain(pDomain);
+        }
+        for (__itt_string_handle* pStr = pGlob->string_list; pStr; pStr = pStr->next)
+        {
+            FIX_STRING(pStr);
+            sea::ReportString(const_cast<__itt_string_handle *>(pStr));
+        }
         sea::ReportModule(pGlob);
         static bool bInitialized = false;
         if (!bInitialized)

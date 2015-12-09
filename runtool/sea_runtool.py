@@ -23,6 +23,8 @@ from glob import glob
 
 from subprocess import Popen, PIPE
 
+ProgressConst = 500
+
 def format_time(time):
     for coeff, suffix in [(10**3, 'ns'), (10**6, 'us'), (10**9, 'ms')]:
         if time < coeff:
@@ -318,6 +320,7 @@ TaskTypes = [
 
 class Callbacks:
     def __init__(self, args, tree):
+        self.args = args
         self.callbacks = [] #while parsing we might have one to many 'listeners' - output format writers
         if "qt" in args.format:
             self.callbacks.append(QTProfiler(args, tree))
@@ -329,6 +332,7 @@ class Callbacks:
             self.callbacks.append(BestTraceFormat(args, tree))
         if "gv" in args.format:
             self.callbacks.append(GraphViz(args, tree))
+        self.get_limits()
 
     def is_empty(self):
         return 0 == len(self.callbacks)
@@ -342,8 +346,9 @@ class Callbacks:
         return False
 
     def on_event(self, type, data):
-        #copy here as handler can change the data for own good - this shall not affect other handlers
-        [callback(type, data.copy()) for callback in self.callbacks]
+        if self.check_time_in_limits(data['time']):
+            #copy here as handler can change the data for own good - this shall not affect other handlers
+            [callback(type, data.copy()) for callback in self.callbacks]
 
     def get_result(self):
         res = []
@@ -351,12 +356,25 @@ class Callbacks:
             res += callback.get_targets()
         return res
 
-def check_time_in_limits(time, left, right):
-    if left != None and time < left:
-        return False
-    if right != None and time > right:
-        return False
-    return True
+    def check_time_in_limits(self, time):
+        left, right = self.limits
+        if left != None and time < left:
+            return False
+        if right != None and time > right:
+            return False
+        return True
+
+    def get_limits(self):
+        left_limit = None
+        right_limit = None
+        if self.args.limit:
+            limits = self.args.limit.split(":")
+            if limits[0]:
+                left_limit = int(limits[0])
+            if limits[1]:
+                right_limit = int(limits[1])
+        self.limits = (left_limit, right_limit)
+
 
 class FileWrapper:
     def __init__(self, path, args, tree, domain, tid):
@@ -418,6 +436,7 @@ class FileWrapper:
             chunk = self.file.read(8)
             length = struct.unpack('Q', chunk)[0]
             call["data"] = self.file.read(length)
+
         if flags & 0x20: #has delta
             chunk = self.file.read(8)
             call["delta"] = struct.unpack('d', chunk)[0]
@@ -427,19 +446,10 @@ class FileWrapper:
             ptr = struct.unpack('Q', chunk)[0]
             if not resolve_pointer(self.args, self.tree, ptr, call):
                 call["pointer"] = ptr
-
         return call
 
-def transform2(args, tree, skip_fn = None):
 
-    left_limit = None
-    right_limit = None
-    if args.limit:
-        limits = args.limit.split(":")
-        if limits[0]:
-            left_limit = int(limits[0])
-        if limits[1]:
-            right_limit = int(limits[1])
+def transform2(args, tree, skip_fn = None):
 
     with Callbacks(args, tree) as callbacks:
         if callbacks.is_empty():
@@ -458,7 +468,7 @@ def transform2(args, tree, skip_fn = None):
             print path
             progress = DummyWith()
         else:
-            progress = Progress(sum([file.get_size() for file in files]), 50, "Translation")
+            progress = Progress(sum([file.get_size() for file in files]), 50, "Translation: " + os.path.basename(args.input))
 
         with progress:
             count = 0
@@ -478,12 +488,9 @@ def transform2(args, tree, skip_fn = None):
 
                 if args.verbose:
                     print "%d\t%s\t%s" % (count, TaskTypes[record['type']], record)
-                elif count % 1000 == 0:
+                elif count % ProgressConst == 0:
                     progress.tick(sum([file.get_pos() for file in files]))
-                if check_time_in_limits(record["time"], left_limit, right_limit):
-                    callbacks.on_event(TaskTypes[record['type']], record)
-                elif args.verbose:
-                    print "skipped due to limits"
+                callbacks.on_event(TaskTypes[record['type']], record)
                 count += 1
 
     return callbacks.get_result()
@@ -621,15 +628,27 @@ class TaskCombiner:
                         if item.has_key('id') and item['id'] == id:
                             return item
 
+        def get_last_index(tasks, type):
+            if not len(tasks):
+                return None
+            index = len(tasks) - 1
+            while index > -1 and tasks[index]['type'] != type:
+                index -= 1
+            if index > -1:
+                return index
+            return None
+
         if fn == "task_begin" or fn == "task_begin_overlapped":
-            assert(data.has_key('str') or data.has_key('pointer'))
+            if not (data.has_key('str') or data.has_key('pointer')):
+                data['str'] = 'Unknown'
             self.time_bounds[0] = min(self.time_bounds[0], data['time'])
             get_tasks(None if fn == "task_begin" else data['id']).append(data)
         elif fn == "task_end" or fn == "task_end_overlapped":
             self.time_bounds[1] = max(self.time_bounds[1], data['time'])
             tasks = get_tasks(None if fn == "task_end" else data['id'])
-            if len(tasks):
-                item = tasks.pop()
+            index = get_last_index(tasks, data['type'] - 1)
+            if index != None:
+                item = tasks.pop(index)
                 self.complete_task("task", item, data)
             else:
                 assert(self.tree["ring_buffer"] or self.tree['cuts'])
@@ -639,8 +658,9 @@ class TaskCombiner:
             get_tasks(data['id'] if data.has_key('id') else None).append(data)
         elif fn == "frame_end":
             frames = get_tasks(data['id'] if data.has_key('id') else None)
-            if len(frames):
-                item = frames.pop()
+            index = get_last_index(frames, 7)
+            if index != None:
+                item = frames.pop(index)
                 self.complete_task("frame", item, data)
             else:
                 assert(self.tree["ring_buffer"] or self.tree['cuts'])
@@ -668,7 +688,9 @@ class TaskCombiner:
                 markers = get_tasks("marker_" + (data['id'] if data.has_key('id') else ""))
                 if markers:
                     item = markers.pop()
-                    self.complete_task("task", item, data)
+                    item['type'] = 7 #frame_begin
+                    item['domain'] += ".continuous_markers"
+                    self.complete_task("frame", item, data)
                 markers.append(data)
             elif fn == "counter" and self.args.sampling:
                 if (data['time'] - self.prev_sample) > (int(self.args.sampling) * 1000):
@@ -700,23 +722,23 @@ class TaskCombiner:
             common_data['str'] = name
             common_data['delta'] = sum(counter['values']) / len(counter['values'])
             self.complete_task('counter', common_data, common_data)
-        
+
 def to_hex(value):
     return "0x" + hex(value).rstrip('L').replace("0x", "").upper()
 
-MAX_GT_SIZE = 100*1024*1024
+MAX_GT_SIZE = 50*1024*1024
 class GoogleTrace(TaskCombiner):
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, tree)
         self.args = args
         self.target_scale_start = 0
         self.source_scale_start = 0
-        self.ratio = 1 / 1000.
+        self.ratio = 1 / 1000. #nanoseconds to microseconds
         self.size_keeper = None
         self.targets = []
         self.trace_number = 0
-        self.start_new_trace()
         self.counters = {}
+        self.start_new_trace()
 
     def start_new_trace(self):
         self.targets.append("%s-%d.json" % (self.args.output, self.trace_number))
@@ -741,7 +763,7 @@ class GoogleTrace(TaskCombiner):
         return self.targets
 
     def convert_time(self, time):
-        return (time - self.source_scale_start) * self.ratio + self.target_scale_start
+        return int((time - self.source_scale_start) * self.ratio + self.target_scale_start + 0.5) #rounding up to microseconds
 
     @staticmethod
     def read_ftrace_lines(trace, time_sync):
@@ -758,7 +780,7 @@ class GoogleTrace(TaskCombiner):
                             write_chrome_time_sync = False #one per trace is enough
                     else:
                         yield line
-                    if count % 1000 == 0:
+                    if count % ProgressConst == 0:
                         progress.tick(file.tell())
                     count += 1
 
@@ -766,15 +788,18 @@ class GoogleTrace(TaskCombiner):
         time_sync = []
         self.file.write('\n"systemTraceEvents": "')
 
-        for line in read_ftrace_lines(trace):
+        for line in GoogleTrace.read_ftrace_lines(trace, time_sync):
             self.file.write(line.strip("\r\n").replace('\\', '\\\\').replace('"', r'\"') + r"\n")
         self.file.write('",\n')
-        self.apply_time_sync(time_sync)
+        if time_sync:
+            self.apply_time_sync(time_sync)
 
     def handle_etw_trace(self, trace):
-        pass
+        assert(not "Implemented")
 
     def apply_time_sync(self, time_sync):
+        if len(time_sync) < 2: #too few markers to sync
+            return
         Target = 0
         Source = 1
         #looking for closest time points to calculate start points
@@ -813,25 +838,29 @@ class GoogleTrace(TaskCombiner):
         diff = (time_sync[-1][Target] - time_sync[0][Target], time_sync[-1][Source] - time_sync[0][Source])
         self.ratio = 1000000. * diff[Target] / diff[Source] # when you multiply Source value with this ratio you get Target units, multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
 
-
     def global_metadata(self, data):
         if data['str'] == "__process__": #this is the very first record in the trace
             self.file.write(
                 '{"name": "process_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], data['data'].replace("\\", "\\\\"))
             )
+            if data.has_key('delta'):
+                self.file.write(
+                    '{"name": "process_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":"%d"}},\n' % (data['pid'], data['tid'], data['delta'])
+                )
+
             if data['tid'] != -1 and not self.tree['threads'].has_key(str(data['tid'])):
                 self.file.write(
                     '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], "<main>")
                 )
-            self.file.write(
-                '{"name": "start of trace", "dur":0, "ph":"X", "pid":%d, "tid":%s, "ts":%.3f},\n' % (data['pid'], data['tid'], self.convert_time(data['time']))
-            )
+                self.file.write(
+                    '{"name": "start of trace", "dur":0, "ph":"X", "pid":%d, "tid":%s, "ts":%d},\n' % (data['pid'], data['tid'], self.convert_time(data['time']))
+                )
 
     def relation(self, data, head, tail):
         if not head or not tail:
             return
         items = sorted([head, tail], key=lambda item: item['time']) #we can't draw lines in backward direction, so we sort them by time
-        template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%.3f, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
+        template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%d, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
         if not data.has_key('str'):
             data['str'] = "unknown"
         self.file.write(template % ("s", items[0]['pid'], items[0]['tid'], self.convert_time(items[0]['time']), data['parent'], data['str'], data['domain']))
@@ -851,26 +880,45 @@ class GoogleTrace(TaskCombiner):
         except:
             return '"%s"' % str(arg).replace("\\", "\\\\")
 
+    Phase = {'task':'X', 'counter':'C', 'marker':'i', 'object_new':'N', 'object_snapshot':'O', 'object_delete':'D', 'frame':'X'}
+
     def complete_task(self, type, begin, end):
+        assert(GoogleTrace.Phase.has_key(type))
+        if begin['type'] == 7: #frame_begin
+            begin['id'] = begin['tid'] if begin.has_key('tid') else 0 #Async events are groupped by cat & id
+            res = self.format_task('b', 'frame', begin, {})
+            res += ['\n']
+            end_begin = begin.copy()
+            end_begin['time'] = end['time']
+            res += self.format_task('e', 'frame', end_begin, {})
+        else:
+            res = self.format_task(GoogleTrace.Phase[type], type, begin, end)
+        self.file.write("".join(res + ['\n']))
+        if (self.file.tell() > MAX_GT_SIZE):
+            self.finish()
+            self.start_new_trace()
+
+    Markers = {
+        "unknown":"t",
+        "global":"g",
+        "track_group":"p",
+        "track":"t",
+        "task":"t",
+        "marker":"t"
+    }
+
+    def format_task(self, phase, type, begin, end):
         res = []
-        phase = {'task':'X', 'counter':'C', 'marker':'i', 'object_new':'N', 'object_snapshot':'O', 'object_delete':'D', 'frame':'X'}
-        assert(phase.has_key(type))
-        res.append('{"ph":"%s"' % (phase[type]))
-        res.append(', "pid":%(pid)d, "tid":%(tid)d' % begin)
-        res.append(', "ts":%.3f' % (self.convert_time(begin['time'])))
+        res.append('{"ph":"%s"' % (phase))
+        res.append(', "pid":%(pid)d' % begin)
+        if begin.has_key('tid'):
+            res.append(', "tid":%(tid)d' % begin)
+        res.append(', "ts":%d' % (self.convert_time(begin['time'])))
         if "counter" == type: #workaround of chrome issue with forgetting the last counter value
             self.counters.setdefault(begin['domain'], {})[begin['str']] = begin #remember the last counter value
         if "marker" == type:
             name = begin['str']
-            markers = {
-                "unknown":"t",
-                "global":"g",
-                "track_group":"p",
-                "track":"t",
-                "task":"t",
-                "marker":"t"
-            }
-            res.append(', "s":"%s"' % (markers[begin['data']]))
+            res.append(', "s":"%s"' % (GoogleTrace.Markers[begin['data']]))
         elif "object_" in type:
             if begin.has_key('str'):
                 name = begin['str']
@@ -878,11 +926,11 @@ class GoogleTrace(TaskCombiner):
                 name = ""
         elif "frame" == type:
             if begin.has_key('str'):
-                name = type + ":" + begin['str']
+                name = begin['str']
             else:
-                name = type + ":" + begin['domain']
+                name = begin['domain']
         else:
-            if type not in ["counter", "task"]:
+            if type not in ["counter", "task", "overlapped"]:
                 name = type + ":"
             else:
                 name = ""
@@ -893,7 +941,7 @@ class GoogleTrace(TaskCombiner):
                 name += begin['str'] + ":"
             if begin.has_key('pointer'):
                 name += "func<"+ to_hex(begin['pointer']) + ">:"
-            if begin.has_key('id'):
+            if begin.has_key('id') and type != "overlapped":
                 name += "(" + to_hex(begin['id']) + ")"
             else:
                 name = name.rstrip(":")
@@ -904,8 +952,11 @@ class GoogleTrace(TaskCombiner):
 
         if begin.has_key('id'):
             res.append(', "id":%s' % (begin['id']))
-        if type in ['task', 'frame']:
-            res.append(', "dur":%.3f' % (self.convert_time(end['time']) - self.convert_time(begin['time'])))
+        if type in ['task']:
+            dur = self.convert_time(end['time']) - self.convert_time(begin['time'])
+            if dur == 0:
+                return [] # google misbehaves on tasks of 0 length
+            res.append(', "dur":%d' % (dur))
         args = {}
         if begin.has_key('args'):
             args = begin['args'].copy()
@@ -920,10 +971,7 @@ class GoogleTrace(TaskCombiner):
             res.append(', "args":')
             res.append(self.format_value(args))
         res.append('}, ');
-        self.file.write("".join(res + ['\n']))
-        if (self.file.tell() > MAX_GT_SIZE):
-            self.finish()
-            self.start_new_trace()
+        return res
 
     def handle_leftovers(self):
         TaskCombiner.handle_leftovers(self)
@@ -942,10 +990,26 @@ class GoogleTrace(TaskCombiner):
         with zipfile.ZipFile(output + ".zip", 'w', zipfile.ZIP_DEFLATED, allowZip64 = True) as zip:
             count = 0
             with Progress(len(traces), 50, "Merging traces") as progress:
+                ftrace = [] #ftrace files have to be joint by time: chrome reads them in unpredictable order and complains about time
                 for file in traces:
-                    progress.tick(count)
-                    zip.write(file, os.path.basename(file))
-                    count += 1
+                    if file.endswith('.ftrace'):
+                        if 'merged.ftrace' != os.path.basename(file):
+                            ftrace.append(file)
+                    else:
+                        progress.tick(count)
+                        zip.write(file, os.path.basename(file))
+                        count += 1
+                if len(ftrace) > 0: #just concatenate all files in order of creation
+                    ftrace.sort() #name defines sorting
+                    merged = os.path.join(os.path.dirname(ftrace[0]), 'merged.ftrace')
+                    with open(merged, 'w') as output_file:
+                        for file_name in ftrace:
+                            with open(file_name) as input_file:
+                                for line in input_file.readlines():
+                                    output_file.write(line)
+                            progress.tick(count)
+                            count += 1
+                    zip.write(merged, os.path.basename(merged))
         return output + ".zip"
 
 
@@ -1020,7 +1084,7 @@ class QTProfiler(TaskCombiner): #https://github.com/danimo/qt-creator/blob/maste
 
         args = {}
         if type == "counter":
-            args['delta'] = begin['delta']
+            args['value'] = begin['delta']
         if begin.has_key('args'):
             args = begin['args']
             if end.has_key('args'):
@@ -1062,7 +1126,7 @@ class QTProfiler(TaskCombiner): #https://github.com/danimo/qt-creator/blob/maste
             self.write_footer(file)
 
     @staticmethod
-    def join_traces(traces, output):
+    def join_traces(traces, output): #TODO: implement progress
         import xml.dom.minidom as minidom
         output += ".qtd"
         with open(output, "w") as file: #FIXME: doesn't work on huge traces, consider using "iterparse" approach
@@ -1315,11 +1379,11 @@ class ETWXML:
         for event, elem in ET.iterparse(file, events=('start','end')):
             if event == 'start':
                 level += 1
+            else:
                 if level == 2:
                     yield elem
-            else:
+                    elem.clear()
                 level -= 1
-            elem.clear()
 
     def as_dict(self, elem):
         return dict((self.tag_name(child.tag), child) for child in elem.getchildren())
@@ -1329,15 +1393,16 @@ class ETWXML:
         system = self.as_dict(system)
         if not system:
             return res
-        provider = system['Provider']
-        execution = system['Execution'] if system.has_key('Execution') else None
-        res['provider'] = provider.attrib['Name'] if provider.attrib.has_key('Name') else provider.attrib['Guid']
-        if execution != None:
-            res['pid'] = execution.attrib['ProcessID']
-            res['tid'] = execution.attrib['ThreadID']
         if system.has_key('TimeCreated'):
             time_created = system['TimeCreated']
             res['time'] = time_created.attrib['RawTime']
+        provider = system['Provider']
+        execution = system['Execution'] if system.has_key('Execution') else None
+        res['provider'] = provider.attrib['Name'] if provider.attrib.has_key('Name') else provider.attrib['Guid'] if provider.attrib.has_key('Guid') else None
+        if execution != None:
+            res['pid'] = execution.attrib['ProcessID']
+            res['tid'] = execution.attrib['ThreadID']
+            res['cpu'] = execution.attrib['ProcessorID']
         return res
 
     def parse_event_data(self, data):
@@ -1378,6 +1443,362 @@ DMA_PACKET_TYPE = ["CLIENT_RENDER", "CLIENT_PAGING", "SYSTEM_PAGING", "SYSTEM_PR
 QUEUE_PACKET_TYPE = ["RENDER", "DEFERRED", "SYSTEM", "MMIOFLIP", "WAIT", "SIGNAL", "DEVICE", "SOFTWARE", "PAGING"]
 QUANTUM_STATUS = ["READY", "RUNNING", "EXPIRED", "PROCESSED_EXPIRE"]
 
+class ETWXMLHandler:
+    def __init__(self, args, callbacks):
+        self.args = args
+        self.callbacks = callbacks
+        self.count = 0
+        self.process_names={}
+        self.thread_pids={}
+        self.ftrace = open(args.input + '.ftrace', 'w') if "gt" in args.format else None
+        self.first_ftrace_record = True
+        self.gui_packets = {}
+        self.files = {}
+        self.irps = {}
+
+    def convert_time(self, time):
+        return 1000000000 * int(time) / self.PerfFreq
+
+    def MapReasonToState(self, state, wait_reason):
+        if wait_reason in [5,12]: #Suspended, WrSuspended
+            return 'D' #uninterruptible sleep (usually IO)
+        elif wait_reason in [35, 34, 32, 23, 11, 4, 28]: # WrGuardedMutex, WrFastMutex, WrPreempted, WrProcessInSwap, WrDelayExecution, DelayExecution, WrPushLock
+            return 'S' #interruptible sleep (waiting for an event to complete)
+        elif wait_reason in [22,36]: #WrRundown, WrTerminated
+            return 'X' #dead (should never be seen)
+        elif wait_reason in [1,2,8,9]: #WrFreePage, WrPageIn, FreePage, PageIn
+            return 'W' #paging
+        else:
+            if state == 3: #Standby
+                return 'D' #uninterruptible sleep
+            elif state == 4: #Terminated
+                return 'X' #dead
+            elif state == 5: #Waiting
+                return 'S' #interruptible sleep (waiting for an event to complete)
+            return 'R'
+        """
+        States:
+        0	Initialized
+        1	Ready
+        2	Running
+        3	Standby
+        4	Terminated
+        5	Waiting
+        6	Transition
+        7	DeferredReady 
+
+        Windows: https://msdn.microsoft.com/en-us/library/windows/desktop/aa964744(v=vs.85).aspx
+        0	Executive           13	WrUserRequest       26	WrKernel
+        1	FreePage            14	WrEventPair         27	WrResource
+        2	PageIn              15	WrQueue             28	WrPushLock
+        3	PoolAllocation      16	WrLpcReceive        29	WrMutex
+        4	DelayExecution      17	WrLpcReply          30	WrQuantumEnd
+        5	Suspended           18	WrVirtualMemory     31	WrDispatchInt
+        6	UserRequest         19	WrPageOut           32	WrPreempted
+        7	WrExecutive         20	WrRendezvous        33	WrYieldExecution
+        8	WrFreePage          21	WrKeyedEvent        34	WrFastMutex
+        9	WrPageIn            22	WrTerminated        35	WrGuardedMutex
+        10	WrPoolAllocation    23	WrProcessInSwap     36	WrRundown
+        11	WrDelayExecution    24	WrCpuRateControl
+        12	WrSuspended         25	WrCalloutStack
+
+        Linux:
+        D    uninterruptible sleep (usually IO)
+        R    running or runnable (on run queue)
+        S    interruptible sleep (waiting for an event to complete)
+        T    stopped, either by a job control signal or because it is being traced.
+        W    paging (not valid since the 2.6.xx kernel)
+        X    dead (should never be seen)
+        Z    defunct ("zombie") process, terminated but not reaped by its parent.
+
+        From google trace parser:
+        'S' SLEEPING
+        'R' || 'R+' RUNNABLE
+        'D' UNINTR_SLEEP
+        'T' STOPPED
+        't' DEBUG
+        'Z' ZOMBIE
+        'X' EXIT_DEAD
+        'x' TASK_DEAD
+        'K' WAKE_KILL
+        'W' WAKING
+        'D|K' UNINTR_SLEEP_WAKE_KILL
+        'D|W' UNINTR_SLEEP_WAKING
+        """
+
+    def get_process_name_by_tid(self, tid):
+        name = "<...>"
+        if self.thread_pids.has_key(tid):
+            pid = self.thread_pids[tid]
+            if self.process_names.has_key(pid):
+                name = self.process_names[pid]['name']
+        return name
+
+    def handle_file_name(self, file):
+        file_name = file.encode('utf-8').replace('\\', '/').replace('"', r'\"')
+        file_name = file_name.split('/')
+        file_name.reverse()
+        return file_name[0] + " " + "/".join(file_name[1:])
+
+    def MSNT_SystemTrace(self, system, data, info):
+        if info['EventName'] == 'EventTrace':
+            if info['Opcode'] == 'Header':
+                self.PerfFreq = int(data['PerfFreq'])
+                for callback in self.callbacks.callbacks:
+                    callback("metadata_add", {'domain':'GPU', 'str':'__process__', 'pid':-1, 'tid':-1, 'data':'GPU Engines', 'time': self.convert_time(system['time']), 'delta': -1})
+        elif info['EventName'] == 'DiskIo':
+            if info['Opcode'] in ['FileDelete', 'FileRundown']:
+                if self.files.has_key(data['FileObject']):
+                    file = self.files[data['FileObject']]
+                    if file.has_key('pid'):
+                        call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':11, 'id': int(data['FileObject'], 16)}
+                        self.callbacks.on_event("object_delete", call_data)
+                    del self.files[data['FileObject']]
+            elif info['Opcode'] in ['Read', 'Write', 'HardFault', 'FlushBuffers', 'WriteInit', 'ReadInit', 'FlushInit']:
+                tid = int(data['IssuingThreadId']) if data.has_key('IssuingThreadId') else int(data['TThreadId'], 16) if data.has_key('TThreadId') else None
+                if tid == None:
+                    return
+                if not data.has_key('FileObject'):
+                    if self.irps.has_key(data['Irp']):
+                        data['FileObject'] = self.irps[data['Irp']]
+                    else:
+                        return
+                if self.files.has_key(data['FileObject']) and self.thread_pids.has_key(tid):
+                    file = self.files[data['FileObject']]
+                    pid = int(self.thread_pids[tid], 16)
+                    call_data = {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':10, 'id': int(data['FileObject'], 16)}
+                    file['tid'] = tid
+                    file['pid'] = pid
+                    if file['creation'] != None: #write creation on first operation where tid is known
+                        creation = call_data.copy()
+                        creation['type'] = 9
+                        creation['time'] = file['creation']
+                        self.callbacks.on_event("object_new", creation)
+                        file['creation'] = None
+                    if data.has_key('Irp'):
+                        self.irps[data['Irp']] = data['FileObject']
+                    data['OPERATION'] = info['Opcode']
+                    call_data['args'] = {'snapshot': data}
+                    self.callbacks.on_event("object_snapshot", call_data)
+            else:
+                print info['Opcode']
+        elif info['EventName'] == 'FileIo':
+            if info['Opcode'] == 'FileCreate':
+                file_name = self.handle_file_name(data['FileName'])
+                if '.sea/' not in file_name: #ignore own files - they are toooo many in the view
+                    self.files[data['FileObject']] = {'name': file_name, 'creation': self.convert_time(system['time'])}
+            elif info['Opcode'] == 'Create':
+                file_name = self.handle_file_name(data['OpenPath'])
+                if '.sea/' not in file_name: #ignore own files - they are toooo many in the view
+                    self.files[data['FileObject']] = {'name': file_name, 'creation': None}
+                    call_data = {'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file_name, 'type':9, 'id': int(data['FileObject'], 16)}
+                    self.callbacks.on_event("object_new", call_data)
+            elif info['Opcode'] in ['Close', 'FileDelete', 'Delete']:
+                if self.files.has_key(data['FileObject']):
+                    file = self.files[data['FileObject']]
+                    call_data = {'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':11, 'id': int(data['FileObject'], 16)}
+                    self.callbacks.on_event("object_delete", call_data)
+                    del self.files[data['FileObject']]
+            elif info['Opcode'] not in ['OperationEnd', 'Cleanup', 'QueryInfo']:
+                if self.files.has_key(data['FileObject']):
+                    file = self.files[data['FileObject']]
+                    tid = int(system['tid'])
+                    pid = int(system['pid'])
+                    call_data = {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':10, 'id': int(data['FileObject'], 16)}
+                    file['tid'] = tid
+                    file['last_access'] = call_data['time']
+                    file['pid'] = pid
+                    if data.has_key('IrpPtr'):
+                        self.irps[data['IrpPtr']] = data['FileObject']
+                    data['OPERATION'] = info['Opcode']
+                    call_data['args'] = {'snapshot': data}
+                    self.callbacks.on_event("object_snapshot", call_data)
+        else:
+            if 'Start' in info['Opcode']:
+                event = info['EventName']
+                if event == 'Process':
+                    self.process_names[data['ProcessId']] = {'name': data['ImageFileName'].split('.')[0], 'cmd': data['CommandLine']}
+                elif event == 'Thread':
+                    self.thread_pids[int(data['TThreadId'], 16)] = data['ProcessId']
+            elif info['Opcode'] == 'CSwitch':
+                if self.ftrace == None and not self.first_ftrace_record:
+                    return
+                #mandatory: prevState, nextComm, nextPid, nextPrio
+                prev_tid = int(data['OldThreadId'], 16)
+                prev_name = self.get_process_name_by_tid(prev_tid)
+                next_tid = int(data['NewThreadId'], 16)
+
+                if self.first_ftrace_record:
+                    self.ftrace = open(self.args.input + '.ftrace', 'w') if "gt" in self.args.format else None
+                    self.first_ftrace_record = False
+                    if not self.ftrace:
+                        return
+                    self.ftrace.write("# tracer: nop\n")
+                    args = (prev_name, prev_tid, int(system['cpu']), self.convert_time(system['time']) / 1000000000., self.convert_time(system['time']) / 1000000000.)
+                    ftrace = "%s-%d [%03d] .... %.6f: tracing_mark_write: trace_event_clock_sync: parent_ts=%.6f\n" % args
+                    self.ftrace.write(ftrace)
+                args = (
+                    prev_name, prev_tid, int(system['cpu']), self.convert_time(system['time']) / 1000000000.,
+                    prev_name, prev_tid, int(data['OldThreadPriority']), self.MapReasonToState(int(data['OldThreadState']), int(data['OldThreadWaitReason'])),
+                    self.get_process_name_by_tid(next_tid), next_tid, int(data['NewThreadPriority'])
+                )
+                ftrace = "%s-%d [%03d] .... %.6f: sched_switch: prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s ==> next_comm=%s next_pid=%d next_prio=%d\n" % args
+                self.ftrace.write(ftrace)
+
+    def auto_break_gui_packets(self, call_data, tid, begin):
+        id = call_data['id']
+        if begin:
+            self.gui_packets.setdefault(tid, {})[id] = call_data
+        else:
+            if self.gui_packets.has_key(tid) and self.gui_packets[tid].has_key(id):
+                del self.gui_packets[tid][id]
+                for begin_data in self.gui_packets[tid].itervalues(): #finish all and start again to form melting task queue
+                    begin_data['time'] = call_data['time']
+                    end_data = begin_data.copy()
+                    end_data['type'] = call_data['type']
+                    self.callbacks.on_event('task_end_overlapped', end_data)
+                    self.callbacks.on_event('task_begin_overlapped', begin_data)
+
+    def on_event(self, system, data, info, static={'context_to_node':{}, 'queue':{}, 'frames':{}}):
+        if self.count % ProgressConst == 0:
+            self.progress.tick(self.file.tell())
+        self.count += 1
+        if not info or not data:
+            return
+        opcode = info['Opcode'] if info.has_key('Opcode') else ""
+        if system['provider'] == '{9e814aad-3204-11d2-9a82-006008a86939}': #MSNT_SystemTrace
+            return self.MSNT_SystemTrace(system, data, info)
+
+        call_data = {
+            'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': system['provider'],
+            'time': self.convert_time(data['SyncQPCTime'] if data.has_key('SyncQPCTime') else system['time']),
+            'str': info['Task'] if info.has_key('Task') and info['Task'] else 'Unknown',
+            'args': data,
+        }
+        call_data['thread_name'] = hex(call_data['tid'])
+
+        if call_data['str'] == 'SelectContext':
+            context = data['hContext']
+            node = data['NodeOrdinal']
+            static['context_to_node'][context] = node
+            return
+
+        if data.has_key('QuantumStatus'):
+            data['QuantumStatusStr'] = QUANTUM_STATUS[int(data['QuantumStatus'])]
+
+        if 'Start' in opcode:
+            call_data["type"] = 2
+            type = "task_begin_overlapped"
+        elif 'Stop' in opcode:
+            call_data["type"] = 3
+            type = "task_end_overlapped"
+        else:
+            call_data["type"] = 5
+            type = "marker"
+            call_data['data'] = 'track'
+        relation = None
+
+        if call_data['str'] == 'DmaPacket':
+            context = data['hContext']
+            if not static['context_to_node'].has_key(context) or 'Info' in opcode:
+                return #no node info at this moment, just skip it. Or may be keep until it is known?
+            call_data['pid'] = -1 #GUI 'process'
+            tid = int(static['context_to_node'][context])
+            call_data['tid'] = tid
+            call_data['str'] = DMA_PACKET_TYPE[int(data['PacketType'])]
+
+            if 'Start' in opcode:
+                id = int(data['uliSubmissionId'])
+                call_data['id'] = id
+                if static['queue'].has_key(int(data['ulQueueSubmitSequence'])):
+                    relation = (call_data.copy(), static['queue'][int(data['ulQueueSubmitSequence'])], call_data)
+                    relation[0]['parent'] = id
+                self.auto_break_gui_packets(call_data, 2**64 + tid, True)
+            else:
+                call_data['id'] = int(data['uliCompletionId'])
+                self.auto_break_gui_packets(call_data, 2**64 + tid, False)
+
+        elif call_data['str'] == 'QueuePacket':
+            if 'Info' in opcode:
+                return
+            id = int(data['SubmitSequence'])
+            if not data.has_key('PacketType'): #workaround, PacketType is not set for Waits
+                call_data['str'] = 'WAIT'
+                assert(data.has_key('FenceValue'))
+            else:
+                call_data['str'] = QUEUE_PACKET_TYPE[int(data['PacketType'])]
+            call_data['id'] = id
+            if 'Start' in opcode:
+                if static['queue'].has_key(id): #forcefully closing the previous one
+                    closing = call_data.copy()
+                    closing['type'] = 3
+                    closing['id'] = id
+                    self.callbacks.on_event("task_end_overlapped", closing)
+                static['queue'][id] = call_data
+                self.auto_break_gui_packets(call_data, call_data['tid'], True)
+            elif 'Stop' in opcode:
+                if not static['queue'].has_key(id):
+                    return
+                call_data['pid'] = static['queue'][id]['pid']
+                call_data['tid'] = static['queue'][id]['tid']
+                del static['queue'][id]
+                self.auto_break_gui_packets(call_data, call_data['tid'], False)
+        elif call_data['str'] == 'SCHEDULE_FRAMEINFO':
+            presented = int(data['qpcPresented'], 16)
+            if presented:
+                begin = int(data['qpcBegin'], 16)
+                call_data['time'] = self.convert_time(begin)
+                call_data['type'] = 7 #to make it frame
+                call_data['pid'] = -1 #to make it GUI
+                del call_data['tid'] #to be global for GUI
+                end_data = {'time': self.convert_time(int(data['qpcFrame'], 16))}
+                if self.callbacks.check_time_in_limits(call_data['time']):
+                    for callback in self.callbacks.callbacks:
+                        callback.complete_task('frame', call_data, end_data)
+            return
+        else:
+            return
+
+        self.callbacks.on_event(type, call_data)
+        assert(type == TaskTypes[call_data['type']])
+        if relation:
+            if self.callbacks.check_time_in_limits(relation[0]['time']):
+                for callback in self.callbacks.callbacks:
+                    callback.relation(*relation)
+
+    def finish(self):
+        for id, file in self.files.iteritems():
+            if file.has_key('last_access'): #rest aren't rendered anyways
+                call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': file['last_access'], 'str': file['name'], 'type':11, 'id': int(id, 16)}
+                self.callbacks.on_event("object_delete", call_data)
+
+    def parse(self):
+        with open(self.args.input) as file:
+            self.file = file
+            with Progress(os.path.getsize(self.args.input), 50, "Parsing ETW XML: " + os.path.basename(self.args.input)) as progress:
+                self.progress = progress
+                etwxml = ETWXML(self.on_event, [
+                    #'Microsoft-Windows-DXGI',
+                    #'Microsoft-Windows-Direct3D11',
+                    #'Microsoft-Windows-D3D10Level9',
+                    #'Microsoft-Windows-Win32k',
+                    'Microsoft-Windows-DxgKrnl',
+                    'Microsoft-Windows-Dwm-Core',
+                    '{9e814aad-3204-11d2-9a82-006008a86939}', #MSNT_SystemTrace
+                    #'Microsoft-Windows-Shell-Core'
+                ])
+                unhandled_providers = etwxml.parse(file)
+                self.finish()
+            print "Unhandled providers:", str(unhandled_providers)
+        if self.ftrace != None:
+            self.ftrace.close()
+            for pid, data in self.process_names.iteritems():
+                for callback in self.callbacks.callbacks:
+                    proc_name = data['name']
+                    if len(data['cmd']) > len(proc_name):
+                        proc_name = data['cmd'].replace('\\"', '').replace('"', '')
+                    callback("metadata_add", {'domain':'IntelSEAPI', 'str':'__process__', 'pid':int(pid,16), 'tid':-1, 'data':proc_name})
+
 def transform_etw_xml(args):
     tree = default_tree()
     tree['ring_buffer'] = True
@@ -1385,123 +1806,13 @@ def transform_etw_xml(args):
     with Callbacks(args, tree) as callbacks:
         if callbacks.is_empty():
             return callbacks.get_result()
-        with open(args.input) as file:
-            transform_etw_xml.count = 0
-            with Progress(os.path.getsize(args.input), 50, "Parsing ETW XML: " + os.path.basename(args.input)) as progress:
-
-                def on_event(system, data, info, static={'context_to_node':{}, 'queue':{}, 'frames':{}}):
-                    if transform_etw_xml.count % 1000 == 0:
-                        progress.tick(file.tell())
-                    transform_etw_xml.count += 1
-                    if not info or not data:
-                        return
-                    if system['provider'] == '{9e814aad-3204-11d2-9a82-006008a86939}': #MSNT_SystemTrace
-                        static['PerfFreq'] = int(data['PerfFreq'])
-                        for callback in callbacks.callbacks:
-                            callback("metadata_add", {'domain':'GPU', 'str':'__process__', 'pid':-1, 'tid':-1, 'data':'GPU Engines', 'time': 1000000000 * int(system['time']) / static['PerfFreq']})
-                    if data.has_key('QuantumStatus'):
-                        data['QuantumStatusStr'] = QUANTUM_STATUS[int(data['QuantumStatus'])]
-                    call_data = {
-                        'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': system['provider'],
-                        'time': 1000000000 * int(data['SyncQPCTime'] if data.has_key('SyncQPCTime') else system['time']) / static['PerfFreq'],
-                        'str': info['Task'] if info.has_key('Task') and info['Task'] else 'Unknown',
-                        'args': data,
-                    }
-                    call_data['thread_name'] = hex(call_data['tid'])
-
-                    opcode = info['Opcode'] if info.has_key('Opcode') else ""
-                    if 'Start' in opcode:
-                        call_data["type"] = 0
-                        type = "task_begin_overlapped"
-                    elif 'Stop' in opcode:
-                        call_data["type"] = 1
-                        type = "task_end_overlapped"
-                    else:
-                        call_data["type"] = 5
-                        type = "marker"
-                        call_data['data'] = 'track'
-                    relation = None
-                    if call_data['str'] == 'SelectContext':
-                        context = data['hContext']
-                        node = data['NodeOrdinal']
-                        static['context_to_node'][context] = node
-                        return
-                    elif call_data['str'] == 'DmaPacket':
-                        context = data['hContext']
-                        if not static['context_to_node'].has_key(context) or 'Info' in opcode:
-                            return #no node info at this moment, just skip it. Or may be keep until it is known?
-                        call_data['pid'] = -1
-                        call_data['tid'] = int(static['context_to_node'][context])
-                        call_data['str'] = DMA_PACKET_TYPE[int(data['PacketType'])]
-
-                        if 'Start' in opcode:
-                            call_data['id'] = int(data['uliSubmissionId'])
-                            if static['queue'].has_key(int(data['ulQueueSubmitSequence'])):
-                                relation = (call_data.copy(), static['queue'][int(data['ulQueueSubmitSequence'])], call_data)
-                                relation[0]['parent'] = call_data['id']
-                        else:
-                            call_data['id'] = int(data['uliCompletionId'])
-                    elif call_data['str'] == 'QueuePacket':
-                        if 'Info' in opcode:
-                            return
-                        id = int(data['SubmitSequence'])
-                        if not data.has_key('PacketType'):
-                            call_data['str'] = 'WAIT'
-                            assert(data.has_key('FenceValue'))
-                        else:
-                            call_data['str'] = QUEUE_PACKET_TYPE[int(data['PacketType'])]
-                        if 'Start' in opcode:
-                            if static['queue'].has_key(id): #forcefully closing the previous one
-                                closing = call_data.copy()
-                                #closing['pid'] = static['queue'][id]['pid']
-                                #closing['tid'] = static['queue'][id]['tid']
-                                closing['type'] = 1
-                                closing['id'] = id
-                                callbacks.on_event("task_end_overlapped", closing)
-                            static['queue'][id] = call_data
-                        elif 'Stop' in opcode:
-                            if not static['queue'].has_key(id):
-                                return
-                            call_data['pid'] = static['queue'][id]['pid']
-                            call_data['tid'] = static['queue'][id]['tid']
-                            del static['queue'][id]
-                        call_data['id'] = id
-                    #elif call_data['str'] == 'SignalSynchronizationObjectFromGpu':
-                    #    context = data['hContext']
-                    #    if not static['context_to_node'].has_key(context):
-                    #        return #no node info at this moment, just skip it. Or may be keep until it is known?
-                    #    call_data['pid'] = -1
-                    #    call_data['tid'] = int(static['context_to_node'][context])
-                    elif call_data['str'] == 'SCHEDULE_FRAMEINFO':
-                        presented = int(data['qpcPresented'], 16)
-                        if presented:
-                            begin = int(data['qpcBegin'], 16)
-                            call_data['time'] = begin
-                            for callback in callbacks.callbacks:
-                                callback.complete_task('task', call_data, {'time': 1000000000 * int(data['qpcFrame'], 16) / static['PerfFreq']})
-                        return
-                    else:
-                        return
-
-                    callbacks.on_event(type, call_data)
-                    if relation:
-                        for callback in callbacks.callbacks:
-                            callback.relation(*relation)
-
-                etwxml = ETWXML(on_event, [
-                    #'Microsoft-Windows-DXGI',
-                    #'Microsoft-Windows-Direct3D11',
-                    #'Microsoft-Windows-D3D10Level9',
-                    #'Microsoft-Windows-Win32k',
-                    'Microsoft-Windows-DxgKrnl',
-                    'Microsoft-Windows-Dwm-Core',
-                    '{9e814aad-3204-11d2-9a82-006008a86939}',
-                    #'Microsoft-Windows-Shell-Core'
-                ])
-                unhandled_providers = etwxml.parse(file)
-            print "Unhandled providers:", str(unhandled_providers)
+        handler = ETWXMLHandler(args, callbacks)
+        handler.parse()
     TaskCombiner.disable_handling_leftovers = False
-    return callbacks.get_result()
+    res = callbacks.get_result()
+    if handler.ftrace != None:
+        res += [handler.ftrace.name]
+    return res
 
 if __name__ == "__main__":
     main()

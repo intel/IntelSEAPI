@@ -264,18 +264,27 @@ struct SThreadRecord
     STaskDescriptor* pTask = nullptr;
     COverlapped* pOverlapped = nullptr;
     bool bAllocRecursion = false;
+    void* pLastRecorder = nullptr;
+    const void* pLastDomain = nullptr;
+    int nSpeedupCounter = 0;
 };
 
 void TraverseDomains(const std::function<void(___itt_domain&)>& callback);
 void TraverseThreadRecords(const std::function<void(SThreadRecord&)>& callback);
 
 
-#define CHECK_INIT_DOMAIN(domain) if (!(domain)->extra2) sea::InitDomain(const_cast<__itt_domain *>(domain));
 void InitDomain(__itt_domain* pDomain);
 
-#define CHECK_REPORT_STRING(str) if (str && !(str)->extra1) sea::ReportString(const_cast<__itt_string_handle *>(str))
+struct DomainExtra
+{
+    std::string strDomainPath; //always changed and accessed under lock
+    bool bHasDomainPath = false; //for light check of strDomainPath.empty() without lock
+    SThreadRecord* pThreadRecords = nullptr; //keeping track of thread records for later freeing
+    __itt_clock_domain* pClockDomain = nullptr;
+    __itt_track_group* pTrackGroup = nullptr;
+};
 
-CRecorder* GetFile(const SRecord &record);
+SThreadRecord* GetThreadRecord();
 
 inline bool IsVerboseMode()
 {
