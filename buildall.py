@@ -39,6 +39,16 @@ def replace_in_file(file, what_by):
                 line = line.replace(what, by)
         sys.stdout.write(line)
 
+def get_yocto():
+    if not os.environ.has_key('CXX'):
+        return None
+    cxx = os.environ['CXX']
+    if '-poky' not in cxx:
+        return None
+    if '-m32' in cxx:
+        return {'bits':'32'}
+    return {'bits':'64'}
+    
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -48,13 +58,17 @@ def main():
     parser.add_argument("-c", "--clean", action="store_true")
     args = parser.parse_args()
 
-    target_bits = ['64']
-    if sys.platform != 'darwin': #on MAC OSX we produce FAT library including both 32 and 64 bits
-        target_bits.append('32')
+    yocto = get_yocto()
+    if not yocto:
+        target_bits = ['64']
+        if sys.platform != 'darwin': #on MAC OSX we produce FAT library including both 32 and 64 bits
+            target_bits.append('32')
+    else:
+        target_bits = [yocto['bits']]
     work_dir = os.getcwd()
     print work_dir
     for bits in target_bits: #create separate build dirs
-        work_folder = os.path.join(work_dir, "build_" + ("android" if args.android else sys.platform.replace('32', "")), bits)
+        work_folder = os.path.join(work_dir, "build_" + ("android" if args.android else "yocto" if yocto else sys.platform.replace('32', "")), bits)
         already_there = os.path.exists(work_folder)
         if already_there and args.clean:
             shutil.rmtree(work_folder)
@@ -85,7 +99,7 @@ def main():
         run_shell('cmake "%s" -G"%s" %s' % (work_dir, generator, " ".join([
             ("-DFORCE_32=ON" if bits == '32' else ""),
             ("-DCMAKE_BUILD_TYPE=Debug" if args.debug else ""),
-            ("-DCMAKE_TOOLCHAIN_FILE=./android.toolchain.cmake" if args.android else "")
+            ("-DYOCTO=1" if yocto else "")
         ])))
         if sys.platform == 'win32':
             install = args.install and bits == target_bits[-1]
