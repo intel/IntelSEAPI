@@ -18,12 +18,13 @@
 import os
 import sys
 import cgi #for escaping XML
+import shutil
 import struct
+import tempfile
 from glob import glob
-
 from subprocess import Popen, PIPE
 
-ProgressConst = 500
+ProgressConst = 10000
 
 def format_time(time):
     for coeff, suffix in [(10**3, 'ns'), (10**6, 'us'), (10**9, 'ms')]:
@@ -57,6 +58,8 @@ def parse_args(args):
     parser.add_argument("-c", "--cuts", nargs='*')
     parser.add_argument("-s", "--sync")
     parser.add_argument("-l", "--limit", nargs='*')
+    parser.add_argument("--ssh")
+    parser.add_argument("-p", "--password")
     parser.add_argument("--dry", action="store_true")
     parser.add_argument("--sampling")
 
@@ -96,34 +99,47 @@ def os_lib_ext():
         return '.so'
     assert(not "Unsupported platform")
 
-def echo(what, where):
-    try:
-        with open(where, "w") as file:
-            file.write(what)
-            return True
-    except:
-        return False
-
 class FTrace:
-    def __init__(self, args):
+    def __init__(self, args, remote):
         self.args = args
         self.file = args.output + ".ftrace"
-        echo("0", "/sys/kernel/debug/tracing/tracing_on")
-        echo("", "/sys/kernel/debug/tracing/trace") #cleansing ring buffer (we need it's header only)
-        Popen("cat /sys/kernel/debug/tracing/trace > " + self.file, shell=True).wait()
-        self.proc = Popen("cat /sys/kernel/debug/tracing/trace_pipe >> " + self.file, shell=True)
-        echo("1", "/sys/kernel/debug/tracing/tracing_on")
+        self.remote = remote
+
+    def echo(self, what, where):
+        try:
+            if self.remote:
+                self.remote.execute('echo %s > %s' % (what, where))
+            else:
+                with open(where, "w") as file:
+                    file.write(what)
+        except:
+            return False
+        return True
+
+    def start(self):
+        self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
+        self.echo("", "/sys/kernel/debug/tracing/trace") #cleansing ring buffer (we need it's header only)
+        if self.remote:
+            Popen('%s "cat /sys/kernel/debug/tracing/trace > %s"' % (self.remote.execute_prefix, self.file), shell=True).wait()
+            self.proc = Popen('%s "cat /sys/kernel/debug/tracing/trace_pipe >> %s"' % (self.remote.execute_prefix, self.file), shell=True)
+        else:
+            Popen('cat /sys/kernel/debug/tracing/trace > %s' % self.file, shell=True).wait()
+            self.proc = Popen('cat /sys/kernel/debug/tracing/trace_pipe >> %s' % self.file, shell=True)
+        self.echo("*:*", "/sys/kernel/debug/tracing/set_event") #enabling all events
+        self.echo("1", "/sys/kernel/debug/tracing/tracing_on")
+
     def stop(self):
-        echo("0", "/sys/kernel/debug/tracing/tracing_on")
-        self.proc.terminate()
+        self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
+        self.proc.wait()
         return self.file
 
-def start_ftrace(args):
-    if not echo("nop", "/sys/kernel/debug/tracing/current_tracer"):
+def start_ftrace(args, remote = None):
+    ftrace = FTrace(args, remote)
+    if not ftrace.echo("nop", "/sys/kernel/debug/tracing/current_tracer"):
         print "Warning: failed to access ftrace subsystem"
-        return False
-    echo("*:*", "/sys/kernel/debug/tracing/set_event") #enabling all events
-    return FTrace(args)
+        return None
+    ftrace.start()
+    return ftrace
 
 class ETWTrace:
     def __init__(self, args):
@@ -142,7 +158,104 @@ def start_etw(args):
     trace = ETWTrace(args)
     return trace if trace.start() else None
 
+class Remote:
+    def __init__(self, args):
+        self.args = args
+        if sys.platform == 'win32':
+            self.execute_prefix = 'plink.exe -ssh %s' % args.ssh
+            self.copy_prefix = 'pscp.exe'
+            if args.password:
+                self.execute_prefix += ' -pw %s' % args.password
+                self.copy_prefix += ' -pw %s' % args.password
+        else:
+            self.execute_prefix = 'ssh %s' % args.ssh
+            self.copy_prefix = 'scp'
+            if args.password:
+                self.execute_prefix = 'sshpass -p %s %s' % (args.password, self.execute_prefix)
+                self.copy_prefix = 'sshpass -p %s %s' % (args.password, self.copy_prefix)
+
+    def execute(self, cmd):
+        command = '%s "%s"' % (self.execute_prefix, cmd)
+        if self.args.verbose:
+            print command
+        out, err = Popen(command, shell=True, stdout=PIPE, stderr=PIPE).communicate()
+        if err:
+            print "Error:", err
+            raise Exception(err)
+        return out
+
+    def copy(self, source, target):
+        if self.args.verbose:
+            print "%s %s %s" % (self.copy_prefix, source, target)
+        out, err = Popen("%s %s %s" % (self.copy_prefix, source, target), shell=True, stdout=PIPE, stderr=PIPE).communicate()
+        if err:
+            print "Error:", err
+            raise Exception(err)
+        return out
+
+def launch_remote(args, victim):
+    if not args.bindir:
+        print "--bindir must be set for remotes"
+        sys.exit(-1)
+    remote = Remote(args)
+
+    print 'Getting target uname...',
+    unix = remote.execute("uname")
+    print ':', unix
+    if 'darwin' in unix.lower():
+        search = os.path.join(args.bindir, '*IntelSEAPI.dylib')
+        files = glob(search)
+        load_lib = 'DYLD_INSERT_LIBRARIES'
+    else:
+        file = remote.execute('file %s' % victim[0])
+        bits = '64' if '64' in file else '32'
+        search = os.path.join(args.bindir, '*IntelSEAPI' + bits + '.so')
+        files = glob(search)
+        load_lib = 'INTEL_LIBITTNOTIFY' + bits
+    target = '/tmp/' + os.path.basename(files[0])
+
+    print 'Copying corresponding library...'
+    print remote.copy(files[0], '%s:%s' % (args.ssh, target))
+
+    print 'Making temp dir...',
+    trace = remote.execute('mktemp -d' + (' -t SEA_XXX'if 'darwin' in unix.lower() else '')).strip()
+    print ':', trace
+
+    output = args.output
+    args.output = trace + '/nop'
+
+    print 'Starting ftrace...'
+    ftrace = start_ftrace(args, remote)
+    print 'Executing:', ' '.join(victim), '...'
+    print remote.execute("%s=%s INTEL_SEA_SAVE_TO=%s/pid %s %s" % (load_lib, target, trace, ('INTEL_SEA_VERBOSE=1' if args.verbose else ''), ' '.join(victim)))
+    if ftrace:
+        args.trace = ftrace.stop()
+    args.output = output
+
+    local_tmp = tempfile.mkdtemp()
+    print 'Copying result:'
+    print remote.copy('-r %s:%s' % (args.ssh, trace), local_tmp)
+
+    print 'Removing temp dir...'
+    remote.execute('rm -r %s' % trace)
+
+    print 'Transformation...'
+    files = glob(os.path.join(local_tmp, '*', 'pid-*'))
+    if not files:
+        print "Error: Nothing captured"
+        sys.exit(-1)
+    args.input = files[0]
+    if args.trace:
+        args.trace = glob(os.path.join(local_tmp, '*', 'nop.ftrace'))[0]
+    output = transform(args)
+    output = join_output(args, output)
+    shutil.rmtree(local_tmp)
+    print "result:", output
+
+
 def launch(args, victim):
+    if args.ssh:
+        return launch_remote(args, victim)
     env={}
     script_dir = os.path.abspath(args.bindir) if args.bindir else os.path.dirname(os.path.realpath(__file__))
     paths = []
@@ -173,7 +286,7 @@ def launch(args, victim):
     if args.verbose:
         print "Running:", victim
         print "Environment:", str(env)
-      
+
     new_env = dict(os.environ)
     new_env.update(env)
     env = new_env
@@ -195,7 +308,16 @@ def launch(args, victim):
     if args.output:
         args.input = "%s-%d" % (args.output, proc.pid)
         output = transform(args)
+        output = join_output(args, output)
         print "result:", output
+
+def join_output(args, output):
+    google_traces = [item for item in output if os.path.splitext(item)[1] in ['.json','.ftrace']]
+    if google_traces:
+        res = GoogleTrace.join_traces(google_traces, args.output)
+        output = list(set(output) - set(google_traces)) + [res]
+    return output
+
 
 def extract_cut(filename):
     return (filename.split("!")[1].split("-")[0]) if ('!' in filename) else None
@@ -428,9 +550,9 @@ class FileWrapper:
             call["tid"] = struct.unpack('Q', chunk)[0]
 
         if self.tree["threads"].has_key(str(call["tid"])):
-            call["thread_name"] = self.tree["threads"][str(call["tid"])]
+            call["thread_name"] = '%s(%d)' % (self.tree["threads"][str(call["tid"])], call["tid"])
         else:
-            call["thread_name"] = hex(call["tid"])
+            call["thread_name"] = str(call["tid"])
 
         if flags & 0x10: #has data
             chunk = self.file.read(8)
@@ -447,7 +569,6 @@ class FileWrapper:
             if not resolve_pointer(self.args, self.tree, ptr, call):
                 call["pointer"] = ptr
         return call
-
 
 def transform2(args, tree, skip_fn = None):
 
@@ -492,7 +613,8 @@ def transform2(args, tree, skip_fn = None):
                     progress.tick(sum([file.get_pos() for file in files]))
                 callbacks.on_event(TaskTypes[record['type']], record)
                 count += 1
-
+        for callback in callbacks.callbacks:
+            callback("metadata_add", {'domain':'IntelSEAPI', 'str':'__process__', 'pid':tree["pid"], 'tid':-1, 'delta': -1})
     return callbacks.get_result()
 
 
@@ -727,6 +849,8 @@ def to_hex(value):
     return "0x" + hex(value).rstrip('L').replace("0x", "").upper()
 
 MAX_GT_SIZE = 50*1024*1024
+GT_FLOAT_TIME = False
+
 class GoogleTrace(TaskCombiner):
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, tree)
@@ -738,6 +862,11 @@ class GoogleTrace(TaskCombiner):
         self.targets = []
         self.trace_number = 0
         self.counters = {}
+        if self.args.trace:
+            if self.args.trace.endswith(".etl"):
+                self.handle_etw_trace(self.args.trace)
+            else:
+                self.args.sync = self.handle_ftrace(self.args.trace)
         self.start_new_trace()
 
     def start_new_trace(self):
@@ -745,25 +874,20 @@ class GoogleTrace(TaskCombiner):
         self.trace_number += 1
         self.file = open(self.targets[-1], "w")
         self.file.write('{')
-        if self.args.trace:
-            if self.args.trace.endswith(".etl"):
-                self.handle_etw_trace(self.args.trace)
-            else:
-                self.handle_ftrace(self.args.trace)
-        elif self.args.sync:
+        if self.args.sync:
             self.apply_time_sync(self.args.sync)
         self.file.write('\n"traceEvents": [\n')
 
         for key, value in self.tree["threads"].iteritems():
             self.file.write(
-                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (self.tree['pid'], key, value)
+                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s(%s)"}},\n' % (self.tree['pid'], key, value, key)
             )
 
     def get_targets(self):
         return self.targets
 
     def convert_time(self, time):
-        return int((time - self.source_scale_start) * self.ratio + self.target_scale_start + 0.5) #rounding up to microseconds
+        return (time - self.source_scale_start) * self.ratio + self.target_scale_start
 
     @staticmethod
     def read_ftrace_lines(trace, time_sync):
@@ -786,13 +910,12 @@ class GoogleTrace(TaskCombiner):
 
     def handle_ftrace(self, trace):
         time_sync = []
-        self.file.write('\n"systemTraceEvents": "')
-
-        for line in GoogleTrace.read_ftrace_lines(trace, time_sync):
-            self.file.write(line.strip("\r\n").replace('\\', '\\\\').replace('"', r'\"') + r"\n")
-        self.file.write('",\n')
-        if time_sync:
-            self.apply_time_sync(time_sync)
+        self.targets.append(self.args.output + '.cut.ftrace')
+        with open(self.targets[-1], 'w') as file:
+            for line in GoogleTrace.read_ftrace_lines(trace, time_sync):
+                if line.startswith('#') or 0 < len(time_sync) < 10: #we don't need anything outside proc execution but comments
+                    file.write(line)
+        return time_sync
 
     def handle_etw_trace(self, trace):
         assert(not "Implemented")
@@ -840,27 +963,28 @@ class GoogleTrace(TaskCombiner):
 
     def global_metadata(self, data):
         if data['str'] == "__process__": #this is the very first record in the trace
-            self.file.write(
-                '{"name": "process_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], data['data'].replace("\\", "\\\\"))
-            )
+            if data.has_key('data'):
+                self.file.write(
+                    '{"name": "process_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], data['data'].replace("\\", "\\\\"))
+                )
             if data.has_key('delta'):
                 self.file.write(
-                    '{"name": "process_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":"%d"}},\n' % (data['pid'], data['tid'], data['delta'])
+                    '{"name": "process_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":%d}},\n' % (data['pid'], data['tid'], data['delta'])
                 )
-
             if data['tid'] != -1 and not self.tree['threads'].has_key(str(data['tid'])):
                 self.file.write(
                     '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], "<main>")
                 )
-                self.file.write(
-                    '{"name": "start of trace", "dur":0, "ph":"X", "pid":%d, "tid":%s, "ts":%d},\n' % (data['pid'], data['tid'], self.convert_time(data['time']))
-                )
+
 
     def relation(self, data, head, tail):
         if not head or not tail:
             return
         items = sorted([head, tail], key=lambda item: item['time']) #we can't draw lines in backward direction, so we sort them by time
-        template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%d, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
+        if GT_FLOAT_TIME:
+            template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%.3f, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
+        else:
+            template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%d, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
         if not data.has_key('str'):
             data['str'] = "unknown"
         self.file.write(template % ("s", items[0]['pid'], items[0]['tid'], self.convert_time(items[0]['time']), data['parent'], data['str'], data['domain']))
@@ -913,7 +1037,10 @@ class GoogleTrace(TaskCombiner):
         res.append(', "pid":%(pid)d' % begin)
         if begin.has_key('tid'):
             res.append(', "tid":%(tid)d' % begin)
-        res.append(', "ts":%d' % (self.convert_time(begin['time'])))
+        if GT_FLOAT_TIME:
+            res.append(', "ts":%.3f' % (self.convert_time(begin['time'])))
+        else:
+            res.append(', "ts":%d' % (self.convert_time(begin['time'])))
         if "counter" == type: #workaround of chrome issue with forgetting the last counter value
             self.counters.setdefault(begin['domain'], {})[begin['str']] = begin #remember the last counter value
         if "marker" == type:
@@ -954,9 +1081,12 @@ class GoogleTrace(TaskCombiner):
             res.append(', "id":%s' % (begin['id']))
         if type in ['task']:
             dur = self.convert_time(end['time']) - self.convert_time(begin['time'])
-            if dur == 0:
-                return [] # google misbehaves on tasks of 0 length
-            res.append(', "dur":%d' % (dur))
+            if GT_FLOAT_TIME:
+                res.append(', "dur":%.3f' % (dur))
+            else:
+                if dur == 0:
+                    return [] # google misbehaves on tasks of 0 length
+                res.append(', "dur":%d' % (dur))
         args = {}
         if begin.has_key('args'):
             args = begin['args'].copy()
@@ -1000,18 +1130,28 @@ class GoogleTrace(TaskCombiner):
                         zip.write(file, os.path.basename(file))
                         count += 1
                 if len(ftrace) > 0: #just concatenate all files in order of creation
-                    ftrace.sort() #name defines sorting
-                    merged = os.path.join(os.path.dirname(ftrace[0]), 'merged.ftrace')
-                    with open(merged, 'w') as output_file:
-                        for file_name in ftrace:
-                            with open(file_name) as input_file:
-                                for line in input_file.readlines():
-                                    output_file.write(line)
-                            progress.tick(count)
-                            count += 1
-                    zip.write(merged, os.path.basename(merged))
+                    if len(ftrace) == 1:
+                        zip.write(ftrace[0], os.path.basename(ftrace[0]))
+                    else:
+                        ftrace.sort() #name defines sorting
+                        merged = os.path.join(os.path.dirname(ftrace[0]), 'merged.ftrace')
+                        with open(merged, 'w') as output_file:
+                            for file_name in ftrace:
+                                with open(file_name) as input_file:
+                                    for line in input_file.readlines():
+                                        output_file.write(line)
+                                progress.tick(count)
+                                count += 1
+                        zip.write(merged, os.path.basename(merged))
         return output + ".zip"
 
+def get_name(begin):
+    if begin.has_key('str'):
+        return begin['str']
+    elif begin.has_key('pointer'):
+        return "func<"+ to_hex(begin['pointer']) + ">"
+    else:
+        return "<unknown>"
 
 class QTProfiler(TaskCombiner): #https://github.com/danimo/qt-creator/blob/master/src/plugins/qmlprofiler/qmlprofilertracefile.cpp https://github.com/danimo/qt-creator/blob/master/src/plugins/qmlprofiler/qv8profilerdatamodel.cpp
     def __init__(self, args, tree):
@@ -1037,12 +1177,7 @@ class QTProfiler(TaskCombiner): #https://github.com/danimo/qt-creator/blob/maste
             self.end_time = max(end, self.end_time)
 
     def complete_task(self, type, begin, end):
-        if begin.has_key('str'):
-            name = begin['str']
-        elif begin.has_key('pointer'):
-            name = "func<"+ to_hex(begin['pointer']) + ">"
-        else:
-            name = "<unknown>"
+        name = get_name(begin)
 
         details = (type + ":") if type != 'task' else ""
         if begin.has_key('parent'):
@@ -1205,16 +1340,16 @@ class GraphViz(TaskCombiner):
         self.threads.add(begin['tid'])
         domain = self.per_domain.setdefault(begin['domain'], {'counters': {}, 'objects':{}, 'frames': {}, 'tasks': {}, 'markers': {}})
         if type == 'task':
-            task = domain['tasks'].setdefault(begin['str'], {'time': []})
+            task = domain['tasks'].setdefault(get_name(begin), {'time': []})
             task['time'].append(end['time'] - begin['time'])
             if begin.has_key('__file__'):
                 task['src'] = begin['__file__'] + ":" + begin['__line__']
             stack = self.domains[begin['domain']]['tasks'][begin['tid']]['stack']
             if len(stack):
                 parent = stack[-1]
-                self.add_relation({'label':'calls', 'from': self.make_id(parent['domain'], parent['str']), 'to': self.make_id(begin['domain'], begin['str'])})
+                self.add_relation({'label':'calls', 'from': self.make_id(parent['domain'], get_name(parent)), 'to': self.make_id(begin['domain'], get_name(begin))})
             else:
-                self.add_relation({'label':'executes', 'from': self.make_id("threads", str(begin['tid'])), 'to': self.make_id(begin['domain'], begin['str']), 'color': 'gray'})
+                self.add_relation({'label':'executes', 'from': self.make_id("threads", str(begin['tid'])), 'to': self.make_id(begin['domain'], get_name(begin)), 'color': 'gray'})
         elif type == 'marker':
             domain['markers'].setdefault(begin['str'], [])
         elif type == 'frame':
@@ -1442,6 +1577,10 @@ class ETWXML:
 DMA_PACKET_TYPE = ["CLIENT_RENDER", "CLIENT_PAGING", "SYSTEM_PAGING", "SYSTEM_PREEMTION"]
 QUEUE_PACKET_TYPE = ["RENDER", "DEFERRED", "SYSTEM", "MMIOFLIP", "WAIT", "SIGNAL", "DEVICE", "SOFTWARE", "PAGING"]
 QUANTUM_STATUS = ["READY", "RUNNING", "EXPIRED", "PROCESSED_EXPIRE"]
+FUN_NAMES = {0: 'DriverEntry', 1: 'DxgkCreateClose', 2: 'DxgkInternalDeviceIoctl', 2051: 'DxgkCreateKeyedMutex', 2052: 'DxgkOpenKeyedMutex', 2053: 'DxgkDestroyKeyedMutex', 2054: 'DxgkAcquireKeyedMutex', 2049: 'DxgkQueryStatistics', 2056: 'DxgkConfigureSharedResource', 2057: 'DxgkGetOverlayState', 2058: 'DxgkCheckVidPnExclusiveOwnership', 2059: 'DxgkCheckSharedResourceAccess', 2060: 'DxgkGetPresentHistory', 2050: 'DxgkOpenSynchronizationObject', 2062: 'DxgkDestroyOutputDupl', 2063: 'DxgkOutputDuplGetFrameInfo', 2064: 'DxgkOutputDuplGetMetaData', 2065: 'DxgkOutputDuplGetPointerShapeData', 2066: 'DxgkCreateKeyedMutex2', 2067: 'DxgkOpenKeyedMutex2', 2068: 'DxgkAcquireKeyedMutex2', 2069: 'DxgkReleaseKeyedMutex2', 2070: 'DxgkOfferAllocations', 2071: 'DxgkReclaimAllocations', 2072: 'DxgkOutputDuplReleaseFrame', 2073: 'DxgkQueryResourceInfoFromNtHandle', 2074: 'DxgkShareObjects', 2075: 'DxgkOpenNtHandleFromName', 2076: 'DxgkOpenResourceFromNtHandle', 2077: 'DxgkSetVidPnSourceOwner1', 2078: 'DxgkEnumAdapters', 2079: 'DxgkPinDirectFlipResources', 2080: 'DxgkUnpinDirectFlipResources', 2081: 'DxgkGetPathsModality', 2082: 'DxgkOpenAdapterFromLuid', 2083: 'DxgkWaitForVerticalBlankEvent2', 2084: 'DxgkSetContextInProcessSchedulingPriority', 2085: 'DxgkGetContextInProcessSchedulingPriority', 2086: 'DxgkOpenSyncObjectFromNtHandle', 2087: 'DxgkNotifyProcessFreezeCallout', 2088: 'DxgkGetSharedResourceAdapterLuid', 2089: 'DxgkSetStereoEnabled', 2090: 'DxgkGetCachedHybridQueryValue', 2055: 'DxgkReleaseKeyedMutex', 2092: 'DxgkPresentMultiPlaneOverlay', 2093: 'DxgkCheckMultiPlaneOverlaySupport', 2094: 'DxgkSetIndependentFlipMode', 2095: 'DxgkConfirmToken', 2096: 'DxgkNotifyProcessThawCallout', 2097: 'DxgkSetPresenterViewMode', 2098: 'DxgkReserveGpuVirtualAddress', 2099: 'DxgkFreeGpuVirtualAddress', 2100: 'DxgkMapGpuVirtualAddress', 2101: 'DxgkCreateContextVirtual', 2102: 'DxgkSubmitCommand', 2103: 'DxgkLock2', 2104: 'DxgkUnlock2', 2105: 'DxgkDestroyAllocation2', 2106: 'DxgkUpdateGpuVirtualAddress', 2107: 'DxgkCheckMultiPlaneOverlaySupport2', 2108: 'DxgkCreateSwapChain', 2109: 'DxgkOpenSwapChain', 2110: 'DxgkDestroySwapChain', 2111: 'DxgkAcquireSwapChain', 2112: 'DxgkReleaseSwapChain', 2113: 'DxgkAbandonSwapChain', 2114: 'DxgkSetDodIndirectSwapchain', 2115: 'DxgkMakeResident', 2116: 'DxgkEvict', 2117: 'DxgkCreatePagingQueue', 2048: 'DxgkSetDisplayPrivateDriverFormat', 2119: 'DxgkQueryVideoMemoryInfo', 2120: 'DxgkChangeVideoMemoryReservation', 2121: 'DxgkGetSwapChainMetadata', 2122: 'DxgkInvalidateCache', 2123: 'DxgkGetResourcePresentPrivateDriverData', 2124: 'DxgkSetStablePowerState', 2125: 'DxgkQueryClockCalibration', 2061: 'DxgkCreateOutputDupl', 2130: 'DxgkSetVidPnSourceHwProtection', 2131: 'DxgkMarkDeviceAsError', 2091: 'DxgkCacheHybridQueryValue', 7054: 'DmmMiniportInterfaceGetMonitorFrequencyRangeSet', 2118: 'DxgkDestroyPagingQueue', 2127: 'DxgkAdjustFullscreenGamma', 14001: 'VidMmRecalculateBudgets', 13000: 'DxgkDdiMiracastQueryCaps', 13001: 'DxgkDdiMiracastCreateContext', 13002: 'DxgkDdiMiracastIoControl', 13003: 'DxgkDdiMiracastDestroyContext', 13050: 'DxgkCbSendUserModeMessage', 13100: 'MiracastUmdDriverCreateMiracastContext', 13101: 'MiracastUmdDriverDestroyMiracastContext', 13102: 'MiracastUmdDriverStartMiracastSession', 13103: 'MiracastUmdDriverStopMiracastSession', 13104: 'MiracastUmdDriverHandleKernelModeMessage', 7000: 'DmmMiniportInterfaceGetNumSourceModes', 7001: 'DmmMiniportInterfaceAcquireFirstSourceMode', 7002: 'DmmMiniportInterfaceAcquireNextSourceMode', 7003: 'DmmMiniportInterfaceAcquirePinnedSourceMode', 7004: 'DmmMiniportInterfaceReleaseSourceMode', 7005: 'DmmMiniportInterfaceCreateNewSourceMode', 7006: 'DmmMiniportInterfaceAddSourceMode', 7007: 'DmmMiniportInterfacePinSourceMode', 7008: 'DmmMiniportInterfaceGetNumTargetModes', 7009: 'DmmMiniportInterfaceAcquireFirstTargetMode', 7010: 'DmmMiniportInterfaceAcquireNextTargetMode', 7011: 'DmmMiniportInterfaceAcquirePinnedTargetMode', 7012: 'DmmMiniportInterfaceReleaseTargetMode', 7013: 'DmmMiniportInterfaceCreateNewTargetMode', 7014: 'DmmMiniportInterfaceAddTargetMode', 7015: 'DmmMiniportInterfacePinTargetMode', 7016: 'DmmMiniportInterfaceGetNumMonitorSourceModes', 7017: 'DmmMiniportInterfaceAcquirePreferredMonitorSourceMode', 7018: 'DmmMiniportInterfaceAcquireFirstMonitorSourceMode', 7019: 'DmmMiniportInterfaceAcquireNextMonitorSourceMode', 7020: 'DmmMiniportInterfaceCreateNewMonitorSourceMode', 7021: 'DmmMiniportInterfaceAddMonitorSourceMode', 7022: 'DmmMiniportInterfaceReleaseMonitorSourceMode', 7023: 'DmmMiniportInterfaceGetNumMonitorFrequencyRanges', 7024: 'DmmMiniportInterfaceAcquireFirstMonitorFrequencyRange', 7025: 'DmmMiniportInterfaceAcquireNextMonitorFrequencyRange', 7026: 'DmmMiniportInterfaceReleaseMonitorFrequencyRange', 7027: 'DmmMiniportInterfaceGetNumMonitorDescriptors', 7028: 'DmmMiniportInterfaceAcquireFirstMonitorDescriptor', 7029: 'DmmMiniportInterfaceAcquireNextMonitorDescriptor', 7030: 'DmmMiniportInterfaceReleaseMonitorDescriptor', 7031: 'DmmMiniportInterfaceGetNumPaths', 7032: 'DmmMiniportInterfaceGetNumPathsFromSource', 7033: 'DmmMiniportInterfaceEnumPathTargetsFromSource', 7034: 'DmmMiniportInterfaceGetPathSourceFromTarget', 7035: 'DmmMiniportInterfaceAcquirePath', 7036: 'DmmMiniportInterfaceAcquireFirstPath', 7037: 'DmmMiniportInterfaceAcquireNextPath', 7038: 'DmmMiniportInterfaceUpdatePathSupport', 7039: 'DmmMiniportInterfaceReleasePath', 7040: 'DmmMiniportInterfaceCreateNewPath', 7041: 'DmmMiniportInterfaceAddPath', 7042: 'DmmMiniportInterfaceGetTopology', 7043: 'DmmMiniportInterfaceAcquireSourceModeSet', 7044: 'DmmMiniportInterfaceReleaseSourceModeSet', 7045: 'DmmMiniportInterfaceCreateNewSourceModeSet', 7046: 'DmmMiniportInterfaceAssignSourceModeSet', 7047: 'DmmMiniportInterfaceAssignMultisamplingSet', 5000: 'DdiQueryAdapterInfo', 5001: 'DdiCreateDevice', 5002: 'DdiCreateAllocation', 5003: 'DdiDescribeAllocation', 5004: 'DdiGetStandardAllocationDriverData', 5005: 'DdiDestroyAllocation', 5006: 'DdiAcquireSwizzlingRange', 5007: 'DdiReleaseSwizzlingRange', 5008: 'DdiPatch', 5009: 'DdiCommitVidPn', 5010: 'DdiSetVidPnSourceAddress', 5011: 'DdiSetVidPnSourceVisibility', 5012: 'DdiUpdateActiveVidPnPresentPath', 5013: 'DdiSubmitCommand', 5014: 'DdiPreemptCommand', 5015: 'DdiQueryCurrentFence', 5016: 'DdiBuildPagingBuffer', 5017: 'DdiSetPalette', 5018: 'DdiSetPointerShape', 5019: 'DdiSetPointerPosition', 5020: 'DdiResetFromTimeout', 5021: 'DdiRestartFromTimeout', 5022: 'DdiEscape', 5023: 'DdiCollectDbgInfo', 5024: 'DdiRecommendFunctionalVidPn', 5025: 'DdiIsSupportedVidPn', 5026: 'DdiEnumVidPnCofuncModality', 5027: 'DdiDestroyDevice', 5028: 'DdiOpenAllocation', 5029: 'DdiCloseAllocation', 5030: 'DdiRender', 5031: 'DdiPresent', 5032: 'DdiCreateOverlay', 5033: 'DdiUpdateOverlay', 5034: 'DdiFlipOverlay', 5035: 'DdiDestroyOverlay', 5036: 'DdiGetScanLine', 5037: 'DdiRecommendMonitorModes', 5038: 'DdiControlInterrupt', 5039: 'DdiStopCapture', 5040: 'DdiRecommendVidPnTopology', 5041: 'DdiCreateContext', 5042: 'DdiDestroyContext', 5043: 'DdiNotifyDpc', 5044: 'DdiSetDisplayPrivateDriverFormat', 5045: 'DdiRenderKm', 5046: 'DdiAddTargetMode', 5047: 'DdiQueryVidPnHWCapability', 5048: 'DdiPresentDisplayOnly', 5049: 'DdiQueryDependentEngineGroup', 5050: 'DdiQueryEngineStatus', 5051: 'DdiResetEngine', 5052: 'DdiCancelCommand', 5053: 'DdiGetNodeMetadata', 5054: 'DdiControlInterrupt2', 5055: 'DdiCheckMultiPlaneOverlaySupport', 3008: 'DxgkCddPresent', 3009: 'DxgkCddSetGammaRamp', 5058: 'DdiGetRootPageTableSize', 5059: 'DdiSetRootPageTable', 3012: 'DxgkCddSetPointerShape', 5061: 'DdiMapCpuHostAperture', 5062: 'DdiUnmapCpuHostAperture', 5063: 'DdiSubmitCommandVirtual', 5064: 'DdiCreateProcess', 5065: 'DdiDestroyProcess', 5066: 'DdiRenderGdi', 5067: 'DdiCheckMultiPlaneOverlaySupport2', 5068: 'DdiSetStablePowerState', 5069: 'DdiSetVideoProtectedRegion', 3022: 'DxgkCddDrvColorFill', 3023: 'DxgkCddDrvStrokePath', 3024: 'DxgkCddDrvAlphaBlend', 3025: 'DxgkCddDrvLineTo', 3026: 'DxgkCddDrvFillPath', 3027: 'DxgkCddDrvStrokeAndFillPath', 3028: 'DxgkCddDrvStretchBltROP', 3029: 'DxgkCddDrvPlgBlt', 3030: 'DxgkCddDrvStretchBlt', 3031: 'DxgkCddDrvTextOut', 3032: 'DxgkCddDrvGradientFill', 3033: 'DxgkCddDrvTransparentBlt', 3034: 'DxgkCddOpenResource', 3035: 'DxgkCddQueryResourceInfo', 3036: 'DxgkCddSubmitPresentHistory', 3037: 'DxgkCddCreateDeviceBitmap', 3038: 'DxgkCddUpdateGdiMem', 3039: 'DxgkCddAddCommand', 3040: 'DxgkCddEnableLite', 3041: 'DxgkCddAssertModeInternal', 3042: 'DxgkCddSetLiteModeChange', 3043: 'DxgkCddPresentDisplayOnly', 3044: 'DxgkCddSignalGdiContext', 3045: 'DxgkCddWaitGdiContext', 3046: 'DxgkCddSignalDxContext', 3047: 'DxgkCddWaitDxContext', 3048: 'DxgkCddStartDxInterop', 3049: 'DxgkCddEndDxInterop', 3050: 'DxgkCddAddD3DDirtyRect', 3051: 'DxgkCddDxGdiInteropFailed', 3052: 'DxgkCddSyncDxAccess', 3053: 'DxgkCddFlushCpuCache', 3054: 'DxgkCddLockMdlPages', 3055: 'DxgkCddOpenResourceFromNtHandle', 3056: 'DxgkCddQueryResourceInfoFromNtHandle', 3057: 'DxgkCddUnlockMdlPages', 3058: 'DxgkCddTrimStagingSize', 7059: 'DmmMiniportInterfaceGetAdditionalMonitorModesSet', 13150: 'MiracastUmdDriverCbReportSessionStatus', 13151: 'MiracastUmdDriverCbMiracastIoControl', 13152: 'MiracastUmdDriverCbReportStatistic', 13153: 'MiracastUmdDriverCbGetNextChunkData', 13154: 'MiracastUmdDriverCbRegisterForDataRateNotifications', 1004: 'DpiDispatchIoctl', 7048: 'DmmMiniportInterfaceAcquireTargetModeSet', 7049: 'DmmMiniportInterfaceReleaseTargetModeSet', 7050: 'DmmMiniportInterfaceCreateNewTargetModeSet', 7051: 'DmmMiniportInterfaceAssignTargetModeSet', 7052: 'DmmMiniportInterfaceAcquireMonitorSourceModeSet', 7053: 'DmmMiniportInterfaceReleaseMonitorSourceModeSet', 1000: 'DpiAddDevice', 7055: 'DmmMiniportInterfaceGetMonitorDescriptorSet', 7056: 'DmmMiniportInterfaceQueryVidPnInterface', 7057: 'DmmMiniportInterfaceQueryMonitorInterface', 7058: 'DmmMiniportInterfaceRemovePath', 1001: 'DpiDispatchClose', 7060: 'DmmMiniportInterfaceReleaseAdditionalMonitorModesSet', 1002: 'DpiDispatchCreate', 1003: 'DpiDispatchInternalIoctl', 4000: 'DpiDxgkDdiAddDevice', 4001: 'DpiDxgkDdiStartDevice', 4002: 'DpiDxgkDdiStopDevice', 4003: 'DpiDxgkDdiRemoveDevice', 6052: 'DmmInterfaceCreateVidPn', 6053: 'DmmInterfaceCreateVidPnFromActive', 6054: 'DmmInterfaceCreateVidPnCopy', 1005: 'DpiDispatchPnp', 6056: 'DmmInterfaceIsUsingDefaultMonitorProfile', 6057: 'DmmInterfaceIsMonitorConnected', 6058: 'DmmInterfaceRemoveCopyProtection', 6059: 'DmmInterfaceGetPathImportance', 1006: 'DpiDispatchPower', 6061: 'DmmInterfaceEnumPaths', 1007: 'DpiDispatchSystemControl', 1008: 'DpiDriverUnload', 3000: 'DxgkCddCreate', 6055: 'DmmInterfaceReleaseVidPn', 3001: 'DxgkCddDestroy', 3002: 'DxgkCddEnable', 3003: 'DxgkCddDisable', 3004: 'DxgkCddGetDisplayModeList', 3005: 'DxgkCddGetDriverCaps', 3006: 'DxgkCddLock', 3007: 'DxgkCddUnlock', 3010: 'DxgkCddSetPalette', 3011: 'DxgkCddSetPointerPosition', 3013: 'DxgkCddTerminateThread', 3014: 'DxgkCddSetOrigin', 3015: 'DxgkCddWaitForVerticalBlankEvent', 14000: 'VidMmProcessOperations', 3016: 'DxgkCddSyncGPUAccess', 3017: 'DxgkCddCreateAllocation', 3018: 'DxgkCddDestroyAllocation', 3019: 'DxgkCddBltToPrimary', 3020: 'DxgkCddGdiCommand', 3021: 'DxgkCddDrvBitBlt', 12000: 'BLTQUEUE_Present', 6060: 'DmmInterfaceGetNumPaths', 8000: 'ProbeAndLockPages', 8001: 'UnlockPages', 8002: 'MapViewOfAllocation', 8003: 'UnmapViewOfAllocation', 8004: 'ProcessHeapAllocate', 8005: 'ProcessHeapRotate', 8006: 'BootInt10ModeChange', 8007: 'ResumeInt10ModeChange', 8008: 'FlushAllocationCache', 8009: 'NotifyVSync', 8010: 'MakeProcessIdleToFlushTlb', 6000: 'DmmInterfaceAcquiredPreferredMonitorSourceMode', 6001: 'DmmInterfaceReleaseMonitorSourceMode', 6002: 'DmmInterfaceGetNumSourceModes', 6003: 'DmmInterfaceAcquireFirstSourceMode', 6004: 'DmmInterfaceAcquireNextSourceMode', 6005: 'DmmInterfaceAcquirePinnedSourceMode', 6006: 'DmmInterfaceReleaseSourceMode', 6007: 'DmmInterfacePinSourceMode', 6008: 'DmmInterfaceUnpinSourceMode', 6009: 'DmmInterfaceGetNumTargetModes', 6010: 'DmmInterfaceAcquireFirstTargetMode', 6011: 'DmmInterfaceAcquireNextTargetMode', 6012: 'DmmInterfaceAcquriePinnedTargetMode', 6013: 'DmmInterfaceReleaseTargetMode', 6014: 'DmmInterfaceCompareTargetMode', 6015: 'DmmInterfacePinTargetMode', 6016: 'DmmInterfaceUnpinTargetMode', 6017: 'DmmInterfaceIsTargetModeSupportedByMonitor', 6018: 'DmmInterfaceGetNumPathsFromSource', 6019: 'DmmInterfaceEnumPathTargetsFromSource', 6020: 'DmmInterfaceGetPathSourceFromTarget', 6021: 'DmmInterfaceAcquirePath', 6022: 'DmmInterfaceReleasePath', 6023: 'DmmInterfaceAddPath', 6024: 'DmmInterfaceRemovePath', 6025: 'DmmInterfaceRemoveAllPaths', 6026: 'DmmInterfacePinScaling', 6027: 'DmmInterfaceUnpinScaling', 6028: 'DmmInterfacePinRotation', 6029: 'DmmInterfaceUnpinRotation', 6030: 'DmmInterfaceRecommendVidPnTopology', 6031: 'DmmInterfaceFindFirstAvailableTarget', 6032: 'DmmInterfaceRestoreFromLkgForSource', 6033: 'DmmInterfaceGetTopology', 6034: 'DmmInterfaceAcquireSourceModeSet', 6035: 'DmmInterfaceReleaseSourceModeSet', 6036: 'DmmInterfaceAcquireTargetModeSet', 6037: 'DmmInterfaceReleaseTargetModeSet', 6038: 'DmmInterfaceAcquireMonitorSourceModeSet', 6039: 'DmmInterfaceReleaseMonitorSourceModeSet', 6040: 'DmmInterfaceGetNumSources', 6041: 'DmmInterfaceAcquireFirstSource', 6042: 'DmmInterfaceAcquireNextSource', 6043: 'DmmInterfaceReleaseSource', 6044: 'DmmInterfaceGetNumTargets', 6045: 'DmmInterfaceAcquireFirstTarget', 6046: 'DmmInterfaceAcquireNextTarget', 6047: 'DmmInterfaceReleaseTarget', 6048: 'DmmInterfaceAcquireSourceSet', 6049: 'DmmInterfaceReleaseSourceSet', 6050: 'DmmInterfaceAcquireTargetSet', 6051: 'DmmInterfaceReleaseTargetSet', 4004: 'DpiDxgkDdiDispatchIoRequest', 4005: 'DpiDxgkDdiQueryChildRelations', 4006: 'DpiDxgkDdiQueryChildStatus', 4007: 'DpiDxgkDdiQueryDeviceDescriptor', 4008: 'DpiDxgkDdiSetPowerState', 4009: 'DpiDxgkDdiNotifyAcpiEvent', 4010: 'DpiDxgkDdiUnload', 4011: 'DpiDxgkDdiControlEtwLogging', 4012: 'DpiDxgkDdiQueryInterface', 4013: 'DpiDpcForIsr', 4014: 'DpiFdoMessageInterruptRoutine', 4015: 'VidSchDdiNotifyInterrupt', 4016: 'VidSchiCallNotifyInterruptAtISR', 4017: 'DpiDxgkDdiStopDeviceAndReleasePostDisplayOwnership', 4018: 'DpiDxgkDdiGetChildContainerId', 4019: 'DpiDxgkDdiNotifySurpriseRemoval', 4020: 'DpiFdoThermalActiveCooling', 4021: 'DpiFdoThermalPassiveCooling', 4022: 'DxgkCbIndicateChildStatus', 2000: 'DxgkProcessCallout', 2001: 'DxgkOpenAdapter', 2002: 'DxgkCloseAdapter', 2003: 'DxgkCreateAllocation', 2004: 'DxgkQueryResourceInfo', 2005: 'DxgkOpenResource', 2006: 'DxgkDestroyAllocation', 2007: 'DxgkSetAllocationPriority', 2008: 'DxgkQueryAllocationResidency', 2009: 'DxgkCreateDevice', 2010: 'DxgkDestroyDevice', 2011: 'DxgkLock', 2012: 'DxgkUnlock', 2013: 'DxgkRender', 2014: 'DxgkGetRuntimeData', 2015: 'DxgkQueryAdapterInfo', 2016: 'DxgkEscape', 2017: 'DxgkGetDisplayModeList', 2018: 'DxgkSetDisplayMode', 2019: 'DxgkGetMultisampleMethodList', 2020: 'DxgkPresent', 2021: 'DxgkGetSharedPrimaryHandle', 2022: 'DxgkCreateOverlay', 2023: 'DxgkUpdateOverlay', 2024: 'DxgkFlipOverlay', 2025: 'DxgkDestroyOverlay', 2026: 'DxgkWaitForVerticalBlankEvent', 2027: 'DxgkSetVidPnSourceOwner', 2028: 'DxgkGetDeviceState', 2029: 'DxgkSetContextSchedulingPriority', 2030: 'DxgkGetContextSchedulingPriority', 2031: 'DxgkSetProcessSchedulingPriorityClass', 2032: 'DxgkGetProcessSchedulingPriorityClass', 2033: 'DxgkReleaseProcessVidPnSourceOwners', 2034: 'DxgkGetScanLine', 2035: 'DxgkSetQueuedLimit', 2036: 'DxgkPollDisplayChildren', 2037: 'DxgkInvalidateActiveVidPn', 2038: 'DxgkCheckOcclusion', 2039: 'DxgkCreateContext', 2040: 'DxgkDestroyContext', 2041: 'DxgkCreateSynchronizationObject', 2042: 'DxgkDestroySynchronizationObject', 2043: 'DxgkWaitForSynchronizationObject', 2044: 'DxgkSignalSynchronizationObject', 2045: 'DxgkWaitForIdle', 2046: 'DxgkCheckMonitorPowerState', 2047: 'DxgkCheckExclusiveOwnership'}
+PAGING_QUEUE_TYPE = ['UMD', 'DEFAULT', 'EVICT', 'RECLAIM']
+VIDMM_OPERATION = {0: 'None', 200: 'CloseAllocation', 202: 'ComplexLock', 203: 'PinAllocation', 204: 'FlushPendingGpuAccess', 205: 'UnpinAllocation', 206: 'MakeResident', 207: 'Evict', 208: 'LockInAperture', 209: 'InitContextAllocation', 210: 'ReclaimAllocation', 211: 'DiscardAllocation', 212: 'SetAllocationPriority', 1000: 'EvictSystemMemoryOfferList', 101: 'RestoreSegments', 102: 'PurgeSegments', 103: 'CleanupPrimary', 104: 'AllocatePagingBufferResources', 105: 'FreePagingBufferResources', 106: 'ReportVidMmState', 107: 'RunApertureCoherencyTest', 108: 'RunUnmapToDummyPageTest', 109: 'DeferredCommand', 110: 'SuspendMemorySegmentAccess', 111: 'ResumeMemorySegmentAccess', 112: 'EvictAndFlush', 113: 'CommitVirtualAddressRange', 114: 'UncommitVirtualAddressRange', 115: 'DestroyVirtualAddressAllocator', 116: 'PageInDevice', 117: 'MapContextAllocation', 118: 'InitPagingProcessVaSpace'}
+SYNC_REASON = ['CREATE', 'DESTROY', 'OPEN', 'CLOSE', 'REPORT']
 
 class ETWXMLHandler:
     def __init__(self, args, callbacks):
@@ -1485,7 +1624,7 @@ class ETWXMLHandler:
         4	Terminated
         5	Waiting
         6	Transition
-        7	DeferredReady 
+        7	DeferredReady
 
         Windows: https://msdn.microsoft.com/en-us/library/windows/desktop/aa964744(v=vs.85).aspx
         0	Executive           13	WrUserRequest       26	WrKernel
@@ -1527,11 +1666,14 @@ class ETWXMLHandler:
         """
 
     def get_process_name_by_tid(self, tid):
-        name = "<...>"
         if self.thread_pids.has_key(tid):
             pid = self.thread_pids[tid]
             if self.process_names.has_key(pid):
                 name = self.process_names[pid]['name']
+            else:
+                name = "PID:%d" % int(pid, 16)
+        else:
+            name = "TID:%d" % tid
         return name
 
     def handle_file_name(self, file):
@@ -1545,7 +1687,7 @@ class ETWXMLHandler:
             if info['Opcode'] == 'Header':
                 self.PerfFreq = int(data['PerfFreq'])
                 for callback in self.callbacks.callbacks:
-                    callback("metadata_add", {'domain':'GPU', 'str':'__process__', 'pid':-1, 'tid':-1, 'data':'GPU Engines', 'time': self.convert_time(system['time']), 'delta': -1})
+                    callback("metadata_add", {'domain':'GPU', 'str':'__process__', 'pid':-1, 'tid':-1, 'data':'GPU Engines', 'time': self.convert_time(system['time']), 'delta': -2})
         elif info['EventName'] == 'DiskIo':
             if info['Opcode'] in ['FileDelete', 'FileRundown']:
                 if self.files.has_key(data['FileObject']):
@@ -1616,12 +1758,16 @@ class ETWXMLHandler:
         else:
             if 'Start' in info['Opcode']:
                 event = info['EventName']
-                if event == 'Process':
+                if event in ['Process', 'Defunct']:
                     self.process_names[data['ProcessId']] = {'name': data['ImageFileName'].split('.')[0], 'cmd': data['CommandLine']}
                 elif event == 'Thread':
-                    self.thread_pids[int(data['TThreadId'], 16)] = data['ProcessId']
+                    pid = data['ProcessId'] if '0x0' != data['ProcessId'] else hex(int(system['pid']))
+                    self.thread_pids[int(data['TThreadId'], 16)] = pid
             elif info['Opcode'] == 'CSwitch':
                 if self.ftrace == None and not self.first_ftrace_record:
+                    return
+                time = self.convert_time(system['time'])
+                if not self.callbacks.check_time_in_limits(time):
                     return
                 #mandatory: prevState, nextComm, nextPid, nextPrio
                 prev_tid = int(data['OldThreadId'], 16)
@@ -1634,11 +1780,11 @@ class ETWXMLHandler:
                     if not self.ftrace:
                         return
                     self.ftrace.write("# tracer: nop\n")
-                    args = (prev_name, prev_tid, int(system['cpu']), self.convert_time(system['time']) / 1000000000., self.convert_time(system['time']) / 1000000000.)
+                    args = (prev_name, prev_tid, int(system['cpu']), time / 1000000000., time / 1000000000.)
                     ftrace = "%s-%d [%03d] .... %.6f: tracing_mark_write: trace_event_clock_sync: parent_ts=%.6f\n" % args
                     self.ftrace.write(ftrace)
                 args = (
-                    prev_name, prev_tid, int(system['cpu']), self.convert_time(system['time']) / 1000000000.,
+                    prev_name, prev_tid, int(system['cpu']), time / 1000000000.,
                     prev_name, prev_tid, int(data['OldThreadPriority']), self.MapReasonToState(int(data['OldThreadState']), int(data['OldThreadWaitReason'])),
                     self.get_process_name_by_tid(next_tid), next_tid, int(data['NewThreadPriority'])
                 )
@@ -1659,7 +1805,7 @@ class ETWXMLHandler:
                     self.callbacks.on_event('task_end_overlapped', end_data)
                     self.callbacks.on_event('task_begin_overlapped', begin_data)
 
-    def on_event(self, system, data, info, static={'context_to_node':{}, 'queue':{}, 'frames':{}}):
+    def on_event(self, system, data, info, static={'context_to_node':{}, 'queue':{}, 'frames':{}, 'paging':{}, 'dmabuff':{}, 'tex2d':{}, 'resident':{}, 'fence':{}}):
         if self.count % ProgressConst == 0:
             self.progress.tick(self.file.tell())
         self.count += 1
@@ -1675,7 +1821,7 @@ class ETWXMLHandler:
             'str': info['Task'] if info.has_key('Task') and info['Task'] else 'Unknown',
             'args': data,
         }
-        call_data['thread_name'] = hex(call_data['tid'])
+        call_data['thread_name'] = str(call_data['tid'])
 
         if call_data['str'] == 'SelectContext':
             context = data['hContext']
@@ -1706,7 +1852,6 @@ class ETWXMLHandler:
             tid = int(static['context_to_node'][context])
             call_data['tid'] = tid
             call_data['str'] = DMA_PACKET_TYPE[int(data['PacketType'])]
-
             if 'Start' in opcode:
                 id = int(data['uliSubmissionId'])
                 call_data['id'] = id
@@ -1721,6 +1866,7 @@ class ETWXMLHandler:
         elif call_data['str'] == 'QueuePacket':
             if 'Info' in opcode:
                 return
+            call_data['tid'] = -call_data['tid']
             id = int(data['SubmitSequence'])
             if not data.has_key('PacketType'): #workaround, PacketType is not set for Waits
                 call_data['str'] = 'WAIT'
@@ -1736,6 +1882,10 @@ class ETWXMLHandler:
                     self.callbacks.on_event("task_end_overlapped", closing)
                 static['queue'][id] = call_data
                 self.auto_break_gui_packets(call_data, call_data['tid'], True)
+                if data.has_key('FenceValue') and static['fence'].has_key(data['FenceValue']):
+                    relation = (call_data.copy(), static['fence'][data['FenceValue']], call_data)
+                    relation[0]['parent'] = data['FenceValue']
+                    del static['fence'][data['FenceValue']]
             elif 'Stop' in opcode:
                 if not static['queue'].has_key(id):
                     return
@@ -1743,6 +1893,7 @@ class ETWXMLHandler:
                 call_data['tid'] = static['queue'][id]['tid']
                 del static['queue'][id]
                 self.auto_break_gui_packets(call_data, call_data['tid'], False)
+
         elif call_data['str'] == 'SCHEDULE_FRAMEINFO':
             presented = int(data['qpcPresented'], 16)
             if presented:
@@ -1756,6 +1907,102 @@ class ETWXMLHandler:
                     for callback in self.callbacks.callbacks:
                         callback.complete_task('frame', call_data, end_data)
             return
+
+        elif 'Profiler' in call_data['str']:
+            func = int(data['Function'])
+            name = FUN_NAMES[func] if FUN_NAMES.has_key(func) else 'Unknown'
+            call_data['str'] = name
+            call_data['id'] = func
+
+        elif call_data['str'] == 'MakeResident':
+            if 'Start' in opcode:
+                static['resident'].setdefault(system['tid'], []).append(data)
+            elif 'Stop' in opcode:
+                resident = static['resident'][system['tid']]
+                if len(resident):
+                    saved = resident.pop()
+                else:
+                    return
+                data.update(saved)
+                static['fence'][data['PagingFenceValue']] = call_data
+            call_data['id'] = int(data['pSyncObject'], 16)
+
+        elif call_data['str'] == 'PagingQueuePacket':
+            if 'Info' in opcode:
+                return
+            call_data['tid'] = -call_data['tid']
+            id = int(data['PagingQueuePacket'], 16)
+            call_data['id'] = id
+            if data.has_key('PagingQueueType'):
+                VidMmOpType = int(data['VidMmOpType'])
+                call_data['str'] = PAGING_QUEUE_TYPE[int(data['PagingQueueType'])] + ":" + (VIDMM_OPERATION[VidMmOpType] if VIDMM_OPERATION.has_key(VidMmOpType) else "Unknown")
+                static['paging'][id] = call_data
+            elif static['paging'].has_key(id):
+                start = static['paging'][id]
+                call_data['str'] = start['str']
+                call_data['pid'] = start['pid']
+                call_data['tid'] = start['tid']
+                del static['paging'][id]
+
+        elif call_data['str'] == 'PagingPreparation': #parse arguments from AddDmaBuffer
+            if 'Info' in opcode: return
+            pDmaBuffer = data['pDmaBuffer']
+            call_data['id'] = int(pDmaBuffer, 16)
+            if 'Stop' in opcode and static['dmabuff'].has_key(pDmaBuffer):
+                call_data['args'].update(static['dmabuff'][pDmaBuffer])
+                del static['dmabuff'][pDmaBuffer]
+        elif call_data['str'] == 'AddDmaBuffer': #parse arguments from AddDmaBuffer
+            static['dmabuff'][data['pDmaBuffer']] = data
+            return
+
+        elif call_data['str'] == 'Present':
+            if 'Start' in opcode:
+                call_data["type"] = 0
+                type = "task_begin"
+            elif 'Stop' in opcode:
+                call_data["type"] = 1
+                type = "task_end"
+            else:
+                return
+            """XXX gives nothing
+            elif call_data['str'] == 'Texture2D':
+                if not data.has_key('pID3D11Resource'):
+                    return
+                obj = data['pID3D11Resource']
+                if static['tex2d'].has_key(obj):
+                    obj = static['tex2d'][obj]
+                    if 'Stop' in opcode:
+                        del static['tex2d'][data['pID3D11Resource']]
+                if info.has_key('Message'):
+                    data['OPERATION'] = info['Message']
+                else:
+                    data['OPERATION'] = 'Texture2D'
+                call_data['str'] = obj
+                call_data['args'] = {'snapshot': data}
+                call_data['id'] = int(data['pID3D11Resource'], 16)
+                return self.callbacks.on_event("object_snapshot", call_data)
+            elif call_data['str'] == 'Name': #names for Texture2D
+                static['tex2d'][data['pObject']] = data['DebugObjectName']
+                return
+            elif call_data['str'] in ['Fence', 'MonitoredFence', 'SynchronizationMutex', 'ReportSyncObject']:
+                if 'Info' in opcode:
+                    del call_data['data']
+                if data.has_key('pSyncObject'):
+                    obj = data['pSyncObject']
+                else:
+                    obj = data['hSyncObject']
+                call_data['id'] = int(obj, 16) #QueuePacket.ObjectArray refers to it
+                data['OPERATION'] = call_data['str']
+                if data.has_key('Reason'):
+                    data['OPERATION'] += ":" + SYNC_REASON[int(data['Reason'])]
+                call_data['str'] = "SyncObject:" + obj
+                call_data['args'] = {'snapshot': data}
+                return self.callbacks.on_event("object_snapshot", call_data)
+
+            elif call_data['str'] == 'ProcessAllocationDetails':
+                if 'Info' in opcode: return
+                call_data['id'] = int(data['Handle'], 16)
+            """
         else:
             return
 
@@ -1778,7 +2025,7 @@ class ETWXMLHandler:
             with Progress(os.path.getsize(self.args.input), 50, "Parsing ETW XML: " + os.path.basename(self.args.input)) as progress:
                 self.progress = progress
                 etwxml = ETWXML(self.on_event, [
-                    #'Microsoft-Windows-DXGI',
+                    'Microsoft-Windows-DXGI',
                     #'Microsoft-Windows-Direct3D11',
                     #'Microsoft-Windows-D3D10Level9',
                     #'Microsoft-Windows-Win32k',
@@ -1797,7 +2044,7 @@ class ETWXMLHandler:
                     proc_name = data['name']
                     if len(data['cmd']) > len(proc_name):
                         proc_name = data['cmd'].replace('\\"', '').replace('"', '')
-                    callback("metadata_add", {'domain':'IntelSEAPI', 'str':'__process__', 'pid':int(pid,16), 'tid':-1, 'data':proc_name})
+                    callback("metadata_add", {'domain':'IntelSEAPI', 'str':'__process__', 'pid':int(pid, 16), 'tid':-1, 'data':proc_name})
 
 def transform_etw_xml(args):
     tree = default_tree()

@@ -85,6 +85,11 @@ Open Source Intel® SEAPI currently supports these formats:
     Use runtool to transform the SEA directory into .gv format with next command:
         python <InstalDir>IntelSEAPI\bin\sea_runtool.py -o <target> -f gv -i <source folder>
 
+Remote access (on Yocto example, from Windows):
+    <InstalDir>IntelSEAPI\bin\sea_runtool.py -f gv gt btf qt -b ..\build_yocto\bin -o c:\temp\remote --ssh user@W.X.Y.Z -p password ! /opt/SEA/TestIntelSEAPI64
+    Such call remotely runs /opt/SEA/TestIntelSEAPI64 application on Yocto device, copies result to c:\temp\remote folder and transforms it to GraphViz, chrome://tracing, BTF, QTCreator
+    On Windows plink and pscp (from Putty package) are expected to be in PATH
+
 Contribution is highly appreciated.
 
 With respect, Alexander Raud.

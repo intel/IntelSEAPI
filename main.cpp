@@ -415,6 +415,7 @@ int main(int argc, char* argv[])
     clock_domain = __itt_clock_domain_create(get_clock_info, nullptr);
 
     __itt_timestamp begin_frame = __itt_get_timestamp();
+    VerbosePrint("Mode: %s\n", mode.c_str());
 
     if (std::string::npos != mode.find("perf"))
     {
@@ -458,6 +459,9 @@ int main(int argc, char* argv[])
 
         return 0;
     }
+
+    const char* api_ver = __itt_api_version();
+    VerbosePrint("ITT Version: %s\n", api_ver ? api_ver : "Not loaded");
 
     __itt_mark(0, "AAA!!!");
 
