@@ -86,7 +86,7 @@ def main():
                     ("-DCMAKE_TOOLCHAIN_FILE=./android.toolchain.cmake"),
                     ("-DANDROID_NDK=%s" % (os.environ['ANDROID_NDK'])),
                     ("-DCMAKE_BUILD_TYPE=%s" % ("Debug" if args.debug else "Release")),
-                    ('-DANDROID_ABI="x86_64"')
+                    ('-DANDROID_ABI="%s"' % ('x86' if bits == '32' else 'x86_64'))
                 ])))
                 run_shell('cmake --build .')
             else:

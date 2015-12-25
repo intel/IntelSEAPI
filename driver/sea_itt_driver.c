@@ -16,6 +16,8 @@
     #define UNICODE_AGNOSTIC(name) name
 #endif
 
+#ifdef _WIN32
+
 void* malloc(size_t size)
 {
     return ExAllocatePoolWithTag(NonPagedPool, size, 'ISEA');
@@ -25,6 +27,22 @@ void free(void* ptr)
 {
     ExFreePoolWithTag(ptr, 'ISEA');
 }
+
+#else
+
+#include <linux/slab.h>
+
+void* malloc(size_t size)
+{
+    return kmalloc(size, GFP_ATOMIC);
+}
+
+void free(void* ptr)
+{
+    kfree(ptr);
+}
+
+#endif
 
 char* dupstr(const char* str)
 {
@@ -46,18 +64,20 @@ __itt_domain *g_pLastDomain = NULL;
 
 void driver_init_itt_notify()
 {
+#ifdef _WIN32
     if (!Intel_SEA_ITT_ProviderHandle)
         EventRegisterIntel_SEA_ITT_Provider();
+#endif
 }
 
 void driver_fini_itt_notify()
 {
     __itt_string_handle* pLastStrHandle = NULL;
     __itt_domain *pLastDomain = NULL;
-
+#ifdef _WIN32
     if (Intel_SEA_ITT_ProviderHandle)
         EventUnregisterIntel_SEA_ITT_Provider(); //zeroes Intel_SEA_ITT_ProviderHandle
-
+#endif
     while (g_pLastStrHandle)
     {
         free((void*)g_pLastStrHandle->strA);
@@ -85,14 +105,12 @@ int event_start(__itt_event id)
     return 0;
 }
 
-
 int event_end(__itt_event id)
 {
     if (!id)
         driver_fini_itt_notify();
     return 0;
 }
-
 
 void task_begin(const __itt_domain *pDomain, __itt_id taskid, __itt_id parentid, __itt_string_handle *pName)
 {
@@ -109,7 +127,6 @@ void task_end(const __itt_domain *pDomain)
 #endif
 }
 
-
 __itt_domain* UNICODE_AGNOSTIC(domain_create)(const char* name)
 {
     __itt_domain* pDomain = NULL;
@@ -124,7 +141,6 @@ __itt_domain* UNICODE_AGNOSTIC(domain_create)(const char* name)
     return pDomain;
 }
 
-
 __itt_string_handle* UNICODE_AGNOSTIC(string_handle_create)(const char* name)
 {
     __itt_string_handle* pStr = NULL;
@@ -137,7 +153,6 @@ __itt_string_handle* UNICODE_AGNOSTIC(string_handle_create)(const char* name)
 
     return pStr;
 }
-
 
 void marker(const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope theScope)
 {

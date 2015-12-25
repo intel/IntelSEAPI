@@ -241,7 +241,6 @@ public:
 
     virtual void Init(const CTraceEventFormat::SRegularFields& main) {}
     virtual void TaskBegin(STaskDescriptor& oTask, bool bOverlapped) {}
-    virtual void TaskBeginFn(STaskDescriptor& oTask, void* fn) {}
     virtual void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length) {}
     virtual void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, double value) {}
     virtual void TaskEnd(STaskDescriptor& oTask, const CTraceEventFormat::SRegularFields& rf, bool bOverlapped) {}

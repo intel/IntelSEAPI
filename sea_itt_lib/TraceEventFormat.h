@@ -180,7 +180,7 @@ protected:
     static int GetTraceFile()
     {
         static thread_local int trace_marker = open("/sys/kernel/debug/tracing/trace_marker", O_WRONLY);
-        return trace_marker;
+        return (trace_marker > 0) ? trace_marker : 0;
     }
 #endif
 };

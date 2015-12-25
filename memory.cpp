@@ -17,6 +17,7 @@
 **********************************************************************************************************************************************************************************************************************************************************************************************/
 
 #include "ittnotify.h"
+#ifdef _DEBUG
 
 #ifdef UNICODE
     __itt_heap_function g_heap = __itt_heap_function_create(L"CRT", L"Memory");
@@ -25,64 +26,63 @@
 #endif
 
 #ifdef _WIN32
-    #ifdef _DEBUG
-        #define _CRTBLD //hack, no words
-            #include <../crt/src/dbgint.h> //for definition of _CrtMemBlockHeader
-        #undef _CRTBLD
-        #include <crtdbg.h>
+    #define _CRTBLD //hack, no words
+        #include <../crt/src/dbgint.h> //for definition of _CrtMemBlockHeader
+    #undef _CRTBLD
+    #include <crtdbg.h>
 
-        class CRecursionScope
+    class CRecursionScope
+    {
+        bool& m_bRecursion;
+    public:
+        CRecursionScope(bool& bRecursion)
+            : m_bRecursion(bRecursion)
         {
-            bool& m_bRecursion;
-        public:
-            CRecursionScope(bool& bRecursion)
-                : m_bRecursion(bRecursion)
-            {
-                m_bRecursion = true;
-            }
-            ~CRecursionScope()
-            {
-                m_bRecursion = false;
-            }
-        };
-
-        int AllocHook(int allocType, void *userData, size_t size, int blockType, long requestNumber, const unsigned char *filename, int lineNumber)
-        {
-            static __declspec(thread) bool bRecursion = false;
-            if (bRecursion) return 1;
-            CRecursionScope scope(bRecursion);
-
-            switch (allocType)
-            {
-                case _HOOK_ALLOC:
-                {
-                    //In crt hooks we don't know address of the block on allocation, using request number as id
-                    void* fakePtr = reinterpret_cast<void*>(requestNumber);
-                    __itt_heap_allocate_begin(g_heap, size, 0); //since we are called before real allocation we can't measure the time of it
-                    __itt_heap_allocate_end(g_heap, &fakePtr, size, 0);
-                    break;
-                }
-                case _HOOK_FREE:
-                {
-                    //requestNumber is not passed here on _HOOK_FREE, using a bit of knowledge of the internals
-                    requestNumber = (((_CrtMemBlockHeader*)userData)-1)->lRequest;
-                    void* fakePtr = reinterpret_cast<void*>(requestNumber);
-                    __itt_heap_free_begin(g_heap, fakePtr); //since we are called before real deallocation we can't measure the time of it
-                    __itt_heap_free_end(g_heap, fakePtr);
-                    break;
-                }
-            }
-            return 1;
+            m_bRecursion = true;
         }
-
-        bool InitMemHooks()
+        ~CRecursionScope()
         {
-            _CrtSetAllocHook(AllocHook);
-            return true;
+            m_bRecursion = false;
         }
+    };
 
-        bool bInit = InitMemHooks();
-    #endif
+    int AllocHook(int allocType, void *userData, size_t size, int blockType, long requestNumber, const unsigned char *filename, int lineNumber)
+    {
+        static __declspec(thread) bool bRecursion = false;
+        if (bRecursion) return 1;
+        CRecursionScope scope(bRecursion);
+
+        switch (allocType)
+        {
+            case _HOOK_ALLOC:
+            {
+                //In crt hooks we don't know address of the block on allocation, using request number as id
+                void* fakePtr = reinterpret_cast<void*>(requestNumber);
+                __itt_heap_allocate_begin(g_heap, size, 0); //since we are called before real allocation we can't measure the time of it
+                __itt_heap_allocate_end(g_heap, &fakePtr, size, 0);
+                break;
+            }
+            case _HOOK_FREE:
+            {
+                //requestNumber is not passed here on _HOOK_FREE, using a bit of knowledge of the internals
+                requestNumber = (((_CrtMemBlockHeader*)userData)-1)->lRequest;
+                void* fakePtr = reinterpret_cast<void*>(requestNumber);
+                __itt_heap_free_begin(g_heap, fakePtr); //since we are called before real deallocation we can't measure the time of it
+                __itt_heap_free_end(g_heap, fakePtr);
+                break;
+            }
+        }
+        return 1;
+    }
+
+    bool InitMemHooks()
+    {
+        _CrtSetAllocHook(AllocHook);
+        return true;
+    }
+
+    bool bInit = InitMemHooks();
+
 
 #else
 
@@ -248,3 +248,5 @@
 
      #endif
 #endif
+
+#endif// _DEBUG

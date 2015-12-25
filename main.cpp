@@ -124,11 +124,16 @@ int GlobalInit()
     }
     else
     {
+#ifndef __ANDROID__
         setenv(_strdup(INTEL_LIBITTNOTIFY "=" LIB_ITT));
         VerbosePrint("MAIN: setting %s = %s\n", INTEL_LIBITTNOTIFY, LIB_ITT);
+#endif
     }
 
-#ifdef __linux__
+#ifdef __ANDROID__
+    if (get_environ_value("INTEL_SEA_SAVE_TO").empty())
+        setenv(_strdup("INTEL_SEA_SAVE_TO=/data/local/tmp/ISEA"));
+#elif defined(__linux__)
     if (get_environ_value("INTEL_SEA_SAVE_TO").empty())
         setenv(_strdup("INTEL_SEA_SAVE_TO=/tmp/ISEA"));
 #endif

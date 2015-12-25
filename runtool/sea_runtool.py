@@ -41,7 +41,7 @@ class DummyWith(): #for conditional with statements
 def parse_args(args):
     import argparse
     parser = argparse.ArgumentParser(epilog="After this command line add ! followed by command line of your program")
-    format_choices = ["gt", "mfc", "mfp", "qt", "fd", "btf", "gv"]
+    format_choices = ["gt", "mfc", "mfp", "qt", "fd", "btf", "gv", "dgml"]
     if sys.platform == 'win32':
         format_choices.append("etw")
     elif sys.platform == 'darwin':
@@ -454,6 +454,8 @@ class Callbacks:
             self.callbacks.append(BestTraceFormat(args, tree))
         if "gv" in args.format:
             self.callbacks.append(GraphViz(args, tree))
+        if "dgml" in args.format:
+            self.callbacks.append(DGML(args, tree))
         self.get_limits()
 
     def is_empty(self):
@@ -1322,19 +1324,14 @@ class FrameDebugger(TaskCombiner):
     def join_traces(traces, output):
         raise NotImplementedError()
 
-class GraphViz(TaskCombiner):
+class GraphCombiner(TaskCombiner):
+
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, tree)
         self.args = args
-        self.file = open(self.get_targets()[-1], "w+b")
         self.per_domain = {}
         self.relations = {}
         self.threads = set()
-
-        self.file.write("digraph G{\nedge [labeldistance=0];\nnode [shape=record];\n")
-
-    def get_targets(self):
-        return [self.args.output + ".gv"]
 
     def complete_task(self, type, begin, end):
         self.threads.add(begin['tid'])
@@ -1368,6 +1365,11 @@ class GraphViz(TaskCombiner):
         else:
             print "Unhandled:", type
 
+    def make_id(self, domain, name):
+        import re
+        res = "%s_%s" % (domain, name)
+        return re.sub("[^a-z0-9]", "_", res.lower())
+
     def relation(self, data, head, tail):
         self.add_relation({'label': data['str'], 'from': self.make_id(head['domain'], head['str']), 'to': self.make_id(tail['domain'], tail['str']), 'color': 'red'})
 
@@ -1377,13 +1379,72 @@ class GraphViz(TaskCombiner):
             return
         self.relations[key] = relation
 
-    def make_id(self, domain, name):
-        import re
-        res = "%s_%s" % (domain, name)
-        return re.sub("[^a-z0-9]", "_", res.lower())
+class DGML(GraphCombiner):
+    def __init__(self, args, tree):
+        GraphCombiner.__init__(self, args, tree)
+        self.file = open(self.get_targets()[-1], "w+b")
+        self.file.write("""<?xml version='1.0' encoding='utf-8'?>\n<DirectedGraph xmlns="http://schemas.microsoft.com/vs/2009/dgml">""")
 
-    def escape(self, name):
-        return cgi.escape(name)
+    def get_targets(self):
+        return [self.args.output + ".dgml"]
+
+    def finish(self):
+        self.file.write('<Nodes>\n')
+        for domain, data in self.per_domain.iteritems():
+            #counters
+            for counter_name, counter_data in data['counters'].iteritems():
+                id = self.make_id(domain, counter_name)
+                self.file.write('<Node Id="%s" Label="%s" Min="%g" Max="%g" Avg="%g" Category="CodeSchema_Type"/>\n' % (id, cgi.escape(counter_name), min(counter_data), max(counter_data), sum(counter_data) / len(counter_data)))
+            #tasks
+            for task_name, task_data in data['tasks'].iteritems():
+                id = self.make_id(domain, task_name)
+                time = task_data['time']
+                self.file.write('<Node Id="%s" Category="CodeSchema_Method" Label="%s" Min="%s" Max="%s" Avg="%s" Count="%d" Src="%s"/>\n' % (
+                        id, cgi.escape(task_name),
+                        format_time(min(time)), format_time(max(time)), format_time(sum(time) / len(time)), len(time),
+                        task_data['src'].replace('\\','/') if task_data.has_key('src') else ""
+                    )
+                )
+            self.file.write('<Node Id="%s" Label="%s" Category="CodeSchema_Namespace" Group="Expanded"/>\n' % (self.make_id("domain", domain), cgi.escape(domain)))
+        #threads
+        thread_names = self.tree['threads']
+        for tid in self.threads:
+            tid_str, tid_hex = str(tid), to_hex(tid)
+            id = self.make_id("threads", tid_str)
+            thread_name = thread_names[tid_str] if thread_names.has_key(tid_str) else ""
+            self.file.write('<Node Id="%s" Label="%s(%s)"/>\n' % (id, cgi.escape(thread_name), tid_hex))
+
+        self.file.write('</Nodes>\n')
+        self.file.write('<Links>\n')
+
+        #relations
+        for relation in self.relations.itervalues():
+            if not relation.has_key('color'):
+                relation['color'] = 'black'
+            self.file.write('<Link Source="{from}" Target="{to}" Category="CodeSchema_Calls"/>\n'.format(**relation))
+
+        for domain, data in self.per_domain.iteritems():
+            #counters
+            for counter_name, counter_data in data['counters'].iteritems():
+                self.file.write('<Link Source="%s" Target="%s" Category="Contains"/>\n' % (self.make_id("domain", domain), self.make_id(domain, counter_name)))
+            #tasks
+            for task_name, task_data in data['tasks'].iteritems():
+                self.file.write('<Link Source="%s" Target="%s" Category="Contains"/>\n' % (self.make_id("domain", domain), self.make_id(domain, task_name)))
+
+        self.file.write('</Links>\n')
+
+        self.file.write("</DirectedGraph>\n")
+        self.file.close()
+
+
+class GraphViz(GraphCombiner):
+    def __init__(self, args, tree):
+        GraphCombiner.__init__(self, args, tree)
+        self.file = open(self.get_targets()[-1], "w+b")
+        self.file.write("digraph G{\nedge [labeldistance=0];\nnode [shape=record];\n")
+
+    def get_targets(self):
+        return [self.args.output + ".gv"]
 
     def finish(self):
         cluster_index = 0
@@ -1394,7 +1455,7 @@ class GraphViz(TaskCombiner):
             #counters
             for counter_name, counter_data in data['counters'].iteritems():
                 id = self.make_id(domain, counter_name)
-                self.file.write('%s [label="{COUNTER: %s|min=%g|max=%g|avg=%g}"];\n' % (id, self.escape(counter_name), min(counter_data), max(counter_data), sum(counter_data) / len(counter_data)))
+                self.file.write('%s [label="{COUNTER: %s|min=%g|max=%g|avg=%g}"];\n' % (id, cgi.escape(counter_name), min(counter_data), max(counter_data), sum(counter_data) / len(counter_data)))
                 cluster.append("%s;" % (id))
             #tasks
             for task_name, task_data in data['tasks'].iteritems():
@@ -1402,7 +1463,7 @@ class GraphViz(TaskCombiner):
                 time = task_data['time']
                 self.file.write('%s [label="{TASK: %s|min=%s|max=%s|avg=%s|count=%d%s}"];\n' % (
                         id,
-                        self.escape(task_name), format_time(min(time)), format_time(max(time)), format_time(sum(time) / len(time)), len(time),
+                        cgi.escape(task_name), format_time(min(time)), format_time(max(time)), format_time(sum(time) / len(time)), len(time),
                         (("|%s" % task_data['src'].replace('\\','/')) if task_data.has_key('src') else "")
                     )
                 )
@@ -1415,7 +1476,7 @@ class GraphViz(TaskCombiner):
             tid_str, tid_hex = str(tid), to_hex(tid)
             id = self.make_id("threads", tid_str)
             thread_name = thread_names[tid_str] if thread_names.has_key(tid_str) else ""
-            self.file.write('%s [label="{THREAD: %s|%s}" color=gray fontcolor=gray];\n' % (id, tid_hex, self.escape(thread_name)))
+            self.file.write('%s [label="{THREAD: %s|%s}" color=gray fontcolor=gray];\n' % (id, tid_hex, cgi.escape(thread_name)))
 
         #clusters
         for _, cluster in clusters.iteritems():
@@ -1531,6 +1592,15 @@ class ETWXML:
         if system.has_key('TimeCreated'):
             time_created = system['TimeCreated']
             res['time'] = time_created.attrib['RawTime']
+        if system.has_key('Task'):
+            task = system['Task']
+            res['Task'] = task.text
+        if system.has_key('EventID'):
+            EventID = system['EventID']
+            res['EventID'] = EventID.text
+        if system.has_key('Opcode'):
+            Opcode = system['Opcode']
+            res['Opcode'] = Opcode.text
         provider = system['Provider']
         execution = system['Execution'] if system.has_key('Execution') else None
         res['provider'] = provider.attrib['Name'] if provider.attrib.has_key('Name') else provider.attrib['Guid'] if provider.attrib.has_key('Guid') else None
@@ -1566,9 +1636,12 @@ class ETWXML:
             if not system:
                 continue
             if system['provider'] in self.providers:
-                data = self.parse_event_data(children['EventData']) if children.has_key('EventData') else None
-                info = self.parse_rendering_info(children['RenderingInfo']) if children.has_key('RenderingInfo') else None
-                self.callback(system, data, info)
+                if children.has_key('BinaryEventData'):
+                    self.callback(system, children['BinaryEventData'].text, self.as_dict(children['ExtendedTracingInfo'])['EventGuid'].text)
+                else:
+                    data = self.parse_event_data(children['EventData']) if children.has_key('EventData') else None
+                    info = self.parse_rendering_info(children['RenderingInfo']) if children.has_key('RenderingInfo') else None
+                    self.callback(system, data, info)
             else:
                 if system['provider'] not in unhandled_providers:
                     unhandled_providers.add(system['provider'])
@@ -1581,6 +1654,7 @@ FUN_NAMES = {0: 'DriverEntry', 1: 'DxgkCreateClose', 2: 'DxgkInternalDeviceIoctl
 PAGING_QUEUE_TYPE = ['UMD', 'DEFAULT', 'EVICT', 'RECLAIM']
 VIDMM_OPERATION = {0: 'None', 200: 'CloseAllocation', 202: 'ComplexLock', 203: 'PinAllocation', 204: 'FlushPendingGpuAccess', 205: 'UnpinAllocation', 206: 'MakeResident', 207: 'Evict', 208: 'LockInAperture', 209: 'InitContextAllocation', 210: 'ReclaimAllocation', 211: 'DiscardAllocation', 212: 'SetAllocationPriority', 1000: 'EvictSystemMemoryOfferList', 101: 'RestoreSegments', 102: 'PurgeSegments', 103: 'CleanupPrimary', 104: 'AllocatePagingBufferResources', 105: 'FreePagingBufferResources', 106: 'ReportVidMmState', 107: 'RunApertureCoherencyTest', 108: 'RunUnmapToDummyPageTest', 109: 'DeferredCommand', 110: 'SuspendMemorySegmentAccess', 111: 'ResumeMemorySegmentAccess', 112: 'EvictAndFlush', 113: 'CommitVirtualAddressRange', 114: 'UncommitVirtualAddressRange', 115: 'DestroyVirtualAddressAllocator', 116: 'PageInDevice', 117: 'MapContextAllocation', 118: 'InitPagingProcessVaSpace'}
 SYNC_REASON = ['CREATE', 'DESTROY', 'OPEN', 'CLOSE', 'REPORT']
+OPCODES = ['Info', 'Start', 'Stop', 'DCStart', 'DCEnd', 'Extension']
 
 class ETWXMLHandler:
     def __init__(self, args, callbacks):
@@ -1594,9 +1668,10 @@ class ETWXMLHandler:
         self.gui_packets = {}
         self.files = {}
         self.irps = {}
+        self.context_to_node = {}
 
     def convert_time(self, time):
-        return 1000000000 * int(time) / self.PerfFreq
+        return 1000000000 * (int(time, 16) if '0x' in str(time) else int(time)) / self.PerfFreq
 
     def MapReasonToState(self, state, wait_reason):
         if wait_reason in [5,12]: #Suspended, WrSuspended
@@ -1805,12 +1880,14 @@ class ETWXMLHandler:
                     self.callbacks.on_event('task_end_overlapped', end_data)
                     self.callbacks.on_event('task_begin_overlapped', begin_data)
 
-    def on_event(self, system, data, info, static={'context_to_node':{}, 'queue':{}, 'frames':{}, 'paging':{}, 'dmabuff':{}, 'tex2d':{}, 'resident':{}, 'fence':{}}):
+    def on_event(self, system, data, info, static={'queue':{}, 'frames':{}, 'paging':{}, 'dmabuff':{}, 'tex2d':{}, 'resident':{}, 'fence':{}}):
         if self.count % ProgressConst == 0:
             self.progress.tick(self.file.tell())
         self.count += 1
         if not info or not data:
             return
+        if not isinstance(data, dict):
+            return self.on_binary(system, data, info)
         opcode = info['Opcode'] if info.has_key('Opcode') else ""
         if system['provider'] == '{9e814aad-3204-11d2-9a82-006008a86939}': #MSNT_SystemTrace
             return self.MSNT_SystemTrace(system, data, info)
@@ -1823,10 +1900,10 @@ class ETWXMLHandler:
         }
         call_data['thread_name'] = str(call_data['tid'])
 
-        if call_data['str'] == 'SelectContext':
+        if call_data['str'] == 'SelectContext': #Microsoft-Windows-DxgKrnl
             context = data['hContext']
             node = data['NodeOrdinal']
-            static['context_to_node'][context] = node
+            self.context_to_node[context] = node
             return
 
         if data.has_key('QuantumStatus'):
@@ -1844,26 +1921,25 @@ class ETWXMLHandler:
             call_data['data'] = 'track'
         relation = None
 
-        if call_data['str'] == 'DmaPacket':
+        if call_data['str'] == 'DmaPacket': #Microsoft-Windows-DxgKrnl
             context = data['hContext']
-            if not static['context_to_node'].has_key(context) or 'Info' in opcode:
+            if not self.context_to_node.has_key(context) or 'Info' in opcode:
                 return #no node info at this moment, just skip it. Or may be keep until it is known?
             call_data['pid'] = -1 #GUI 'process'
-            tid = int(static['context_to_node'][context])
+            tid = int(self.context_to_node[context])
             call_data['tid'] = tid
             call_data['str'] = DMA_PACKET_TYPE[int(data['PacketType'])]
+            id = int(data['uliSubmissionId'] if data.has_key('uliSubmissionId') else data['uliCompletionId'])
+            call_data['id'] = id
             if 'Start' in opcode:
-                id = int(data['uliSubmissionId'])
-                call_data['id'] = id
                 if static['queue'].has_key(int(data['ulQueueSubmitSequence'])):
                     relation = (call_data.copy(), static['queue'][int(data['ulQueueSubmitSequence'])], call_data)
                     relation[0]['parent'] = id
                 self.auto_break_gui_packets(call_data, 2**64 + tid, True)
             else:
-                call_data['id'] = int(data['uliCompletionId'])
                 self.auto_break_gui_packets(call_data, 2**64 + tid, False)
 
-        elif call_data['str'] == 'QueuePacket':
+        elif call_data['str'] == 'QueuePacket': #Microsoft-Windows-DxgKrnl
             if 'Info' in opcode:
                 return
             call_data['tid'] = -call_data['tid']
@@ -1894,7 +1970,7 @@ class ETWXMLHandler:
                 del static['queue'][id]
                 self.auto_break_gui_packets(call_data, call_data['tid'], False)
 
-        elif call_data['str'] == 'SCHEDULE_FRAMEINFO':
+        elif call_data['str'] == 'SCHEDULE_FRAMEINFO': #Microsoft-Windows-Dwm-Core
             presented = int(data['qpcPresented'], 16)
             if presented:
                 begin = int(data['qpcBegin'], 16)
@@ -1908,13 +1984,13 @@ class ETWXMLHandler:
                         callback.complete_task('frame', call_data, end_data)
             return
 
-        elif 'Profiler' in call_data['str']:
+        elif 'Profiler' in call_data['str']:#Microsoft-Windows-DxgKrnl
             func = int(data['Function'])
             name = FUN_NAMES[func] if FUN_NAMES.has_key(func) else 'Unknown'
             call_data['str'] = name
             call_data['id'] = func
 
-        elif call_data['str'] == 'MakeResident':
+        elif call_data['str'] == 'MakeResident':#Microsoft-Windows-DxgKrnl
             if 'Start' in opcode:
                 static['resident'].setdefault(system['tid'], []).append(data)
             elif 'Stop' in opcode:
@@ -1927,7 +2003,7 @@ class ETWXMLHandler:
                 static['fence'][data['PagingFenceValue']] = call_data
             call_data['id'] = int(data['pSyncObject'], 16)
 
-        elif call_data['str'] == 'PagingQueuePacket':
+        elif call_data['str'] == 'PagingQueuePacket':#Microsoft-Windows-DxgKrnl
             if 'Info' in opcode:
                 return
             call_data['tid'] = -call_data['tid']
@@ -1944,18 +2020,18 @@ class ETWXMLHandler:
                 call_data['tid'] = start['tid']
                 del static['paging'][id]
 
-        elif call_data['str'] == 'PagingPreparation': #parse arguments from AddDmaBuffer
+        elif call_data['str'] == 'PagingPreparation': #Microsoft-Windows-DxgKrnl
             if 'Info' in opcode: return
             pDmaBuffer = data['pDmaBuffer']
             call_data['id'] = int(pDmaBuffer, 16)
             if 'Stop' in opcode and static['dmabuff'].has_key(pDmaBuffer):
                 call_data['args'].update(static['dmabuff'][pDmaBuffer])
                 del static['dmabuff'][pDmaBuffer]
-        elif call_data['str'] == 'AddDmaBuffer': #parse arguments from AddDmaBuffer
-            static['dmabuff'][data['pDmaBuffer']] = data
+        elif call_data['str'] == 'AddDmaBuffer': #Microsoft-Windows-DxgKrnl
+            static['dmabuff'][data['pDmaBuffer']] = data #parse arguments for PagingPreparation from AddDmaBuffer
             return
 
-        elif call_data['str'] == 'Present':
+        elif call_data['str'] == 'Present': #Microsoft-Windows-DxgKrnl
             if 'Start' in opcode:
                 call_data["type"] = 0
                 type = "task_begin"
@@ -2019,6 +2095,27 @@ class ETWXMLHandler:
                 call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': file['last_access'], 'str': file['name'], 'type':11, 'id': int(id, 16)}
                 self.callbacks.on_event("object_delete", call_data)
 
+    def on_binary(self, system, data, info):
+        opcode = int(system['Opcode'])
+        if opcode >= len(OPCODES):
+            return
+        if info == '{fdf76a97-330d-4993-997e-9b81979cbd40}': #DX – Create/Dest Context
+            chunk = data.decode('hex')
+            (device, nodeOrdinal, engineAffinity, dmaBufferSize, dmaBufferSegmentSet, dmaBufferPrivateDataSize, allocationListSize, patchLocationListSize, contextType, context) = struct.unpack('QLLLLLLLLQ', chunk)
+            self.context_to_node[context] = nodeOrdinal
+        elif info == '{4746dd2b-20d7-493f-bc1b-240397c85b25}': #DX – Dma Packet
+            chunk = data.decode('hex')
+            (context, packetType, submissionId, unknown, submitSequence) = struct.unpack('QLLLL', chunk[:24])
+            new_info = {'Task': 'DmaPacket', 'Opcode' : OPCODES[opcode]}
+            system['provider'] = 'Microsoft-Windows-DxgKrnl'
+            return self.on_event(system, {'hContext': context, 'PacketType': packetType, 'uliSubmissionId':submissionId, 'ulQueueSubmitSequence': submitSequence}, new_info)
+        elif info == '{295e0d8e-51ec-43b8-9cc6-9f79331d27d6}': #DX – Queue Packet
+            chunk = data.decode('hex')
+            (context, packetType, submitSequence) = struct.unpack('QLL', chunk[:16])
+            new_info = {'Task': 'QueuePacket', 'Opcode' : OPCODES[opcode]}
+            system['provider'] = 'Microsoft-Windows-DxgKrnl'
+            return self.on_event(system, {'SubmitSequence': submitSequence, 'PacketType': packetType}, new_info)
+
     def parse(self):
         with open(self.args.input) as file:
             self.file = file
@@ -2033,6 +2130,7 @@ class ETWXMLHandler:
                     'Microsoft-Windows-Dwm-Core',
                     '{9e814aad-3204-11d2-9a82-006008a86939}', #MSNT_SystemTrace
                     #'Microsoft-Windows-Shell-Core'
+                    None #Win7 events
                 ])
                 unhandled_providers = etwxml.parse(file)
                 self.finish()

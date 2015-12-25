@@ -339,6 +339,10 @@ using namespace sea;
 
 class CSEARecorder: public IHandler
 {
+#ifdef __ANDROID_API__
+    CTraceEventFormat m_oTraceEventFormat;
+#endif
+
     void Init(const CTraceEventFormat::SRegularFields& main) override
     {
         //write process name into trace
@@ -362,16 +366,23 @@ class CSEARecorder: public IHandler
         }
         else
         {
-            WriteRecord(ERecordType::BeginTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, nullptr, 0, oTask.fn});
+            WriteRecord(ERecordType::BeginTask, SRecord{ oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, nullptr, 0, oTask.fn });
+#ifdef __ANDROID_API__
+            if (oTask.pName)
+            {
+                m_oTraceEventFormat.WriteEvent(CTraceEventFormat::Begin, oTask.pName->strA, CTraceEventFormat::CArgs(), &oTask.rf, oTask.pDomain->nameA);
+            }
+#endif
         }
     }
-    void TaskBeginFn(STaskDescriptor& oTask, void* fn) override
-    {
-        WriteRecord(ERecordType::BeginTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, nullptr, nullptr, nullptr, 0, fn});
-    }
+
     void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length) override
     {
         WriteRecord(ERecordType::Metadata, SRecord{oTask.rf, *oTask.pDomain, oTask.id, __itt_null, pKey, nullptr, data, length});
+
+#ifdef __ANDROID_API__
+        Cookie<CTraceEventFormat::CArgs>(oTask).Add(pKey->strA, length ? std::string(data, length).c_str() : data);
+#endif
     }
 
     void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, double value) override
@@ -388,17 +399,29 @@ class CSEARecorder: public IHandler
         else
         {
             WriteRecord(ERecordType::EndTask, SRecord{rf, *oTask.pDomain, __itt_null, __itt_null});
+#ifdef __ANDROID_API__
+            if (oTask.pName)
+            {
+                m_oTraceEventFormat.WriteEvent(CTraceEventFormat::End, oTask.pName->strA, Cookie<CTraceEventFormat::CArgs>(oTask), &oTask.rf, oTask.pDomain->nameA);
+            }
+#endif
         }
     }
+
     void Marker(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope theScope) override
     {
         const char* scope = GetScope(theScope);
         WriteRecord(ERecordType::Marker, SRecord{rf, *pDomain, id, __itt_null, pName, nullptr, scope, strlen(scope)});
     }
 
-    void Counter(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, const __itt_string_handle *pName, double value)
+    void Counter(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, const __itt_string_handle *pName, double value) override
     {
         WriteRecord(ERecordType::Counter, SRecord{rf, *pDomain, __itt_null, __itt_null, pName, &value});
+#ifdef __ANDROID_API__
+        CTraceEventFormat::CArgs args;
+        args.Add(pName->strA, value);
+        m_oTraceEventFormat.WriteEvent(CTraceEventFormat::Counter, pDomain->nameA, args, &rf);
+#endif
     }
 
     void SetThreadName(const CTraceEventFormat::SRegularFields& rf, const char* name) override
