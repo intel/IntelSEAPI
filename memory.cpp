@@ -88,6 +88,9 @@
 
     #include <pthread.h>
     #include <assert.h>
+    #include <execinfo.h>
+    #include <dlfcn.h>
+    #include <string.h>
 
     pthread_key_t AllocTLSKey()
     {
@@ -113,6 +116,27 @@
         }
     };
 
+    bool HasSEAInStack()
+    {
+        const size_t stack_depth = 100;
+        void *trace[stack_depth] = {};
+
+    #ifdef __APPLE__
+        const int frames_to_skip = 3;
+    #else
+        const int frames_to_skip = 7;
+    #endif
+        int trace_size = backtrace(trace, stack_depth);
+        for (int i = frames_to_skip; i < trace_size; ++i)
+        {
+            Dl_info dl_info = {};
+            dladdr(trace[i], &dl_info);
+            if (dl_info.dli_fname && strstr(dl_info.dli_fname, "/IntelSEAPI."))
+                return true;
+        }
+        return false;
+    }
+
     #if defined(__APPLE__) && defined(_DEBUG)
         #include <malloc/malloc.h>
         #include <mach/mach.h>
@@ -122,7 +146,7 @@
         void* (*g_origMalloc)(struct _malloc_zone_t *zone, size_t size) = nullptr;
         void* MallocHook(struct _malloc_zone_t *zone, size_t size)
         {
-            if (pthread_getspecific(tls_key))
+            if (pthread_getspecific(tls_key) || HasSEAInStack())
                 return g_origMalloc(zone, size);
             CRecursionScope scope;
 
@@ -136,7 +160,7 @@
         void (*g_origFree)(struct _malloc_zone_t *zone, void *ptr) = nullptr;
         void FreeHook(struct _malloc_zone_t *zone, void *ptr)
         {
-            if (pthread_getspecific(tls_key))
+            if (pthread_getspecific(tls_key) || HasSEAInStack())
                 return g_origFree(zone, ptr);
             CRecursionScope scope;
 
@@ -184,7 +208,7 @@
             void *malloc(size_t size)
             {
                 static void* (*g_origMalloc)(size_t) = (void*(*)(size_t))dlsym(RTLD_NEXT, "malloc");
-                if (pthread_getspecific(tls_key))
+                if (pthread_getspecific(tls_key) || HasSEAInStack())
                     return g_origMalloc(size);
                 CRecursionScope scope;
 
@@ -198,7 +222,7 @@
             void free(void *ptr)
             {
                 static void (*g_origFree)(void *ptr) = (void (*)(void *))dlsym(RTLD_NEXT, "free");
-                if (pthread_getspecific(tls_key))
+                if (pthread_getspecific(tls_key) || HasSEAInStack())
                     return g_origFree(ptr);
                 CRecursionScope scope;
 
@@ -223,7 +247,7 @@
 
             void* MallocHook(size_t size, const void * context)
             {
-                if (pthread_getspecific(tls_key))
+                if (pthread_getspecific(tls_key) || HasSEAInStack())
                     return g_origMalloc(size, context);
                 CRecursionScope scope;
 
@@ -236,7 +260,7 @@
 
             void FreeHook(void* ptr, const void* context)
             {
-                if (pthread_getspecific(tls_key))
+                if (pthread_getspecific(tls_key) || HasSEAInStack())
                     return g_origFree(ptr, context);
                 CRecursionScope scope;
 

@@ -66,6 +66,7 @@ endforeach( OUTPUTCONFIG CMAKE_CONFIGURATION_TYPES )
 add_executable(IntelSEAPI
     main.cpp
     memory.cpp
+    itt_notify.hpp
     buildall.py
     runtool/sea_runtool.py
     README.txt

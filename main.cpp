@@ -15,26 +15,7 @@
 #   HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 **********************************************************************************************************************************************************************************************************************************************************************************************/
-
-#ifdef _WIN32
-    #define message(ignore) //suffocates #pragma message("WARNING!!!... about using "INTEL_ITTNOTIFY_ENABLE_LEGACY"
-#elif defined(__APPLE__)
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-W#warnings"
-#else
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-Wcpp"
-#endif
-
-#define INTEL_ITTNOTIFY_API_PRIVATE
-#define INTEL_ITTNOTIFY_ENABLE_LEGACY
-#include "ittnotify.h"
-
-#ifdef _WIN32
-    #undef message
-#else
-    #pragma GCC diagnostic pop
-#endif
+#include "itt_notify.hpp"
 
 #include <thread>
 #include <chrono>
@@ -159,23 +140,17 @@ namespace std { //android NDK is missing this functionality
 bool g_done = false;
 // Create a domain that is visible globally: we will use it in our example.
 __itt_domain* domain = __itt_domain_create("Example");
+ITT_DOMAIN("Example");
 __itt_domain* domain2 = __itt_domain_create("Domain2");
 // Create string handles which associates with the "main" task.
-__itt_string_handle* handle_main = __itt_string_handle_create("main");
-__itt_string_handle* handle_marker = __itt_string_handle_create("MARKER");
-#ifdef _WIN32
-__itt_string_handle* handle_markerW = __itt_string_handle_createW(L"MARKER");
-#endif
+
 __itt_string_handle* handle_exe_name = __itt_string_handle_create("ExeName");
-__itt_string_handle* handle_createthread = __itt_string_handle_create("CreateThread");
-__itt_string_handle* handle_counter = __itt_string_handle_create("counter");
 __itt_string_handle* handle_region1 = __itt_string_handle_create("region1");
 __itt_id region1id = __itt_id_make(handle_region1, 2);
 __itt_string_handle* handle_region2 = __itt_string_handle_create("region2");
 __itt_id region2id = __itt_id_make(handle_region2, 3);
 __itt_string_handle* handle_overlapped = __itt_string_handle_create("overlapped");
 __itt_string_handle* metadata_handle = __itt_string_handle_create("image");
-__itt_string_handle* sinus_handle = __itt_string_handle_create("sinus");
 
 
 // Create string handle for the work task.
@@ -197,10 +172,6 @@ void ITTAPI get_clock_info(__itt_clock_info* clock_info, void*)
 
 
 __itt_clock_domain* clock_domain = nullptr;
-__itt_track_group* track_group = nullptr; //initialized in main
-__itt_track* gpu_track = nullptr; //initialized in main
-__itt_string_handle* handle_track_group = __itt_string_handle_create("track group");
-__itt_string_handle* gpu_track_name = __itt_string_handle_create("GPU");
 __itt_string_handle* handle_stacked = __itt_string_handle_create("stacked");
 
 
@@ -313,11 +284,10 @@ int ResolveSymbol(char* request)
 
 void TaskStack(int level)
 {
-    __itt_task_begin(domain, __itt_null, __itt_null, handle_stacked);
+    ITT_FUNCTION_TASK();
     std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
     if (level) TaskStack(level - 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
-    __itt_task_end(domain);
 }
 
 void workerthread(int data)
@@ -336,9 +306,8 @@ void workerthread(int data)
     {
         __itt_sync_acquired((void*)&workerthread);
 
-        __itt_counter_inc_delta_v3(domain, handle_counter, rand());
-        double sinus_value = std::abs(10000. * sin(counter / 3.14));
-        __itt_metadata_add(domain, __itt_null, sinus_handle, __itt_metadata_double, 1, &sinus_value);
+        ITT_COUNTER("random", rand());
+        ITT_COUNTER("sinus", std::abs(10000. * sin(counter / 3.14)));
         bool bOverlapped = !(rand() % 2);
         unsigned long long start = TClock::now().time_since_epoch().count();
         __itt_task_begin(domain, id, __itt_null, handle_work);
@@ -347,13 +316,12 @@ void workerthread(int data)
 
         if (rand() % 5 == 1)
         {
-            __itt_set_track(gpu_track);
-                unsigned long long end = TClock::now().time_since_epoch().count();
-                unsigned long long length = end - start;
-                __itt_task_begin_ex(domain, clock_domain, start + length / 4, __itt_null, id, handle_gpu);
-                __itt_relation_add_to_current(domain, __itt_relation_is_continuation_of, id);
-                __itt_task_end_ex(domain, clock_domain, end - length / 4);
-            __itt_set_track(nullptr);
+            ITT_SCOPE_TRACK(nullptr, "GPU");
+            unsigned long long end = TClock::now().time_since_epoch().count();
+            unsigned long long length = end - start;
+            __itt_task_begin_ex(domain, clock_domain, start + length / 4, __itt_null, id, handle_gpu);
+            __itt_relation_add_to_current(domain, __itt_relation_is_continuation_of, id);
+            __itt_task_end_ex(domain, clock_domain, end - length / 4);
         }
         __itt_id id = __itt_null;
         if (bOverlapped)
@@ -437,7 +405,7 @@ int main(int argc, char* argv[])
                         for (uint64_t i = 0; i < count; ++i)
                         {
                             __itt_id id = __itt_id_make(const_cast<uint64_t*>(&count), i);
-                            __itt_task_begin(domain, id, __itt_null, handle_main);
+                            __itt_task_begin(domain, id, __itt_null, handle_work);
                             double value = double(i);
                             __itt_metadata_add(domain, id, metadata_handle, __itt_metadata_double, 1, &value);
                             __itt_task_end(domain);
@@ -464,7 +432,6 @@ int main(int argc, char* argv[])
 
         return 0;
     }
-
     const char* api_ver = __itt_api_version();
     VerbosePrint("ITT Version: %s\n", api_ver ? api_ver : "Not loaded");
 
@@ -477,9 +444,6 @@ int main(int argc, char* argv[])
     __itt_metadata_str_add(domain, id, nullptr, "Named before call", 0); //it's possible to assign name to id (if key==nullptr)
     __itt_frame_submit_v3(domain, &id, begin_frame, end_frame); //this name is later used as name of submitted frame
 
-    track_group = __itt_track_group_create(handle_track_group, __itt_track_group_type_normal);
-    gpu_track = __itt_track_create(track_group, gpu_track_name, __itt_track_type_normal);
-
     __itt_region_begin(domain, region1id, __itt_null, handle_region1);
 #ifdef _WIN32
     __itt_sync_createW((void*)&workerthread, L"SyncObj", L"sync_obj_instance", __itt_attr_mutex);
@@ -487,27 +451,23 @@ int main(int argc, char* argv[])
     __itt_sync_create((void*)&workerthread, "SyncObj", "sync_obj_instance", __itt_attr_mutex);
 #endif
     __itt_sync_rename((void*)&workerthread, "NewName");
-#ifdef _WIN32
-    __itt_marker(domain, __itt_null, handle_markerW, __itt_scope_global);
-#else
-    __itt_marker(domain, __itt_null, handle_marker, __itt_scope_global);
-#endif
+
+    ITT_MARKER("MARKER", scope_global);
+
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     // Create a task associated with the "main" routine.
 
-    __itt_id task_id = __itt_id_make(&task_id, 0);
-    __itt_task_begin(domain, task_id, __itt_null, handle_main);
+    ITT_SCOPE_TASK("main");
 
 #ifdef _WIN32
     static long long frequency = 0;
     if (!frequency)
         QueryPerformanceFrequency((LARGE_INTEGER*)&frequency);
-    __itt_metadata_add(domain, task_id, __itt_string_handle_create("freq"), __itt_metadata_s64, 1, &frequency);
-
+    ITT_ARG("freq", frequency);
 
     LARGE_INTEGER qpc = {};
     QueryPerformanceCounter(&qpc);
-    __itt_metadata_add(domain, task_id, __itt_string_handle_create("begin"), __itt_metadata_s64, 1, &qpc);
+    ITT_ARG("begin", qpc.QuadPart);
 #endif
     // Save the name of the app's exe that we can show when analyzing traces.
     __itt_metadata_str_add(domain, __itt_null, handle_exe_name, argv[0], 0);
@@ -516,9 +476,8 @@ int main(int argc, char* argv[])
     for (int i = 0; i < 3; i++)
     {
         // We might be curious about the cost of CreateThread. We add tracing to do the measurement.
-        __itt_task_begin(domain, __itt_null, __itt_null, handle_createthread);
+        ITT_SCOPE_TASK("CreateThread");
         threads.push_back(new std::thread(workerthread, i));
-        __itt_task_end(domain);
     }
 
     threads.push_back(new std::thread(ChangePaths));
@@ -534,13 +493,10 @@ int main(int argc, char* argv[])
     g_done = true;
 #ifdef _WIN32
     QueryPerformanceCounter(&qpc);
-    __itt_metadata_add(domain, task_id, __itt_string_handle_create("end"), __itt_metadata_s64, 1, &qpc);
+    ITT_ARG("end", qpc.QuadPart);
 #endif
-    // Mark the end of the main task
-    __itt_task_end(domain);
 
-
-    __itt_marker(domain, __itt_null, handle_marker, __itt_marker_scope_thread);
+    ITT_MARKER("MARKER", scope_thread);
 
     __itt_frame frame = __itt_frame_create("Frame");
     __itt_frame_begin(frame);

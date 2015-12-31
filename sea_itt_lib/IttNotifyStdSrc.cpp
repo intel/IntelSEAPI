@@ -196,7 +196,7 @@ public:
             ifs << pair.first << std::endl;
         }
     }
-} g_oDomainFilter; 
+} g_oDomainFilter;
 
 bool PathExists(const std::string& path)
 {
@@ -344,8 +344,8 @@ __itt_domain* UNICODE_AGNOSTIC(domain_create)(const char* name)
     {
         return NULL;
     }
+    CIttLocker locker;
     static __itt_global* pGlobal = GetITTGlobal();
-    __itt_mutex_lock(&pGlobal->mutex);
     for (h_tail = NULL, h = pGlobal->domain_list; h != NULL; h_tail = h, h = h->next)
     {
         if (h->nameA != NULL && !__itt_fstrcmp(h->nameA, name)) break;
@@ -354,7 +354,6 @@ __itt_domain* UNICODE_AGNOSTIC(domain_create)(const char* name)
     {
         NEW_DOMAIN_A(pGlobal,h,h_tail,name);
     }
-    __itt_mutex_unlock(&pGlobal->mutex);
     InitDomain(h);
     return h;
 }
@@ -374,8 +373,9 @@ __itt_string_handle* ITTAPI UNICODE_AGNOSTIC(string_handle_create)(const char* n
     {
         return NULL;
     }
+    CIttLocker locker;
     static __itt_global* pGlobal = GetITTGlobal();
-    __itt_mutex_lock(&pGlobal->mutex);
+
     for (h_tail = NULL, h = pGlobal->string_list; h != NULL; h_tail = h, h = h->next)
     {
         if (h->strA != NULL && !__itt_fstrcmp(h->strA, name)) break;
@@ -384,7 +384,7 @@ __itt_string_handle* ITTAPI UNICODE_AGNOSTIC(string_handle_create)(const char* n
     {
         NEW_STRING_HANDLE_A(pGlobal,h,h_tail,name);
     }
-    __itt_mutex_unlock(&pGlobal->mutex);
+
     sea::ReportString(h);
     return h;
 }
@@ -746,6 +746,7 @@ void set_track(__itt_track* track)
 }
 
 uint64_t g_lastPseudoThread = ~0x0;
+int g_lastPseudoProcess = -1;
 
 __itt_track* track_create(__itt_track_group* track_group, __itt_string_handle* name, __itt_track_type track_type)
 {
@@ -753,7 +754,7 @@ __itt_track* track_create(__itt_track_group* track_group, __itt_string_handle* n
     CIttLocker locker;
     uint64_t tid = g_lastPseudoThread--;
     WriteThreadName(tid, name->strA);
-    CTraceEventFormat::SRegularFields* pRF = new CTraceEventFormat::SRegularFields{CTraceEventFormat::GetRegularFields().pid, tid};
+    CTraceEventFormat::SRegularFields* pRF = new CTraceEventFormat::SRegularFields{track_group ? uint64_t(track_group->extra1) : CTraceEventFormat::GetRegularFields().pid, tid};
 
     for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
     {
@@ -781,7 +782,7 @@ __itt_track_group* track_group_create(__itt_string_handle* pName, __itt_track_gr
         ppTrackGroup = &(*ppTrackGroup)->next;
     }
 
-    return *ppTrackGroup = new __itt_track_group{pName, nullptr, track_group_type};
+    return *ppTrackGroup = new __itt_track_group{pName, nullptr, track_group_type, g_lastPseudoProcess--};
 }
 
 class COverlapped //FIXME: use pool for std::map as well
@@ -1241,7 +1242,8 @@ class CMemoryTracker
 protected:
     TCritSec m_cs;
     std::map<const void*, size_t> m_size_map;
-    std::map<size_t, std::pair<__itt_string_handle*, size_t>> m_counter_map;
+    typedef std::pair<__itt_string_handle*, size_t/*count*/> TBlockData;
+    std::map<size_t/*block size*/, TBlockData> m_counter_map;
     bool m_bInitialized = false;
     size_t m_common_size = 0;
 public:
@@ -1251,21 +1253,25 @@ public:
     void Alloc(SHeapFunction* pHeapFunction, const void* addr, size_t size)
     {
         if (!m_bInitialized) return;
-        std::lock_guard<TCritSec> lock(m_cs);
-        m_size_map[addr] = size;
-        auto it = m_counter_map.find(size);
-        if (m_counter_map.end() == it)
+        TBlockData block;
         {
-            std::string name = pHeapFunction->name + std::string(":size<") + std::to_string(size) + ">(count)";
-            __itt_string_handle* pName = UNICODE_AGNOSTIC(string_handle_create)(name.c_str());
-            it = m_counter_map.insert(m_counter_map.end(), std::make_pair(size, std::make_pair(pName, size_t(1))));
+            std::lock_guard<TCritSec> lock(m_cs);
+            m_size_map[addr] = size;
+            auto it = m_counter_map.find(size);
+            if (m_counter_map.end() == it)
+            {
+                std::string name = pHeapFunction->name + std::string(":size<") + std::to_string(size) + ">(count)";
+                __itt_string_handle* pName = UNICODE_AGNOSTIC(string_handle_create)(name.c_str());
+                it = m_counter_map.insert(m_counter_map.end(), std::make_pair(size, std::make_pair(pName, size_t(1))));
+            }
+            else
+            {
+                ++it->second.second;
+            }
+            m_common_size += size;
+            block = it->second;
         }
-        else
-        {
-            ++it->second.second;
-        }
-        m_common_size += size;
-        Counter(pHeapFunction->pDomain, it->second.first, double(it->second.second));
+        Counter(pHeapFunction->pDomain, block.first, double(block.second));
 /*XXX
         Counter(pHeapFunction->pDomain, pHeapFunction->pName, double(m_common_size));
         if (STaskDescriptor* pTask = GetThreadRecord()->pTask)
@@ -1683,21 +1689,21 @@ void FinitaLaComedia()
 
     __itt_global* pGlobal = GetITTGlobal();
     if (!pGlobal) return;
-    mutex_t mutex = pGlobal->mutex;
-    __itt_mutex_lock(&mutex);
-    if (sea::IsVerboseMode())
+
     {
-        VerbosePrint("Call statistics:\n");
-        const auto& map = CIttFnStat::GetStats();
-        for (const auto& pair: map)
+        CIttLocker locker;
+        if (sea::IsVerboseMode())
         {
-            VerbosePrint("%d\t%s\n", (int)pair.second, pair.first.c_str());
+            VerbosePrint("Call statistics:\n");
+            const auto& map = CIttFnStat::GetStats();
+            for (const auto& pair: map)
+            {
+                VerbosePrint("%d\t%s\n", (int)pair.second, pair.first.c_str());
+            }
         }
+
+        TraverseThreadRecords([](SThreadRecord& tr){tr.files.clear();});
     }
-
-    TraverseThreadRecords([](SThreadRecord& tr){tr.files.clear();});
-
-    __itt_mutex_unlock(&mutex);
 #ifdef __linux__
     WriteFTraceTimeSyncMarkers();
 #endif
