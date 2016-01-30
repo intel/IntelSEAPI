@@ -1,4 +1,4 @@
-/*
+/* <copyright>
   This file is provided under a dual BSD/GPLv2 license.  When using or
   redistributing this file, you may do so under either license.
 
@@ -54,21 +54,22 @@
   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
+</copyright> */
+
 #include "ittnotify_config.h"
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
 #include <windows.h>
 #pragma optimize("", off)
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
-#if ITT_PLATFORM != ITT_PLATFORM_MAC
+#if ITT_PLATFORM != ITT_PLATFORM_MAC && ITT_PLATFORM != ITT_PLATFORM_FREEBSD
 #include <malloc.h>
 #endif
 #include <stdlib.h>
 
 #include "jitprofiling.h"
 
-static const char rcsid[] = "\n@(#) $Revision: 357699 $\n";
+static const char rcsid[] = "\n@(#) $Revision: 398909 $\n";
 
 #define DLL_ENVIRONMENT_VAR             "VS_PROFILER"
 

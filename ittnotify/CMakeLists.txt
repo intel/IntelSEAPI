@@ -38,11 +38,8 @@ endif()
 
 target_include_directories(ittnotify PUBLIC ./src/ittnotify)
 
-if (WIN32)
-    #TARGET_LINK_LIBRARIES(ittnotify)
-else()
-    #TARGET_LINK_LIBRARIES(ittnotify dl)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -fPIC")
+if (NOT WIN32)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
 endif()
 
 SET_TARGET_PROPERTIES(ittnotify PROPERTIES LINKER_LANGUAGE C)

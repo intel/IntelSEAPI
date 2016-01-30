@@ -1,10 +1,10 @@
-/*
+/* <copyright>
   This file is provided under a dual BSD/GPLv2 license.  When using or
   redistributing this file, you may do so under either license.
 
   GPL LICENSE SUMMARY
 
-  Copyright (c) 2005-2013 Intel Corporation. All rights reserved.
+  Copyright (c) 2005-2014 Intel Corporation. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of version 2 of the GNU General Public License as
@@ -26,7 +26,7 @@
 
   BSD LICENSE
 
-  Copyright (c) 2005-2013 Intel Corporation. All rights reserved.
+  Copyright (c) 2005-2014 Intel Corporation. All rights reserved.
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -54,7 +54,7 @@
   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
+</copyright> */
 #ifndef _LEGACY_ITTNOTIFY_H_
 #define _LEGACY_ITTNOTIFY_H_
 
@@ -76,11 +76,17 @@
 #  define ITT_OS_MAC   3
 #endif /* ITT_OS_MAC */
 
+#ifndef ITT_OS_FREEBSD
+#  define ITT_OS_FREEBSD   4
+#endif /* ITT_OS_FREEBSD */
+
 #ifndef ITT_OS
 #  if defined WIN32 || defined _WIN32
 #    define ITT_OS ITT_OS_WIN
 #  elif defined( __APPLE__ ) && defined( __MACH__ )
 #    define ITT_OS ITT_OS_MAC
+#  elif defined( __FreeBSD__ )
+#    define ITT_OS ITT_OS_FREEBSD
 #  else
 #    define ITT_OS ITT_OS_LINUX
 #  endif
@@ -98,11 +104,17 @@
 #  define ITT_PLATFORM_MAC 3
 #endif /* ITT_PLATFORM_MAC */
 
+#ifndef ITT_PLATFORM_FREEBSD
+#  define ITT_PLATFORM_FREEBSD 4
+#endif /* ITT_PLATFORM_FREEBSD */
+
 #ifndef ITT_PLATFORM
 #  if ITT_OS==ITT_OS_WIN
 #    define ITT_PLATFORM ITT_PLATFORM_WIN
 #  elif ITT_OS==ITT_OS_MAC
 #    define ITT_PLATFORM ITT_PLATFORM_MAC
+#  elif ITT_OS==ITT_OS_FREEBSD
+#    define ITT_PLATFORM ITT_PLATFORM_FREEBSD
 #  else
 #    define ITT_PLATFORM ITT_PLATFORM_POSIX
 #  endif
@@ -165,10 +177,10 @@
  */
 #ifdef __STRICT_ANSI__
 #define ITT_INLINE           static
-#define ITT_INLINE_ATTRIBUTE 
+#define ITT_INLINE_ATTRIBUTE __attribute__((unused))
 #else  /* __STRICT_ANSI__ */
 #define ITT_INLINE           static inline
-#define ITT_INLINE_ATTRIBUTE __attribute__ ((always_inline, unused))
+#define ITT_INLINE_ATTRIBUTE __attribute__((always_inline, unused))
 #endif /* __STRICT_ANSI__ */
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 /** @endcond */
@@ -270,25 +282,33 @@ extern "C" {
 void ITTAPI __itt_pause(void);
 /** @brief Resume collection */
 void ITTAPI __itt_resume(void);
+/** @brief Detach collection */
+void ITTAPI __itt_detach(void);
 
 /** @cond exclude_from_documentation */
 #ifndef INTEL_NO_MACRO_BODY
 #ifndef INTEL_NO_ITTNOTIFY_API
 ITT_STUBV(ITTAPI, void, pause,   (void))
 ITT_STUBV(ITTAPI, void, resume,  (void))
+ITT_STUBV(ITTAPI, void, detach,  (void))
 #define __itt_pause      ITTNOTIFY_VOID(pause)
 #define __itt_pause_ptr  ITTNOTIFY_NAME(pause)
 #define __itt_resume     ITTNOTIFY_VOID(resume)
 #define __itt_resume_ptr ITTNOTIFY_NAME(resume)
+#define __itt_detach     ITTNOTIFY_VOID(detach)
+#define __itt_detach_ptr ITTNOTIFY_NAME(detach)
 #else  /* INTEL_NO_ITTNOTIFY_API */
 #define __itt_pause()
 #define __itt_pause_ptr  0
 #define __itt_resume()
 #define __itt_resume_ptr 0
+#define __itt_detach()
+#define __itt_detach_ptr 0
 #endif /* INTEL_NO_ITTNOTIFY_API */
 #else  /* INTEL_NO_MACRO_BODY */
 #define __itt_pause_ptr  0
 #define __itt_resume_ptr 0
+#define __itt_detach_ptr 0
 #endif /* INTEL_NO_MACRO_BODY */
 /** @endcond */
 #endif /* _ITTNOTIFY_H_ */
@@ -476,7 +496,7 @@ ITT_STUBV(ITTAPI, void, sync_set_name,  (void *addr, const char    *objtype, con
  * @param[in] objname -   null-terminated object name string. If NULL, no name will be assigned
  *                        to the object -- you can use the __itt_sync_rename call later to assign
  *                        the name
- * @param[in] typelen, namelen -   a lenght of string for appropriate objtype and objname parameter
+ * @param[in] typelen, namelen -   a length of string for appropriate objtype and objname parameter
  * @param[in] attribute - one of [#__itt_attr_barrier, #__itt_attr_mutex] values which defines the
  *                        exact semantics of how prepare/acquired/releasing calls work.
  * @return __itt_err upon failure (name or namelen being null,name and namelen mismatched)

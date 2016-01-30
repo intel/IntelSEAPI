@@ -1,10 +1,10 @@
-/*
+/* <copyright>
   This file is provided under a dual BSD/GPLv2 license.  When using or
   redistributing this file, you may do so under either license.
 
   GPL LICENSE SUMMARY
 
-  Copyright (c) 2005-2013 Intel Corporation. All rights reserved.
+  Copyright (c) 2005-2014 Intel Corporation. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of version 2 of the GNU General Public License as
@@ -26,7 +26,7 @@
 
   BSD LICENSE
 
-  Copyright (c) 2005-2013 Intel Corporation. All rights reserved.
+  Copyright (c) 2005-2014 Intel Corporation. All rights reserved.
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -54,7 +54,8 @@
   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
+</copyright> */
+
 #include "ittnotify_config.h"
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
@@ -76,13 +77,13 @@
 
 #include "disable_warnings.h"
 
-static const char api_version[] = API_VERSION "\0\n@(#) $Revision: 340998 $\n";
+static const char api_version[] = API_VERSION "\0\n@(#) $Revision: 440146 $\n";
 
 #define _N_(n) ITT_JOIN(INTEL_ITTNOTIFY_PREFIX,n)
 
 #if ITT_OS==ITT_OS_WIN
 static const char* ittnotify_lib_name = "libittnotify.dll";
-#elif ITT_OS==ITT_OS_LINUX
+#elif ITT_OS==ITT_OS_LINUX || ITT_OS==ITT_OS_FREEBSD
 static const char* ittnotify_lib_name = "libittnotify.so";
 #elif ITT_OS==ITT_OS_MAC
 static const char* ittnotify_lib_name = "libittnotify.dylib";
@@ -113,7 +114,15 @@ static const char* ittnotify_lib_name = "libittnotify.dylib";
 #endif
 
 /* default location of userapi collector on Android */
-#define ANDROID_ITTNOTIFY_DEFAULT_PATH  "/data/data/com.intel.vtune/intel/libittnotify.so"
+#define ANDROID_ITTNOTIFY_DEFAULT_PATH_MASK(x)  "/data/data/com.intel.vtune/perfrun/lib" \
+                                                #x "/runtime/libittnotify.so"
+
+#if ITT_ARCH==ITT_ARCH_IA32 || ITT_ARCH==ITT_ARCH_ARM
+#define ANDROID_ITTNOTIFY_DEFAULT_PATH  ANDROID_ITTNOTIFY_DEFAULT_PATH_MASK(32)
+#else
+#define ANDROID_ITTNOTIFY_DEFAULT_PATH  ANDROID_ITTNOTIFY_DEFAULT_PATH_MASK(64)
+#endif
+
 #endif
 
 
@@ -166,7 +175,7 @@ static __itt_fini_ittlib_t* __itt_fini_ittlib_ptr = _N_(fini_ittlib);
 #define ITT_STUB(api,type,name,args,params,ptr,group,format)   \
 static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
 typedef type api ITT_JOIN(_N_(name),_t) args;                  \
-ITT_EXTERN_C ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); \
+ITT_EXTERN_C_BEGIN ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); ITT_EXTERN_C_END \
 static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
 {                                                              \
     __itt_init_ittlib_name(NULL, __itt_group_all);             \
@@ -179,7 +188,7 @@ static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
 #define ITT_STUBV(api,type,name,args,params,ptr,group,format)  \
 static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
 typedef type api ITT_JOIN(_N_(name),_t) args;                  \
-ITT_EXTERN_C ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); \
+ITT_EXTERN_C_BEGIN ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); ITT_EXTERN_C_END \
 static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
 {                                                              \
     __itt_init_ittlib_name(NULL, __itt_group_all);             \
@@ -197,12 +206,12 @@ static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
 #define ITT_STUB(api,type,name,args,params,ptr,group,format)   \
 static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
 typedef type api ITT_JOIN(_N_(name),_t) args;                  \
-ITT_EXTERN_C ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init));
+ITT_EXTERN_C_BEGIN ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); ITT_EXTERN_C_END
 
 #define ITT_STUBV(api,type,name,args,params,ptr,group,format)  \
 static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
 typedef type api ITT_JOIN(_N_(name),_t) args;                  \
-ITT_EXTERN_C ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init));
+ITT_EXTERN_C_BEGIN ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); ITT_EXTERN_C_END
 
 #define __ITT_INTERNAL_INIT
 #include "ittnotify_static.h"
@@ -272,7 +281,8 @@ __itt_global _N_(_ittapi_global) = {
     NULL,                                          /* thread_list */
     NULL,                                          /* domain_list */
     NULL,                                          /* string_list */
-    __itt_collection_normal                        /* collection state */
+    __itt_collection_normal,                       /* collection state */
+    NULL                                          /* counter_list */
 };
 
 typedef void (__itt_api_init_t)(__itt_global*, __itt_group_id);
@@ -450,6 +460,158 @@ static __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_cre
     }
     __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
     return h;
+}
+
+#if ITT_PLATFORM==ITT_PLATFORM_WIN
+static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_createW),_init))(const wchar_t *name, const wchar_t *domain)
+{
+    __itt_counter_info_t *h_tail = NULL, *h = NULL;
+    __itt_metadata_type type = __itt_metadata_u64;
+
+    if (name == NULL)
+    {
+        return NULL;
+    }
+
+    ITT_MUTEX_INIT_AND_LOCK(_N_(_ittapi_global));
+    if (_N_(_ittapi_global).api_initialized)
+    {
+        if (ITTNOTIFY_NAME(counter_createW) && ITTNOTIFY_NAME(counter_createW) != ITT_VERSIONIZE(ITT_JOIN(_N_(counter_createW),_init)))
+        {
+            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            return ITTNOTIFY_NAME(counter_createW)(name, domain);
+        }
+    }
+    for (h_tail = NULL, h = _N_(_ittapi_global).counter_list; h != NULL; h_tail = h, h = h->next)
+    {
+        if (h->nameW != NULL  && h->type == type && !wcscmp(h->nameW, name) && ((h->domainW == NULL && domain == NULL) ||
+            (h->domainW != NULL && domain != NULL && !wcscmp(h->domainW, domain)))) break;
+
+    }
+    if (h == NULL)
+    {
+        NEW_COUNTER_W(&_N_(_ittapi_global),h,h_tail,name,domain,type);
+    }
+    __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+    return (__itt_counter)h;
+}
+
+static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_createA),_init))(const char *name, const char *domain)
+#else  /* ITT_PLATFORM!=ITT_PLATFORM_WIN */
+static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create),_init))(const char *name, const char *domain)
+#endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
+{
+    __itt_counter_info_t *h_tail = NULL, *h = NULL;
+    __itt_metadata_type type = __itt_metadata_u64;
+
+    if (name == NULL)
+    {
+        return NULL;
+    }
+
+    ITT_MUTEX_INIT_AND_LOCK(_N_(_ittapi_global));
+    if (_N_(_ittapi_global).api_initialized)
+    {
+#if ITT_PLATFORM==ITT_PLATFORM_WIN
+        if (ITTNOTIFY_NAME(counter_createA) && ITTNOTIFY_NAME(counter_createA) != ITT_VERSIONIZE(ITT_JOIN(_N_(counter_createA),_init)))
+        {
+            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            return ITTNOTIFY_NAME(counter_createA)(name, domain);
+        }
+#else
+        if (ITTNOTIFY_NAME(counter_create) && ITTNOTIFY_NAME(counter_create) != ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create),_init)))
+        {
+            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            return ITTNOTIFY_NAME(counter_create)(name, domain);
+        }
+#endif
+    }
+    for (h_tail = NULL, h = _N_(_ittapi_global).counter_list; h != NULL; h_tail = h, h = h->next)
+    {
+        if (h->nameA != NULL  && h->type == type && !__itt_fstrcmp(h->nameA, name) && ((h->domainA == NULL && domain == NULL) || 
+            (h->domainA != NULL && domain != NULL && !__itt_fstrcmp(h->domainA, domain)))) break;
+    }
+    if (h == NULL)
+    {
+       NEW_COUNTER_A(&_N_(_ittapi_global),h,h_tail,name,domain,type);
+    }
+    __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+    return (__itt_counter)h;
+}
+
+#if ITT_PLATFORM==ITT_PLATFORM_WIN
+static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typedW),_init))(const wchar_t *name, const wchar_t *domain, __itt_metadata_type type)
+{
+    __itt_counter_info_t *h_tail = NULL, *h = NULL;
+
+    if (name == NULL)
+    {
+        return NULL;
+    }
+
+    ITT_MUTEX_INIT_AND_LOCK(_N_(_ittapi_global));
+    if (_N_(_ittapi_global).api_initialized)
+    {
+        if (ITTNOTIFY_NAME(counter_create_typedW) && ITTNOTIFY_NAME(counter_create_typedW) != ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typedW),_init)))
+        {
+            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            return ITTNOTIFY_NAME(counter_create_typedW)(name, domain, type);
+        }
+    }
+    for (h_tail = NULL, h = _N_(_ittapi_global).counter_list; h != NULL; h_tail = h, h = h->next)
+    {
+        if (h->nameW != NULL  && h->type == type && !wcscmp(h->nameW, name) && ((h->domainW == NULL && domain == NULL) ||
+            (h->domainW != NULL && domain != NULL && !wcscmp(h->domainW, domain)))) break;
+
+    }
+    if (h == NULL)
+    {
+        NEW_COUNTER_W(&_N_(_ittapi_global),h,h_tail,name,domain,type);
+    }
+    __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+    return (__itt_counter)h;
+}
+
+static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typedA),_init))(const char *name, const char *domain, __itt_metadata_type type)
+#else  /* ITT_PLATFORM!=ITT_PLATFORM_WIN */
+static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typed),_init))(const char *name, const char *domain, __itt_metadata_type type)
+#endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
+{
+    __itt_counter_info_t *h_tail = NULL, *h = NULL;
+
+    if (name == NULL)
+    {
+        return NULL;
+    }
+
+    ITT_MUTEX_INIT_AND_LOCK(_N_(_ittapi_global));
+    if (_N_(_ittapi_global).api_initialized)
+    {
+#if ITT_PLATFORM==ITT_PLATFORM_WIN
+        if (ITTNOTIFY_NAME(counter_create_typedA) && ITTNOTIFY_NAME(counter_create_typedA) != ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typedA),_init)))
+        {
+            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            return ITTNOTIFY_NAME(counter_create_typedA)(name, domain, type);
+        }
+#else
+        if (ITTNOTIFY_NAME(counter_create_typed) && ITTNOTIFY_NAME(counter_create_typed) != ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typed),_init)))
+        {
+            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            return ITTNOTIFY_NAME(counter_create_typed)(name, domain, type);
+        }
+#endif
+    }
+    for (h_tail = NULL, h = _N_(_ittapi_global).counter_list; h != NULL; h_tail = h, h = h->next)
+    {
+        if (h->nameA != NULL  && h->type == type && !__itt_fstrcmp(h->nameA, name) && ((h->domainA == NULL && domain == NULL) || 
+            (h->domainA != NULL && domain != NULL && !__itt_fstrcmp(h->domainA, domain)))) break;
+    }
+    if (h == NULL)
+    {
+       NEW_COUNTER_A(&_N_(_ittapi_global),h,h_tail,name,domain,type);
+    }
+    __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+    return (__itt_counter)h;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -670,12 +832,12 @@ static const char* __itt_get_env_var(const char* name)
         char* env = getenv(name);
         if (env != NULL)
         {
-            size_t len = strlen(env);
+            size_t len = __itt_fstrnlen(env, MAX_ENV_VALUE_SIZE);
             size_t max_len = MAX_ENV_VALUE_SIZE - (size_t)(env_value - env_buff);
             if (len < max_len)
             {
                 const char* ret = (const char*)env_value;
-                strncpy(env_value, env, len + 1);
+                __itt_fstrcpyn(env_value, max_len, env, len + 1);
                 env_value += len + 1;
                 return ret;
             } else
@@ -693,9 +855,24 @@ static const char* __itt_get_lib_name(void)
 #ifdef __ANDROID__
     if (lib_name == NULL)
     {
-        const char* const system_wide_marker_filename = "/data/local/tmp/com.intel.itt.collector_lib";
-        int itt_marker_file_fd = open(system_wide_marker_filename, O_RDONLY);
+
+#if ITT_ARCH==ITT_ARCH_IA32 || ITT_ARCH==ITT_ARCH_ARM
+        const char* const marker_filename = "com.intel.itt.collector_lib_32";
+#else
+        const char* const marker_filename = "com.intel.itt.collector_lib_64";
+#endif
+
+        char system_wide_marker_filename[PATH_MAX] = {0};
+        int itt_marker_file_fd = -1;
         ssize_t res = 0;
+
+        res = snprintf(system_wide_marker_filename, PATH_MAX - 1, "%s%s", "/data/local/tmp/", marker_filename);
+        if (res < 0)
+        {
+            ITT_ANDROID_LOGE("Unable to concatenate marker file string.");
+            return lib_name;
+        }
+        itt_marker_file_fd = open(system_wide_marker_filename, O_RDONLY);
 
         if (itt_marker_file_fd == -1)
         {
@@ -706,7 +883,13 @@ static const char* __itt_get_lib_name(void)
             int cmdline_fd = 0;
 
             ITT_ANDROID_LOGI("Unable to open system-wide marker file.");
-            snprintf(cmdline_path, PATH_MAX - 1, "/proc/%d/cmdline", my_pid);
+            res = snprintf(cmdline_path, PATH_MAX - 1, "/proc/%d/cmdline", my_pid);
+            if (res < 0)
+            {
+                ITT_ANDROID_LOGE("Unable to get cmdline path string.");
+                return lib_name;
+            }
+
             ITT_ANDROID_LOGI("CMD file: %s\n", cmdline_path);
             cmdline_fd = open(cmdline_path, O_RDONLY);
             if (cmdline_fd == -1)
@@ -732,7 +915,13 @@ static const char* __itt_get_lib_name(void)
                 return lib_name;
             }
             ITT_ANDROID_LOGI("Package name: %s\n", package_name);
-            snprintf(app_sandbox_file, PATH_MAX - 1, "/data/data/%s/com.intel.itt.collector_lib", package_name);
+            res = snprintf(app_sandbox_file, PATH_MAX - 1, "/data/data/%s/%s", package_name, marker_filename);
+            if (res < 0)
+            {
+                ITT_ANDROID_LOGE("Unable to concatenate marker file string.");
+                return lib_name;
+            }
+
             ITT_ANDROID_LOGI("Lib marker file name: %s\n", app_sandbox_file);
             itt_marker_file_fd = open(app_sandbox_file, O_RDONLY);
             if (itt_marker_file_fd == -1)
@@ -763,7 +952,7 @@ static const char* __itt_get_lib_name(void)
                 ITT_ANDROID_LOGE("Unable to close %s file!", itt_marker_file_fd);
                 return lib_name;
             }
-            ITT_ANDROID_LOGI("Set env");
+            ITT_ANDROID_LOGI("Set env %s to %s", ITT_TO_STR(LIB_VAR_NAME), itt_lib_name);
             res = setenv(ITT_TO_STR(LIB_VAR_NAME), itt_lib_name, 0);
             if (res == -1)
             {
@@ -771,7 +960,7 @@ static const char* __itt_get_lib_name(void)
                 return lib_name;
             }
             lib_name = __itt_get_env_var(ITT_TO_STR(LIB_VAR_NAME));
-            ITT_ANDROID_LOGI("ITT Lib path from env: %s", itt_lib_name);
+            ITT_ANDROID_LOGI("ITT Lib path from env: %s", lib_name);
         }
     }
 #endif
@@ -797,8 +986,9 @@ static __itt_group_id __itt_get_groups(void)
         const char* chunk;
         while ((group_str = __itt_fsplit(group_str, ",; ", &chunk, &len)) != NULL)
         {
-            __itt_fstrcpyn(gr, chunk, sizeof(gr) - 1);
-            gr[min(len, (int)(sizeof(gr) - 1))] = 0;
+            int min_len = min(len, (int)(sizeof(gr) - 1));
+            __itt_fstrcpyn(gr, sizeof(gr) - 1, chunk,  min_len);
+            gr[min_len] = 0;
 
             for (i = 0; group_list[i].name != NULL; i++)
             {
@@ -853,7 +1043,7 @@ static void __itt_reinit_all_pointers(void)
 static void __itt_nullify_all_pointers(void)
 {
     register int i;
-    /* Nulify all pointers except domain_create and string_handle_create */
+    /* Nulify all pointers except domain_create, string_handle_create  and counter_create */
     for (i = 0; _N_(_ittapi_global).api_list_ptr[i].name != NULL; i++)
         *_N_(_ittapi_global).api_list_ptr[i].func_ptr = _N_(_ittapi_global).api_list_ptr[i].null_func;
 }
@@ -866,7 +1056,7 @@ static void __itt_nullify_all_pointers(void)
 
 ITT_EXTERN_C void _N_(fini_ittlib)(void)
 {
-    __itt_api_fini_t* __itt_api_fini_ptr;
+    __itt_api_fini_t* __itt_api_fini_ptr = NULL;
     static volatile TIDT current_thread = 0;
 
     if (_N_(_ittapi_global).api_initialized)
@@ -877,9 +1067,14 @@ ITT_EXTERN_C void _N_(fini_ittlib)(void)
             if (current_thread == 0)
             {
                 current_thread = __itt_thread_id();
-                __itt_api_fini_ptr = (__itt_api_fini_t*)(size_t)__itt_get_proc(_N_(_ittapi_global).lib, "__itt_api_fini");
+                if (_N_(_ittapi_global).lib != NULL)
+                {
+                    __itt_api_fini_ptr = (__itt_api_fini_t*)(size_t)__itt_get_proc(_N_(_ittapi_global).lib, "__itt_api_fini");
+                }
                 if (__itt_api_fini_ptr)
+                {
                     __itt_api_fini_ptr(&_N_(_ittapi_global));
+                }
 
                 __itt_nullify_all_pointers();
 
