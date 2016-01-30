@@ -418,6 +418,7 @@ int main(int argc, char* argv[])
 
         using namespace std::chrono;
         high_resolution_clock::time_point start = high_resolution_clock::now();
+        high_resolution_clock::time_point global_start = start;
         uint64_t prev_count = 0;
         for(int sec = 0; sec < work_seconds; ++sec)
         {
@@ -429,6 +430,8 @@ int main(int argc, char* argv[])
             start = end;
         }
         clock_domain = nullptr;
+        uint64_t count = total_count;
+        std::cout << "Total events per second:" << std::fixed << (count * 1000000000. / duration_cast<nanoseconds>(start - global_start).count()) << std::endl;
 
         return 0;
     }
