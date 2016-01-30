@@ -111,6 +111,8 @@ target_include_directories(sea_itt_lib PUBLIC
     ${PROJECT_BINARY_DIR}
 )
 
+TARGET_LINK_LIBRARIES(sea_itt_lib ittnotify)
+
 ################################################### INSTALLER #########################################################
 
 set(CPACK_PACKAGE_NAME "IntelSEAPI")

@@ -60,17 +60,16 @@ public:
 
     void Unmap();
 
-    void Resize(size_t size)
+    bool Resize(size_t size)
     {
         Unmap();
 #ifdef _WIN32
         //resize
         LARGE_INTEGER liSize = {};
         liSize.QuadPart = size;
-        SetFilePointerEx(m_hFile, liSize, nullptr, FILE_BEGIN);
-        ::SetEndOfFile(m_hFile);
+        return SetFilePointerEx(m_hFile, liSize, nullptr, FILE_BEGIN) && ::SetEndOfFile(m_hFile);
 #else
-        ftruncate(m_fdin, size);
+        return 0 == ftruncate(m_fdin, size);
 #endif
     }
 
@@ -161,9 +160,10 @@ void WriteRecord(ERecordType type, const SRecord& record);
 
 namespace sea {
     struct IHandler;
-    void WriteThreadName(uint64_t tid, const char* name);
-    void ReportString(__itt_string_handle* pStr);
-    void ReportModule(void* fn);
+    bool WriteThreadName(const CTraceEventFormat::SRegularFields& rf, const char* name);
+    bool WriteGroupName(int64_t pid, const char* name);
+    bool ReportString(__itt_string_handle* pStr);
+    bool ReportModule(void* fn);
 }
 sea::IHandler& GetSEARecorder();
 

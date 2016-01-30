@@ -1,4 +1,4 @@
-﻿#   Intel(R) Single Event API
+#   Intel(R) Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
 #   Copyright (c) 2015, Intel Corporation
@@ -18,9 +18,11 @@
 import os
 import sys
 import cgi #for escaping XML
+import json
 import shutil
 import struct
 import tempfile
+import binascii
 from glob import glob
 from subprocess import Popen, PIPE
 
@@ -61,7 +63,10 @@ def parse_args(args):
     parser.add_argument("--ssh")
     parser.add_argument("-p", "--password")
     parser.add_argument("--dry", action="store_true")
+    parser.add_argument("--stacks", action="store_true")
+    parser.add_argument("--min_dur", type=int, default=0)
     parser.add_argument("--sampling")
+    parser.add_argument("--debug", action="store_true")
 
     if "!" in args:
         separator = args.index("!")
@@ -272,7 +277,10 @@ def launch(args, victim):
     else:
         env["INTEL_LIBITTNOTIFY32"] = paths[0]
         env["INTEL_LIBITTNOTIFY64"] = paths[1]
-    env["INTEL_SEA_FEATURES"] = str(args.format) if args.format else ""
+
+    env["INTEL_SEA_FEATURES"] = os.environ['INTEL_SEA_FEATURES'] if os.environ.has_key('INTEL_SEA_FEATURES') else ""
+    env["INTEL_SEA_FEATURES"] += (" " + str(args.format)) if args.format else ""
+    env["INTEL_SEA_FEATURES"] += " stacks" if args.stacks else ""
 
     if args.output:
         env["INTEL_SEA_SAVE_TO"] = args.output
@@ -323,7 +331,7 @@ def extract_cut(filename):
     return (filename.split("!")[1].split("-")[0]) if ('!' in filename) else None
 
 def default_tree():
-    return {"strings":{}, "domains": {}, "threads":{}, "modules":{}, "ring_buffer": False, "cuts":set()}
+    return {"strings":{}, "domains": {}, "threads":{}, "groups":{}, "modules":{}, "ring_buffer": False, "cuts":set()}
 
 def sea_reader(folder): #reads the structure of .sea format folder into dictionary
     tree = default_tree()
@@ -337,8 +345,12 @@ def sea_reader(folder): #reads the structure of .sea format folder into dictiona
                 tree["strings"][int(filename.replace(".str", ""))] = file.readline()
             elif filename.endswith(".tid"): #named thread makes record: name is the handle and content is the value
                 tree["threads"][filename.replace(".tid", "")] = file.readline()
+            elif filename.endswith(".pid"): #named groups (pseudo pids) makes record: group is the handle and content is the value
+                tree["groups"][filename.replace(".pid", "")] = file.readline()
             elif filename.endswith(".mdl"): #registered modules - for symbol resolving
                 tree["modules"][int(filename.replace(".mdl", ""))] = file.readline()
+            elif filename == "process.dct": #process info
+                tree["process"] = eval(file.read())
     for domain in toplevel[1]:#data from every domain gets recorded into separate folder which is named after the domain name
         tree["domains"][domain] = {"files":[]}
         for file in os.walk("/".join([folder, domain])).next()[2]: #each thread of this domain has separate file with data
@@ -536,25 +548,19 @@ class FileWrapper:
         call["type"] = tuple[1]
 
         flags = tuple[2]
-        assert(flags < 0x80); #sanity check
         if flags & 0x1: #has id
-            chunk = self.file.read(3*8)
-            call["id"] = struct.unpack('QQQ', chunk)[0]
+            chunk = self.file.read(2*8)
+            call["id"] = struct.unpack('QQ', chunk)[0]
         if flags & 0x2: #has parent
-            chunk = self.file.read(3*8)
-            call["parent"] = struct.unpack('QQQ', chunk)[0]
+            chunk = self.file.read(2*8)
+            call["parent"] = struct.unpack('QQ', chunk)[0]
         if flags & 0x4: #has string
             chunk = self.file.read(8)
             str_id = struct.unpack('Q', chunk)[0] #string handle
             call["str"] = self.tree["strings"][str_id]
         if flags & 0x8: #has tid, that differs from the calling thread (virtual tracks)
             chunk = self.file.read(8)
-            call["tid"] = struct.unpack('Q', chunk)[0]
-
-        if self.tree["threads"].has_key(str(call["tid"])):
-            call["thread_name"] = '%s(%d)' % (self.tree["threads"][str(call["tid"])], call["tid"])
-        else:
-            call["thread_name"] = str(call["tid"])
+            call["tid"] = int(struct.unpack('q', chunk)[0])
 
         if flags & 0x10: #has data
             chunk = self.file.read(8)
@@ -570,10 +576,14 @@ class FileWrapper:
             ptr = struct.unpack('Q', chunk)[0]
             if not resolve_pointer(self.args, self.tree, ptr, call):
                 call["pointer"] = ptr
+
+        if flags & 0x80: #has pseudo pid
+            chunk = self.file.read(8)
+            call["pid"] = struct.unpack('q', chunk)[0]
+
         return call
 
 def transform2(args, tree, skip_fn = None):
-
     with Callbacks(args, tree) as callbacks:
         if callbacks.is_empty():
             return callbacks.get_result()
@@ -581,10 +591,8 @@ def transform2(args, tree, skip_fn = None):
         files = []
         for domain, content in tree["domains"].iteritems(): #go thru domains
             for tid, path in content["files"]: #go thru per thread files
-
                 if skip_fn and skip_fn(path): #for "cut" support
                     continue
-
                 files.append(FileWrapper(path, args, tree, domain, tid))
 
         if args.verbose:
@@ -617,8 +625,10 @@ def transform2(args, tree, skip_fn = None):
                 count += 1
         for callback in callbacks.callbacks:
             callback("metadata_add", {'domain':'IntelSEAPI', 'str':'__process__', 'pid':tree["pid"], 'tid':-1, 'delta': -1})
-    return callbacks.get_result()
+            for pid, name in tree['groups'].iteritems():
+                callback("metadata_add", {'domain':'IntelSEAPI', 'str':'__process__', 'pid':int(pid), 'tid':-1, 'delta': -1, 'data': name})
 
+    return callbacks.get_result()
 
 def get_module_by_ptr(tree, ptr):
     keys = list(tree['modules'].iterkeys())
@@ -628,20 +638,22 @@ def get_module_by_ptr(tree, ptr):
         if key > ptr:
             break;
         item = key
-    assert(item < ptr)
-    return (ptr - item, tree['modules'][item])
+    if item < ptr:
+        return (item, tree['modules'][item])
+    else:
+        return (None, None)
 
 def resolve_pointer(args, tree, ptr, call, cache = {}):
     if not cache.has_key(ptr):
-        (addr, path) = get_module_by_ptr(tree, ptr)
-        if not os.path.exists(path):
+        (load_addr, path) = get_module_by_ptr(tree, ptr)
+        if path == None or not os.path.exists(path):
             return False
         if sys.platform == 'win32':
             script_dir = os.path.abspath(args.bindir) if args.bindir else os.path.dirname(os.path.realpath(__file__))
             executable = os.path.sep.join([script_dir, 'TestIntelSEAPI32.exe'])
-            cmd = "%s %s:%d" % (executable, path, addr)
+            cmd = "%s %s:%d" % (executable, path, ptr-load_addr)
         elif sys.platform == 'darwin':
-            cmd = ""
+            cmd = "atos -o %s -l %s %s" % (path, to_hex(load_addr), to_hex(ptr))
         elif 'linux' in sys.platform:
             cmd = "addr2line %s -e %s -i -p -f -C" % (to_hex(ptr), path)
         else:
@@ -652,21 +664,45 @@ def resolve_pointer(args, tree, ptr, call, cache = {}):
             del env["INTEL_SEA_VERBOSE"]
         proc = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE, env=env)
 
-        cache[ptr], err = proc.communicate()
+        (symbol, err) = proc.communicate()
+
+        cache[ptr] = {'module': path, 'symbol': symbol}
         assert(not err)
-    lines = cache[ptr].splitlines()
+    lines = cache[ptr]['symbol'].splitlines()
     if not lines:
         return False
+    call['module'] = cache[ptr]['module']
+
     if sys.platform == 'win32':
         if len(lines) == 1:
             call['str'] = lines[0]
         elif len(lines) == 2:
             call['str'] = lines[1]
             (call['__file__'], call['__line__']) = lines[0].rstrip(")").rsplit("(", 1)
+    elif sys.platform == 'darwin':
+        if '+' in lines[0]:
+            call['str'] = lines[0].split(" (in ")[0]
+        else:
+            return False
     else:
-        (call['str'], fileline) = lines[0].split(" at ")
-        (call['__file__'], call['__line__']) = fileline.strip().split(":")
+        if ' at ' in lines[0]:
+            (call['str'], fileline) = lines[0].split(' at ')
+            (call['__file__'], call['__line__']) = fileline.strip().split(':')
+        else:
+            return False
     return True
+
+def resolve_stack(args, tree, data):
+    if tree['process']['bits'] == 64:
+        frames = struct.unpack('Q'*(len(data)/8), data)
+    else:
+        frames = struct.unpack('I'*(len(data)/4), data)
+    stack = []
+    for frame in frames:
+        res = {'ptr': frame}
+        if resolve_pointer(args, tree, frame, res):
+            stack.append(res)
+    return stack
 
 def attachme():
     print "Attach me!"
@@ -674,6 +710,56 @@ def attachme():
         pass
     import time
     time.sleep(1)
+
+def D3D11_DEPTH_STENCILOP_DESC(data):
+    """
+    struct D3D11_DEPTH_STENCILOP_DESC
+    {
+        D3D11_STENCIL_OP StencilFailOp; #long
+        D3D11_STENCIL_OP StencilDepthFailOp; #long
+        D3D11_STENCIL_OP StencilPassOp; #long
+        D3D11_COMPARISON_FUNC StencilFunc; #long
+    };
+    """
+    (StencilFailOp, StencilDepthFailOp, StencilPassOp, StencilFunc) = struct.unpack('LLLL', data[:D3D11_DEPTH_STENCILOP_DESC.SIZE])
+    return {'StencilFailOp':StencilFailOp, 'StencilDepthFailOp':StencilDepthFailOp, 'StencilPassOp':StencilPassOp, 'StencilFunc':StencilFunc}
+D3D11_DEPTH_STENCILOP_DESC.SIZE = 4*4
+
+def D3D11_DEPTH_STENCIL_DESC(data):
+    """
+    struct D3D11_DEPTH_STENCIL_DESC
+    {
+        BOOL DepthEnable; #long
+        D3D11_DEPTH_WRITE_MASK DepthWriteMask; #long
+        D3D11_COMPARISON_FUNC DepthFunc; #long
+        BOOL StencilEnable; #long
+        UINT8 StencilReadMask; #char
+        UINT8 StencilWriteMask; #char
+        D3D11_DEPTH_STENCILOP_DESC FrontFace;
+        D3D11_DEPTH_STENCILOP_DESC BackFace;
+    }
+    """
+    OWN_SIZE = 4*4+2 #Before start of other structures 4 Longs, 2 Chars
+    (DepthEnable, DepthWriteMask, DepthFunc, StencilEnable, StencilReadMask, StencilWriteMask) = struct.unpack('LLLLBB', data[:OWN_SIZE])
+    pos = OWN_SIZE + 2 #+2 for alignment because of 2 chars before
+    FrontFace = D3D11_DEPTH_STENCILOP_DESC(data[pos : pos + D3D11_DEPTH_STENCILOP_DESC.SIZE])
+    pos += D3D11_DEPTH_STENCILOP_DESC.SIZE
+    BackFace = D3D11_DEPTH_STENCILOP_DESC(data[pos : pos + D3D11_DEPTH_STENCILOP_DESC.SIZE])
+    return {'DepthEnable': DepthEnable, 'DepthWriteMask':DepthWriteMask, 'DepthFunc':DepthFunc, 'StencilEnable':StencilEnable, 'StencilReadMask':StencilReadMask, 'StencilWriteMask':StencilWriteMask, 'FrontFace': FrontFace, 'BackFace': BackFace};
+D3D11_DEPTH_STENCIL_DESC.SIZE = 4*4 + 2 + 2 + 2*D3D11_DEPTH_STENCILOP_DESC.SIZE
+
+struct_decoders = {
+    'D3D11_DEPTH_STENCIL_DESC': D3D11_DEPTH_STENCIL_DESC,
+    'D3D11_DEPTH_STENCILOP_DESC': D3D11_DEPTH_STENCILOP_DESC
+}
+
+def represent_data(name, data):
+    for key in struct_decoders.iterkeys():
+        if key in name:
+            return struct_decoders[key](data)
+    if (all(31 < ord(chr) < 128 for chr in data)): #string we will show as string
+        return data
+    return binascii.hexlify(data) #the rest as hex buffer
 
 class TaskCombiner:
     disable_handling_leftovers = False
@@ -722,7 +808,7 @@ class TaskCombiner:
 
     def __call__(self, fn, data):
         domain = self.domains.setdefault(data['domain'], {'tasks': {}, 'counters':{}})
-        thread = domain['tasks'].setdefault(data['tid'], {'byid':{}, 'stack':[]})
+        thread = domain['tasks'].setdefault(data['tid'], {'byid':{}, 'stack':[], 'args': {}})
 
         def get_tasks(id):
             if not id:
@@ -768,16 +854,28 @@ class TaskCombiner:
             self.time_bounds[0] = min(self.time_bounds[0], data['time'])
             get_tasks(None if fn == "task_begin" else data['id']).append(data)
         elif fn == "task_end" or fn == "task_end_overlapped":
-            self.time_bounds[1] = max(self.time_bounds[1], data['time'])
-            tasks = get_tasks(None if fn == "task_end" else data['id'])
-            index = get_last_index(tasks, data['type'] - 1)
-            if index != None:
-                item = tasks.pop(index)
-                self.complete_task("task", item, data)
+            if data.has_key('delta'):
+                self.time_bounds[0] = min(self.time_bounds[0], data['time'])
+                end = data.copy()
+                end['time'] = data['time'] + data['delta']
+                if not (data.has_key('str') or data.has_key('pointer')):
+                    data['str'] = 'Unknown'
+                if data.has_key('id') and thread['args'].has_key(data['id']):
+                    data['args'] = thread['args'][data['id']]
+                    del thread['args'][data['id']]
+                self.time_bounds[1] = max(self.time_bounds[1], end['time'])
+                self.complete_task("task", data, end)
             else:
-                assert(self.tree["ring_buffer"] or self.tree['cuts'])
-                if data.has_key('str'): #nothing to show without name
-                    self.no_begin.append(data)
+                self.time_bounds[1] = max(self.time_bounds[1], data['time'])
+                tasks = get_tasks(None if fn == "task_end" else data['id'])
+                index = get_last_index(tasks, data['type'] - 1)
+                if index != None:
+                    item = tasks.pop(index)
+                    self.complete_task("task", item, data)
+                else:
+                    assert(self.tree["ring_buffer"] or self.tree['cuts'])
+                    if data.has_key('str'): #nothing to show without name
+                        self.no_begin.append(data)
         elif fn == "frame_begin":
             get_tasks(data['id'] if data.has_key('id') else None).append(data)
         elif fn == "frame_end":
@@ -789,10 +887,14 @@ class TaskCombiner:
             else:
                 assert(self.tree["ring_buffer"] or self.tree['cuts'])
         elif fn=="metadata_add":
-            task = get_task(data['id'] if data.has_key('id') else None)
-            if task:
-                args = task.setdefault('args', {})
-                args[data['str']] = data['data'] if data.has_key('data') else data['delta']
+            if data.has_key('id'):
+                task = get_task(data['id'])
+                if task:
+                    args = task.setdefault('args', {})
+                else:
+                    args = thread['args'].setdefault(data['id'], {})
+
+                args[data['str']] = data['delta'] if data.has_key('delta') else represent_data(data['str'], data['data']) if data.has_key('data') else '0x0'
             else:#global metadata
                 self.global_metadata(data)
         elif fn == "object_snapshot":
@@ -864,6 +966,8 @@ class GoogleTrace(TaskCombiner):
         self.targets = []
         self.trace_number = 0
         self.counters = {}
+        self.frames = {}
+        self.samples = []
         if self.args.trace:
             if self.args.trace.endswith(".etl"):
                 self.handle_etw_trace(self.args.trace)
@@ -881,8 +985,9 @@ class GoogleTrace(TaskCombiner):
         self.file.write('\n"traceEvents": [\n')
 
         for key, value in self.tree["threads"].iteritems():
+            pid_tid = key.split(',')
             self.file.write(
-                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s(%s)"}},\n' % (self.tree['pid'], key, value, key)
+                '{"name": "thread_name", "ph":"M", "pid":%s, "tid":%s, "args": {"name":"%s(%s)"}},\n' % (pid_tid[0], pid_tid[1], value, pid_tid[1])
             )
 
     def get_targets(self):
@@ -973,11 +1078,10 @@ class GoogleTrace(TaskCombiner):
                 self.file.write(
                     '{"name": "process_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":%d}},\n' % (data['pid'], data['tid'], data['delta'])
                 )
-            if data['tid'] != -1 and not self.tree['threads'].has_key(str(data['tid'])):
+            if data['tid'] >= 0 and not self.tree['threads'].has_key('%d,%d' % (data['pid'], data['tid'])): #marking the main thread
                 self.file.write(
                     '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], "<main>")
                 )
-
 
     def relation(self, data, head, tail):
         if not head or not tail:
@@ -995,16 +1099,16 @@ class GoogleTrace(TaskCombiner):
     def format_value(self, arg): #this function must add quotes if value is string, and not number/float, do this recursively for dictionary
         if type(arg) == type({}):
             return "{" + ", ".join(['"%s":%s' % (key, self.format_value(value)) for key, value in arg.iteritems()]) + "}"
-        if ('isdigit' in dir(arg)) and arg.isdigit():
-            return arg
         try:
             val = float(arg)
-            if val.is_integer():
-                return int(val)
-            else:
-                return val
+            if float('inf') != val:
+                if val.is_integer():
+                    return int(val)
+                else:
+                    return val
         except:
-            return '"%s"' % str(arg).replace("\\", "\\\\")
+            pass
+        return '"%s"' % str(arg).replace("\\", "\\\\")
 
     Phase = {'task':'X', 'counter':'C', 'marker':'i', 'object_new':'N', 'object_snapshot':'O', 'object_delete':'D', 'frame':'X'}
 
@@ -1013,16 +1117,50 @@ class GoogleTrace(TaskCombiner):
         if begin['type'] == 7: #frame_begin
             begin['id'] = begin['tid'] if begin.has_key('tid') else 0 #Async events are groupped by cat & id
             res = self.format_task('b', 'frame', begin, {})
-            res += ['\n']
+            res += [',\n']
             end_begin = begin.copy()
             end_begin['time'] = end['time']
             res += self.format_task('e', 'frame', end_begin, {})
         else:
             res = self.format_task(GoogleTrace.Phase[type], type, begin, end)
-        self.file.write("".join(res + ['\n']))
+
+        if not res:
+            return
+        if type in ['task', 'counter'] and begin.has_key('data'): #FIXME: move closer to the place where stack is demanded
+            self.handle_stack(begin, resolve_stack(self.args, self.tree, begin['data']), type)
+        if self.args.debug:
+            res = "".join(res)
+            try:
+                json.loads(res)
+            except Exception as exc:
+                print "\n" + exc.message + ":\n" + res + "\n"
+            res += ',\n'
+        else:
+            res = "".join(res + [',\n'])
+        self.file.write(res)
         if (self.file.tell() > MAX_GT_SIZE):
             self.finish()
             self.start_new_trace()
+
+    def handle_stack(self, task, stack, name='stack'):
+        parent = None
+        for frame in reversed(stack): #going from parents to childs
+            if parent == None:
+                frame_id = '%d' % frame['ptr']
+            else:
+                frame_id = '%d:%s' % (frame['ptr'], parent)
+            if not self.frames.has_key(frame_id):
+                data = {'category': os.path.basename(frame['module']), 'name': frame['str']}
+                if parent != None:
+                    data['parent'] = parent
+                self.frames[frame_id] = data
+            parent = frame_id
+        time = self.convert_time(task['time'])
+        self.samples.append({
+            'tid': task['tid'],
+            'ts': time if GT_FLOAT_TIME else int(time),
+            'sf': frame_id, 'name':name
+        })
 
     Markers = {
         "unknown":"t",
@@ -1086,7 +1224,7 @@ class GoogleTrace(TaskCombiner):
             if GT_FLOAT_TIME:
                 res.append(', "dur":%.3f' % (dur))
             else:
-                if dur == 0:
+                if dur < self.args.min_dur:
                     return [] # google misbehaves on tasks of 0 length
                 res.append(', "dur":%d' % (dur))
         args = {}
@@ -1102,7 +1240,7 @@ class GoogleTrace(TaskCombiner):
         if args:
             res.append(', "args":')
             res.append(self.format_value(args))
-        res.append('}, ');
+        res.append('}');
         return res
 
     def handle_leftovers(self):
@@ -1113,7 +1251,15 @@ class GoogleTrace(TaskCombiner):
                 self.complete_task("counter", counter, counter)
 
     def finish(self):
-        self.file.write("{}]}")
+        if self.samples:
+            self.file.write('{}],\n"stackFrames":\n')
+            self.file.write(json.dumps(self.frames))
+            self.file.write(',\n"samples":\n')
+            self.file.write(json.dumps(self.samples))
+            self.file.write('}')
+            self.samples = []
+        else:
+            self.file.write("{}]}")
         self.file.close()
 
     @staticmethod
@@ -1197,11 +1343,17 @@ class QTProfiler(TaskCombiner): #https://github.com/danimo/qt-creator/blob/maste
         else:
             kind = 'Javascript'
 
+        pid_tid = "%d,%d" % (begin['pid'], begin['tid'])
+        if self.tree["threads"].has_key(pid_tid):
+            thread_name = '%s(%d)' % (self.tree["threads"][pid_tid], begin["tid"])
+        else:
+            thread_name = str(begin['tid'])
+
         record = (
             begin['__file__'].replace("\\", "/") if begin.has_key('__file__') else "",
             begin['__line__'] if begin.has_key('__line__') else "0",
             kind,
-            "%s | %s | %s" % (details, begin['thread_name'], begin['domain']),
+            "%s | %s | %s" % (details, thread_name, begin['domain']),
             name
         )
         record = tuple([cgi.escape(item) for item in record])
@@ -1436,6 +1588,14 @@ class DGML(GraphCombiner):
         self.file.write("</DirectedGraph>\n")
         self.file.close()
 
+    @staticmethod
+    def join_traces(traces, output): #FIXME: implement real joiner
+        sorting = []
+        for trace in traces:
+            sorting.append((os.path.getsize(trace), trace))
+        sorting.sort(key=lambda (size, trace): size, reverse = True)
+        shutil.copyfile(sorting[0][1], output+".dgml")
+        return output+".dgml"
 
 class GraphViz(GraphCombiner):
     def __init__(self, args, tree):
@@ -1898,7 +2058,6 @@ class ETWXMLHandler:
             'str': info['Task'] if info.has_key('Task') and info['Task'] else 'Unknown',
             'args': data,
         }
-        call_data['thread_name'] = str(call_data['tid'])
 
         if call_data['str'] == 'SelectContext': #Microsoft-Windows-DxgKrnl
             context = data['hContext']
@@ -2099,17 +2258,50 @@ class ETWXMLHandler:
         opcode = int(system['Opcode'])
         if opcode >= len(OPCODES):
             return
-        if info == '{fdf76a97-330d-4993-997e-9b81979cbd40}': #DX – Create/Dest Context
+        if info == '{fdf76a97-330d-4993-997e-9b81979cbd40}': #DX - Create/Dest Context
+            """
+            struct context_t
+            {
+                uint64_t device;
+                uint32_t nodeOrdinal;
+                uint32_t engineAffinity;
+                uint32_t dmaBufferSize;
+                uint32_t dmaBufferSegmentSet;
+                uint32_t dmaBufferPrivateDataSize;
+                uint32_t allocationListSize;
+                uint32_t patchLocationListSize;
+                uint32_t contextType;
+                uint64_t context;
+            };
+            """
             chunk = data.decode('hex')
             (device, nodeOrdinal, engineAffinity, dmaBufferSize, dmaBufferSegmentSet, dmaBufferPrivateDataSize, allocationListSize, patchLocationListSize, contextType, context) = struct.unpack('QLLLLLLLLQ', chunk)
             self.context_to_node[context] = nodeOrdinal
-        elif info == '{4746dd2b-20d7-493f-bc1b-240397c85b25}': #DX – Dma Packet
+        elif info == '{4746dd2b-20d7-493f-bc1b-240397c85b25}': #DX - Dma Packet
+            """
+            struct dma_packet_t
+            {
+                uint64_t context;
+                uint32_t unknown1;
+                uint32_t submissionId;
+                uint32_t unknown2;
+                uint32_t submitSequence;
+            };
+            """
             chunk = data.decode('hex')
             (context, packetType, submissionId, unknown, submitSequence) = struct.unpack('QLLLL', chunk[:24])
             new_info = {'Task': 'DmaPacket', 'Opcode' : OPCODES[opcode]}
             system['provider'] = 'Microsoft-Windows-DxgKrnl'
             return self.on_event(system, {'hContext': context, 'PacketType': packetType, 'uliSubmissionId':submissionId, 'ulQueueSubmitSequence': submitSequence}, new_info)
-        elif info == '{295e0d8e-51ec-43b8-9cc6-9f79331d27d6}': #DX – Queue Packet
+        elif info == '{295e0d8e-51ec-43b8-9cc6-9f79331d27d6}': #DX - Queue Packet
+            """
+            struct queue_packet_t
+            {
+                uint64_t context;
+                uint32_t unknown1;
+                uint32_t submitSequence;
+            };
+            """
             chunk = data.decode('hex')
             (context, packetType, submitSequence) = struct.unpack('QLL', chunk[:16])
             new_info = {'Task': 'QueuePacket', 'Opcode' : OPCODES[opcode]}

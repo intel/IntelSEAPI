@@ -25,6 +25,12 @@
     #include <sys/syscall.h>
 #endif
 
+#ifdef _WIN32
+    static const int64_t g_PID = (int64_t)GetCurrentProcessId();
+#else
+    static const int64_t g_PID = (int64_t)getpid();
+#endif
+
 //https://github.com/google/trace-viewer
 //For ETW see here: http://git.chromium.org/gitweb/?p=chromium/src.git;a=commitdiff;h=41fabf8e2dd3a847cbdad05da9b43fd9a99d741a (content/browser/tracing/etw_system_event_consumer_win.cc)
 //parser source: https://github.com/google/trace-viewer/blob/49d0dd94c3925c3721d059ad3ee2db51d176248c/trace_viewer/extras/importer/trace_event_importer.html
@@ -34,8 +40,8 @@ class CTraceEventFormat
 public:
     struct SRegularFields
     {
-        uint64_t pid;
-        uint64_t tid;
+        int64_t pid;
+        int64_t tid;
         uint64_t nanoseconds;
     };
 
@@ -73,20 +79,18 @@ public:
 
     static SRegularFields GetRegularFields()
     {
-        using namespace std::chrono;
-        SRegularFields rf = {
+        return SRegularFields{
     #ifdef _WIN32
-            (uint64_t)GetCurrentProcessId(), (uint64_t)GetCurrentThreadId(),
+            g_PID, (uint64_t)GetCurrentThreadId(),
     #elif defined(__ANDROID_API__)
-            (uint64_t)getpid(), (uint64_t)gettid(),
+            g_PID, (uint64_t)gettid(),
     #elif __linux__
-            (uint64_t)getpid(), (uint64_t)syscall(SYS_gettid),
+            g_PID, (uint64_t)syscall(SYS_gettid),
     #else
-            (uint64_t)getpid(), (uint64_t)syscall(SYS_thread_selfid),
-    #endif
+            g_PID, (int64_t)syscall(SYS_thread_selfid),
+#endif
             GetTimeNS()
         };
-        return rf;
     }
 
     class CArgs

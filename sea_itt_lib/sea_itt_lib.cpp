@@ -29,10 +29,8 @@
     #define setenv _putenv
     #include <windows.h>
     #include "IntelSEAPI.h"
-    #define EXPORT __declspec(dllexport)
 #else
     #define setenv putenv
-    #define EXPORT
     #define _strdup strdup
 #endif
 
@@ -112,7 +110,7 @@ __itt_global* GetITTGlobal(__itt_global* pGlob)
 
 extern "C" {
 
-    EXPORT void ITTAPI __itt_api_init(__itt_global* pGlob, __itt_group_id id)
+    SEA_EXPORT void ITTAPI __itt_api_init(__itt_global* pGlob, __itt_group_id id)
     {
         const char* procname = sea::GetProcessName(true);
         sea::TMdlInfo mdlinfo = sea::Fn2Mdl(pGlob);
@@ -142,7 +140,7 @@ extern "C" {
         }
     }
 
-    EXPORT void ITTAPI __itt_api_fini(__itt_global* pGlob)
+    SEA_EXPORT void ITTAPI __itt_api_fini(__itt_global* pGlob)
     {
         sea::FinitaLaComedia();
 #ifdef _WIN32

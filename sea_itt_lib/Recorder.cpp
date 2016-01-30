@@ -103,6 +103,7 @@ enum EFlags
     efHasData = 0x10,
     efHasDelta = 0x20,
     efHasFunction = 0x40,
+    efHasPid = 0x80,
 };
 
 #pragma pack(push, 1)
@@ -118,7 +119,7 @@ struct STinyRecord
 static_assert(sizeof(STinyRecord) == 10, "SRecord must fit in 10 bytes");
 
 template<class T>
-T* WriteToBuff(CRecorder& recorder, const T& value)
+inline T* WriteToBuff(CRecorder& recorder, const T& value)
 {
     T* ptr = (T*)recorder.Allocate(sizeof(T));
     if (ptr)
@@ -140,7 +141,6 @@ namespace sea {
         static thread_local SThreadRecord* pThreadRecord = nullptr;
         if (pThreadRecord) {} else pThreadRecord = GetThreadRecord();
 
-
         if (pThreadRecord->bRemoveFiles)
         {
             pThreadRecord->pLastRecorder = nullptr;
@@ -149,9 +149,9 @@ namespace sea {
             pThreadRecord->files.clear();
         }
         //with very high probability the same thread will write into the same domain
-        if (pThreadRecord->pLastRecorder && pThreadRecord->pLastDomain == record.domain.nameA && (10 > pThreadRecord->nSpeedupCounter++))
+        if (pThreadRecord->pLastRecorder && pThreadRecord->pLastDomain == record.domain.nameA && (100 > pThreadRecord->nSpeedupCounter++))
             return reinterpret_cast<CRecorder*>(pThreadRecord->pLastRecorder);
-        pThreadRecord->nSpeedupCounter = 0; //we can't avoid checking cuts, ring and such
+        pThreadRecord->nSpeedupCounter = 0; //we can't avoid checking ring size
         pThreadRecord->pLastDomain = record.domain.nameA;
 
         auto it = pThreadRecord->files.find(record.domain.nameA);
@@ -220,15 +220,16 @@ void WriteRecord(ERecordType type, const SRecord& record)
     STinyRecord* pRecord = WriteToBuff(stream, STinyRecord{record.rf.nanoseconds, type});
     if (!pRecord) return;
 
+    struct ShortId { unsigned long long a, b; };
     if (record.taskid.d1)
     {
-        WriteToBuff(stream, record.taskid);
+        WriteToBuff(stream, *(ShortId*)&record.taskid);
         pRecord->flags |= efHasId;
     }
 
     if (record.parentid.d1)
     {
-        WriteToBuff(stream, record.parentid);
+        WriteToBuff(stream, *(ShortId*)&record.parentid);
         pRecord->flags |= efHasParent;
     }
 
@@ -266,6 +267,12 @@ void WriteRecord(ERecordType type, const SRecord& record)
         pRecord->flags |= efHasFunction;
     }
 
+    if ((long long)record.rf.pid < 0) //only when pseudo pid
+    {
+        WriteToBuff(stream, record.rf.pid);
+        pRecord->flags |= efHasPid;
+    }
+
     if (sea::g_nAutoCut && (size >= sea::g_nAutoCut))
     {
         static size_t autocut = 0;
@@ -276,7 +283,7 @@ void WriteRecord(ERecordType type, const SRecord& record)
 CMemMap::CMemMap(const std::string &path, size_t size, size_t offset)
 {
 #ifdef _WIN32
-    m_hFile = CreateFile(path.c_str(), GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
+    m_hFile = CreateFile(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (INVALID_HANDLE_VALUE == m_hFile)
     {
         m_hFile = NULL;
@@ -336,7 +343,9 @@ void CMemMap::Unmap()
 }
 
 using namespace sea;
+const bool g_bWithStacks = !!(GetFeatureSet() & sfStack);
 
+//XXX #define TURBO_MODE
 class CSEARecorder: public IHandler
 {
 #ifdef __ANDROID_API__
@@ -356,24 +365,39 @@ class CSEARecorder: public IHandler
         }
         double delta = -1;//sort order - highest for processes written thru SEA
         WriteRecord(ERecordType::Metadata, SRecord{ main, *pGlobal->domain_list, __itt_null, __itt_null, pKey, &delta, name, strlen(name) });
+
+        std::ofstream ss(GetDir(g_savepath) + "process.dct");
+        ss << "{";
+        ss << "'time_freq':" << GetTimeFreq();
+#if INTPTR_MAX == INT64_MAX
+        ss << ", 'bits':64";
+#else
+        ss << ", 'bits':32";
+#endif
+        ss << "}";
     }
 
     void TaskBegin(STaskDescriptor& oTask, bool bOverlapped) override
     {
-        if (bOverlapped)
+#ifndef TURBO_MODE
+        const char *pData = nullptr;
+        size_t length = 0;
+        if (g_bWithStacks)
         {
-            WriteRecord(ERecordType::BeginOverlappedTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, nullptr, 0, oTask.fn});
+            static thread_local TStack* pStack = nullptr;
+            if (!pStack)
+                pStack = (TStack*)malloc(sizeof(TStack));
+            length = (GetStack(*pStack) - 2) * sizeof(void*);
+            pData = reinterpret_cast<const char *>(&(*pStack)[2]);
         }
-        else
-        {
-            WriteRecord(ERecordType::BeginTask, SRecord{ oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, nullptr, 0, oTask.fn });
-#ifdef __ANDROID_API__
-            if (oTask.pName)
-            {
-                m_oTraceEventFormat.WriteEvent(CTraceEventFormat::Begin, oTask.pName->strA, CTraceEventFormat::CArgs(), &oTask.rf, oTask.pDomain->nameA);
-            }
+        WriteRecord(bOverlapped ? ERecordType::BeginOverlappedTask : ERecordType::BeginTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, pData, length, oTask.fn});
 #endif
+#ifdef __ANDROID_API__
+        if (!bOverlapped && oTask.pName)
+        {
+            m_oTraceEventFormat.WriteEvent(CTraceEventFormat::Begin, oTask.pName->strA, CTraceEventFormat::CArgs(), &oTask.rf, oTask.pDomain->nameA);
         }
+#endif
     }
 
     void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length) override
@@ -392,20 +416,19 @@ class CSEARecorder: public IHandler
 
     void TaskEnd(STaskDescriptor& oTask, const CTraceEventFormat::SRegularFields& rf, bool bOverlapped) override
     {
-        if (bOverlapped)
-        {
-            WriteRecord(ERecordType::EndOverlappedTask, SRecord{rf, *oTask.pDomain, oTask.id, __itt_null});
-        }
-        else
-        {
-            WriteRecord(ERecordType::EndTask, SRecord{rf, *oTask.pDomain, __itt_null, __itt_null});
-#ifdef __ANDROID_API__
-            if (oTask.pName)
-            {
-                m_oTraceEventFormat.WriteEvent(CTraceEventFormat::End, oTask.pName->strA, Cookie<CTraceEventFormat::CArgs>(oTask), &oTask.rf, oTask.pDomain->nameA);
-            }
+#ifdef TURBO_MODE
+        double duration = double(rf.nanoseconds - oTask.rf.nanoseconds);
+        WriteRecord(bOverlapped ? ERecordType::EndOverlappedTask : ERecordType::EndTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, &duration, nullptr, 0, oTask.fn});
+#else
+        WriteRecord(bOverlapped ? ERecordType::EndOverlappedTask : ERecordType::EndTask, SRecord{rf, *oTask.pDomain, oTask.id, __itt_null});
 #endif
+
+#ifdef __ANDROID_API__
+        if (!bOverlapped && oTask.pName)
+        {
+            m_oTraceEventFormat.WriteEvent(CTraceEventFormat::End, oTask.pName->strA, Cookie<CTraceEventFormat::CArgs>(oTask), &oTask.rf, oTask.pDomain->nameA);
         }
+#endif
     }
 
     void Marker(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope theScope) override
@@ -416,7 +439,17 @@ class CSEARecorder: public IHandler
 
     void Counter(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, const __itt_string_handle *pName, double value) override
     {
-        WriteRecord(ERecordType::Counter, SRecord{rf, *pDomain, __itt_null, __itt_null, pName, &value});
+        const char *pData = nullptr;
+        size_t length = 0;
+        if (g_bWithStacks)
+        {
+            static thread_local TStack* pStack = nullptr;
+            if (!pStack)
+                pStack = (TStack*)malloc(sizeof(TStack));
+            length = (GetStack(*pStack) - 3) * sizeof(void*);
+            pData = reinterpret_cast<const char *>(&(*pStack)[3]);
+        }
+        WriteRecord(ERecordType::Counter, SRecord{rf, *pDomain, __itt_null, __itt_null, pName, &value, pData, length});
 #ifdef __ANDROID_API__
         CTraceEventFormat::CArgs args;
         args.Add(pName->strA, value);
@@ -426,7 +459,7 @@ class CSEARecorder: public IHandler
 
     void SetThreadName(const CTraceEventFormat::SRegularFields& rf, const char* name) override
     {
-        WriteThreadName(rf.tid, name);
+        WriteThreadName(rf, name);
     }
 
 }* g_pSEARecorder = IHandler::Register<CSEARecorder>(true);
@@ -438,42 +471,59 @@ IHandler& GetSEARecorder()
 
 namespace sea {
 
-void WriteThreadName(uint64_t tid, const char* name)
-{
-    if (g_savepath.empty()) return;
-    std::string path = g_savepath + "/";
-    path += std::to_string(tid) + ".tid";
-    int fd = open(path.c_str(), O_WRONLY|O_CREAT|O_EXCL, FilePermissions);
-    if (-1 == fd) return; //file already exists, other thread was faster
-    write(fd, name, (unsigned int)strlen(name));
-    close(fd);
-}
-
-void ReportString(__itt_string_handle* pStr)
+bool WriteThreadName(const CTraceEventFormat::SRegularFields& rf, const char* name)
 {
     CIttLocker lock;
-    if (g_savepath.empty()) return;
+    if (g_savepath.empty()) return true;
+    std::string path = g_savepath + "/";
+    path += std::to_string(rf.pid) + "," + std::to_string(rf.tid) + ".tid";
+    int fd = open(path.c_str(), O_WRONLY|O_CREAT|O_EXCL, FilePermissions);
+    if (-1 == fd) return true; //file already exists, other thread was faster
+    int res = write(fd, name, (unsigned int)strlen(name));
+    close(fd);
+    return res != -1;
+}
+
+bool WriteGroupName(int64_t pid, const char* name)
+{
+    CIttLocker lock;
+    if (g_savepath.empty()) return true;
+    std::string path = g_savepath + "/";
+    path += std::to_string(pid) + ".pid";
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, FilePermissions);
+    if (-1 == fd) return true; //file already exists, other thread was faster
+    int res = write(fd, name, (unsigned int)strlen(name));
+    close(fd);
+    return res != -1;
+}
+
+bool ReportString(__itt_string_handle* pStr)
+{
+    CIttLocker lock;
+    if (g_savepath.empty()) return true;
     std::string path = g_savepath + "/";
     path += std::to_string((uint64_t)pStr) + ".str";
     int fd = open(path.c_str(), O_WRONLY|O_CREAT|O_EXCL, FilePermissions);
-    if (-1 == fd) return; //file already exists, other thread was faster
-    write(fd, pStr->strA, (unsigned int)strlen(pStr->strA));
+    if (-1 == fd) return true; //file already exists, other thread was faster
+    int res = write(fd, pStr->strA, (unsigned int)strlen(pStr->strA));
     close(fd);
+    return res != -1;
 }
 
-void ReportModule(void* fn)
+bool ReportModule(void* fn)
 {
     CIttLocker lock;
     if (g_savepath.empty())
-        return;
+        return true;
 
     TMdlInfo module_info = Fn2Mdl(fn);
 
-    std::string path = GetDir(g_savepath, "") + std::to_string((uint64_t)module_info.first) + ".mdl";
+    std::string path = GetDir(g_savepath) + std::to_string((uint64_t)module_info.first) + ".mdl";
     int fd = open(path.c_str(), O_WRONLY|O_CREAT|O_EXCL, FilePermissions);
-    if (-1 == fd) return; //file already exists
-    write(fd, module_info.second.c_str(), (unsigned int)module_info.second.size());
+    if (-1 == fd) return true; //file already exists
+    int res = write(fd, module_info.second.c_str(), (unsigned int)module_info.second.size());
     close(fd);
+    return res != -1;
 }
 
 } //namespace sea

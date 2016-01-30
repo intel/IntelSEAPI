@@ -1,5 +1,5 @@
 /*********************************************************************************************************************************************************************************************************************************************************************************************
-#   Intel® Single Event API
+#   Intel(R) Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
 #   Copyright (c) 2015, Intel Corporation
@@ -97,9 +97,39 @@ static std::string get_environ_value(const std::string& name)
         }
     };
 
+    namespace sea{
+        inline uint64_t GetTime()
+        {
+            LARGE_INTEGER count = {};
+            QueryPerformanceCounter(&count);
+            return count.QuadPart;
+        }
+        inline uint64_t GetTimeFreq()
+        {
+            static LARGE_INTEGER frequency = {};
+            if (!frequency.QuadPart)
+            {
+                QueryPerformanceFrequency(&frequency);
+            }
+            return frequency.QuadPart;
+        }
+    }
+
 #else
 
     typedef std::chrono::high_resolution_clock SHiResClock;
+    namespace sea{
+        using namespace std::chrono;
+        inline uint64_t GetTime()
+        {
+            return (uint64_t)duration_cast<nanoseconds>(SHiResClock::now().time_since_epoch()).count();
+        }
+        inline uint64_t GetTimeFreq()
+        {
+            static uint64_t freq = SHiResClock::period::num / SHiResClock::period::den;
+            return freq;
+        }
+    }
 #endif
 
 #ifdef _MSC_VER //std::mutex won't work in static constructors due to MS bug
@@ -207,4 +237,5 @@ public:
     }
 };
 
-
+using TStack = void*[100];
+size_t GetStack(TStack& stack);

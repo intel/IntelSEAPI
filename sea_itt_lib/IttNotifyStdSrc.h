@@ -42,6 +42,13 @@
     #pragma GCC diagnostic pop
 #endif
 
+#ifdef _WIN32
+    #define SEA_EXPORT __declspec(dllexport)
+#else
+    #define SEA_EXPORT
+#endif
+
+
 #include "Utils.h"
 #include "TraceEventFormat.h"
 #include <Recorder.h>
@@ -54,7 +61,7 @@ namespace sea {
     extern std::string g_savepath;
     extern uint64_t g_nAutoCut;
 #ifdef __linux
-    void WriteFTraceTimeSyncMarkers();
+    bool WriteFTraceTimeSyncMarkers();
 #endif
     void InitSEA();
     void FillApiList(__itt_api_info* pApiInfo);
@@ -67,8 +74,16 @@ namespace sea {
     const char* GetProcessName(bool bFullPath);
     typedef std::pair<void*, std::string> TMdlInfo;
     TMdlInfo Fn2Mdl(void* fn);
-    std::string GetDir(std::string path, const std::string& append);
+    std::string GetDir(std::string path, const std::string& append = "");
 }
+
+struct ___itt_counter
+{
+    __itt_domain *pDomain;
+    __itt_string_handle *pName;
+    __itt_metadata_type type;
+    double value;
+};
 
 
 #include <string>
@@ -131,6 +146,7 @@ enum SEAFeature
     sfSystrace = 0x2,
     sfMetricsFrameworkPublisher = 0x4,
     sfMetricsFrameworkConsumer = 0x8,
+    sfStack = 0x10,
 };
 
 uint64_t GetFeatureSet();
@@ -245,7 +261,7 @@ public:
     virtual void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, double value) {}
     virtual void TaskEnd(STaskDescriptor& oTask, const CTraceEventFormat::SRegularFields& rf, bool bOverlapped) {}
     virtual void Marker(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope scope) {}
-    virtual void CreateCounter(const __itt_counter& id, const __itt_domain *pDomain, const __itt_string_handle *pName) {}
+    virtual void CreateCounter(const __itt_counter& id) {}
     virtual void Counter(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, const __itt_string_handle *pName, double value) {}
     virtual void SetThreadName(const CTraceEventFormat::SRegularFields& rf, const char* name) {}
 
