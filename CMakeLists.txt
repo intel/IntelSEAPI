@@ -31,7 +31,15 @@ endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-D_DEBUG)
+    if (NOT WIN32)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
+    endif()
 else()
+    if (NOT WIN32)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2")
+    endif()
     add_definitions(-DNDEBUG)
 endif()
 
@@ -93,23 +101,24 @@ target_include_directories(IntelSEAPI
 
 if (WIN32)
     TARGET_LINK_LIBRARIES(IntelSEAPI)
-    if(NOT ARCH_64) #Compiler Automated Instrumentation
+    if(NOT ARCH_64 AND CMAKE_BUILD_TYPE STREQUAL "Debug") #Compiler Automated Instrumentation
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Gh /GH")
     endif()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi") #in release as well
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG") #in release as well
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG") #in release as well
 elseif (APPLE)
     TARGET_LINK_LIBRARIES(IntelSEAPI dl)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++11 -g -fPIC -Wno-unused-parameter")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++11 -fPIC -Wno-unused-parameter")
     set(CMAKE_OSX_ARCHITECTURES "i386;x86_64")
 elseif (ANDROID_NDK)
     TARGET_LINK_LIBRARIES(IntelSEAPI dl)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -fPIE -pthread")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fPIE -pthread")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fPIE -pie -Wl,--no-undefined")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fPIE -pie")
 else()
     TARGET_LINK_LIBRARIES(IntelSEAPI dl)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -fPIC -pthread")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fPIC -pthread")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pie -Wl,--no-undefined")
     #SET_TARGET_PROPERTIES(IntelSEAPI PROPERTIES COMPILE_FLAGS "-finstrument-functions")
 endif()
