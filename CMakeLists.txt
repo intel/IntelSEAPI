@@ -19,6 +19,8 @@ cmake_minimum_required(VERSION 2.8)
 
 project(IntelSEAPI)
 
+OPTION(JDK "Enable Java build")
+
 OPTION(FORCE_32 "Force a 32bit compile on 64bit" OFF)
 IF(FORCE_32 AND UNIX)
     SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -m32")
@@ -76,6 +78,7 @@ add_executable(IntelSEAPI
     memory.cpp
     itt_notify.hpp
     buildall.py
+    runtool/sea.py
     runtool/sea_runtool.py
     README.txt
 )

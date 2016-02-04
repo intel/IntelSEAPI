@@ -19,6 +19,9 @@
 import os
 import sys
 import shutil
+import fnmatch
+import subprocess
+
 
 install_dest = r"./../installer"
 
@@ -48,7 +51,50 @@ def get_yocto():
     if '-m32' in cxx:
         return {'bits':'32'}
     return {'bits':'64'}
-    
+
+def GetJDKPath():
+    if sys.platform == 'win32':
+        import _winreg
+        path = "SOFTWARE\\JavaSoft\\Java Development Kit"
+        try:
+            aKey = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, path, 0, _winreg.KEY_READ | _winreg.KEY_WOW64_64KEY)
+        except WindowsError:
+            print "No key:", path
+            return None
+        subkeys = []
+        try:
+            i = 0
+            while True:
+                subkeys.append(_winreg.EnumKey(aKey, i))
+                i += 1
+        except WindowsError:
+            pass
+        if not subkeys:
+            print "No subkeys for:", path
+            return None
+        subkeys.sort()
+        path += "\\" + subkeys[-1]
+        try:
+            aKey = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, path, 0, _winreg.KEY_READ | _winreg.KEY_WOW64_64KEY)
+            return _winreg.QueryValueEx(aKey, "JavaHome")[0]
+        except WindowsError:
+            print "No value for:", path
+            return None
+    else:
+        path, err = subprocess.Popen("which javah", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+        if err or not path:
+            return None
+        if sys.platform == 'darwin':
+            return "/System/Library/Frameworks/JavaVM.framework/Headers"
+        else:
+            matches = []
+            for root, dirnames, filenames in os.walk('/usr/lib/jvm'):
+                for filename in fnmatch.filter(filenames, 'jni.h'):
+                    matches.append(os.path.join(root, filename))
+            if not matches:
+                return None
+            return os.path.split(matches[0])[0]
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -65,6 +111,10 @@ def main():
             target_bits.append('32')
     else:
         target_bits = [yocto['bits']]
+
+    jdk_path = GetJDKPath()
+    print "Found JDK:", jdk_path
+
     work_dir = os.getcwd()
     print work_dir
     for bits in target_bits: #create separate build dirs
@@ -86,7 +136,8 @@ def main():
                     ("-DCMAKE_TOOLCHAIN_FILE=./android.toolchain.cmake"),
                     ("-DANDROID_NDK=%s" % (os.environ['ANDROID_NDK'])),
                     ("-DCMAKE_BUILD_TYPE=%s" % ("Debug" if args.debug else "Release")),
-                    ('-DANDROID_ABI="%s"' % ('x86' if bits == '32' else 'x86_64'))
+                    ('-DANDROID_ABI="%s"' % ('x86' if bits == '32' else 'x86_64')),
+                    (('-DJDK="%s"' % jdk_path) if jdk_path else "")
                 ])))
                 run_shell('cmake --build .')
             else:
@@ -99,7 +150,8 @@ def main():
         run_shell('cmake "%s" -G"%s" %s' % (work_dir, generator, " ".join([
             ("-DFORCE_32=ON" if bits == '32' else ""),
             ("-DCMAKE_BUILD_TYPE=Debug" if args.debug else ""),
-            ("-DYOCTO=1" if yocto else "")
+            ("-DYOCTO=1" if yocto else ""),
+            (('-DJDK="%s"' % jdk_path) if jdk_path else "")
         ])))
         if sys.platform == 'win32':
             install = args.install and bits == target_bits[-1]

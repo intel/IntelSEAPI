@@ -81,11 +81,11 @@ public:
     {
         return SRegularFields{
     #ifdef _WIN32
-            g_PID, (uint64_t)GetCurrentThreadId(),
+            g_PID, (int64_t)GetCurrentThreadId(),
     #elif defined(__ANDROID_API__)
-            g_PID, (uint64_t)gettid(),
+            g_PID, (int64_t)gettid(),
     #elif __linux__
-            g_PID, (uint64_t)syscall(SYS_gettid),
+            g_PID, (int64_t)syscall(SYS_gettid),
     #else
             g_PID, (int64_t)syscall(SYS_thread_selfid),
 #endif

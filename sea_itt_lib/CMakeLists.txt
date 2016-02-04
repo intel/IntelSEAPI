@@ -61,6 +61,45 @@ else()
     set(EXTRA_SOURCE)
 endif()
 
+set(INCLUDE_DIRS . ..)
+
+
+if(JDK)
+    if (WIN32)
+        set(JDK_PREFIX ${JDK}/bin/)
+    else()
+        set(JDK_PREFIX)
+    endif()
+
+    if(NOT ANDROID)
+        add_custom_command(
+            OUTPUT ${PROJECT_SOURCE_DIR}/java/com/intel/sea/IntelSEAPI.class PRE_BUILD
+            COMMAND ${JDK_PREFIX}javac -verbose ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java -d ${PROJECT_SOURCE_DIR}/java
+            DEPENDS ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java
+        )
+        add_custom_command(
+            OUTPUT ${PROJECT_SOURCE_DIR}/java/com_intel_sea_IntelSEAPI.h PRE_BUILD
+            COMMAND ${JDK_PREFIX}javah -v -classpath ${PROJECT_SOURCE_DIR}/java -d ${PROJECT_SOURCE_DIR}/java com.intel.sea.IntelSEAPI
+            DEPENDS ${PROJECT_SOURCE_DIR}/java/com/intel/sea/IntelSEAPI.class
+        )
+    endif()
+
+    set(EXTRA_SOURCE ${EXTRA_SOURCE}
+        ${PROJECT_SOURCE_DIR}/java/com_intel_sea_IntelSEAPI.h
+        ${PROJECT_SOURCE_DIR}/java/com_intel_sea_IntelSEAPI.cpp
+        ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java
+    )
+
+    if(NOT ANDROID)
+        if (WIN32)
+            set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/win32)
+        else()
+            set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK})
+        endif()
+    endif()
+
+endif()
+
 add_library(sea_itt_lib SHARED
     sea_itt_lib.cpp
     IttNotifyStdSrc.cpp
@@ -106,7 +145,7 @@ else()
 endif()
 
 target_include_directories(sea_itt_lib PUBLIC
-    . ..
+    ${INCLUDE_DIRS}
     ../ittnotify ../ittnotify/include
     ${PROJECT_BINARY_DIR}
 )

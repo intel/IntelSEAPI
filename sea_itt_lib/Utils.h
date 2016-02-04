@@ -237,5 +237,6 @@ public:
     }
 };
 
-using TStack = void*[100];
+const size_t StackSize = 100;
+using TStack = void*[StackSize];
 size_t GetStack(TStack& stack);

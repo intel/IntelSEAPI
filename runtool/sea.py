@@ -122,7 +122,7 @@ class ITT:
 
     def get_timestamp(self):
         if not self.lib:
-            return
+            return 0
         return self.lib.itt_get_timestamp()
 
 def stack_task(itt):

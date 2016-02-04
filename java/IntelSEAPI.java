@@ -1,21 +1,154 @@
-package IntelSEA;
-public final class IntelSEA
+package com.intel.sea;
+import java.util.*;
+import java.io.File;
+import java.lang.reflect.*;
+
+public class IntelSEAPI
 {
+    private static boolean s_bInitialized = false;
     static {
-        System.loadLibrary("IntelSEA"); //sort out with bitness here
+        String bitness = System.getProperty("os.arch").contains("64") ? "64" : "32";
+        String envName = "INTEL_LIBITTNOTIFY" + bitness;
+        String seaPath = System.getenv(envName);
+        if (seaPath != null)
+        {
+            File file = new File(seaPath);
+            System.setProperty("java.library.path", System.getProperty("java.library.path") + ";" +file.getParent());
+            try {
+                Field fieldSysPath = ClassLoader.class.getDeclaredField("sys_paths");
+                fieldSysPath.setAccessible(true);
+                fieldSysPath.set(null, null);
+                String name = file.getName();
+                System.loadLibrary(name.substring(0, name.lastIndexOf('.')));
+
+                s_bInitialized = true;
+            } catch (Exception exc)
+            {
+            }
+        }
     }
-    
-    private native static uint64 createDomain(String name);
-    private native static uint64 createString(String name); //for names
-	private native static void beginTask(uint64 domain, uint64 name, uint64 id, uint64 parent);
-	private native static void endTask(uint64 domain);
-	private native static void counter(uint64 domain, uint64 name, double value);
-    private native static void marker(uint64 domain, uint64 name, uint64 scope);
+    private native static long createDomain(String name);
+    private native static long createString(String name); //for names
+    private native static void beginTask(long domain, long name, long id, long parent, long timestamp);
+    private native static void endTask(long domain, long timestamp);
+    private native static long counterCreate(long domain, long name);
+    private native static void setCounter(long counter, double value, long timestamp);
+    private native static void marker(long domain, long id, long name, long scope, long timestamp);
+    private native static long createTrack(String group, String track);
+    private native static void setTrack(long track);
+    private native static long getTimestamp();
+
+    private Map<String, Long> m_strIDMap = new HashMap<String, Long>();
+    private long getStringID(String str)
+    {
+        if (!m_strIDMap.containsKey(str))
+            m_strIDMap.put(str, createString(str));
+        return m_strIDMap.get(str);
+    }
+
+    private long m_domain = 0;
+
+    public IntelSEAPI(String domain)
+    {
+        if (!s_bInitialized)
+            return;
+        m_domain = createDomain(domain);
+    }
+
+    public enum Scope
+    {
+        Global,
+        Process,
+        Thread,
+        Task
+    };
+
+    public void marker(String text, Scope scope, long timestamp, long id)
+    {
+        if (!s_bInitialized)
+            return;
+        marker(m_domain, id, getStringID(text), scope.ordinal() + 1, timestamp);
+    }
+
+    public void taskBegin(String name, long id, long parent)
+    {
+        if (!s_bInitialized)
+            return;
+        beginTask(m_domain, getStringID(name), id, parent, 0);
+    }
+
+    public void taskEnd()
+    {
+        if (!s_bInitialized)
+            return;
+        endTask(m_domain, 0);
+    }
+
+    public void taskSubmit(String name, long timestamp, long dur, long id, long parent)
+    {
+        beginTask(m_domain, getStringID(name), id, parent, timestamp);
+        endTask(m_domain, timestamp + dur);
+    }
+
+    private Map<String, Long> m_counterIDMap = new HashMap<String, Long>();
+
+    public void counter(String name, double value, long timestamp)
+    {
+        if (!s_bInitialized)
+            return;
+        if (!m_counterIDMap.containsKey(name))
+            m_counterIDMap.put(name, Long.valueOf(counterCreate(m_domain, getStringID(name))));
+        setCounter(m_counterIDMap.get(name), value, timestamp);
+    }
+
+    private Map<String, Long> m_trackIDMap = new HashMap<String, Long>();
+
+    public void track(String group, String name)
+    {
+        if (!s_bInitialized)
+            return;
+        String key = group+ "/" + name;
+        if (!m_trackIDMap.containsKey(key))
+            m_trackIDMap.put(key, Long.valueOf(createTrack(group, name)));
+        setTrack(m_trackIDMap.get(key));
+    }
+
+    public void track()
+    {
+        if (!s_bInitialized)
+            return;
+        setTrack(0);
+    }
+
+    public long getTime()
+    {
+        if (!s_bInitialized)
+            return 0;
+        return getTimestamp();
+    }
+
+    public static void main(String[] args)
+    {
+        IntelSEAPI itt = new IntelSEAPI("java");
+        itt.marker("Begin", Scope.Process, 0, 0);
+        long ts1 = itt.getTime();
+
+        itt.taskBegin("Main", 0, 0);
+        for (double i = 0; i < 100; i += 1.)
+        {
+            itt.counter("java_counter", i, 0);
+        }
+        itt.taskEnd();
+
+        long ts2 = itt.getTime();
+        itt.marker("End", Scope.Process, 0, 0);
+
+        itt.track("group", "track");
+        long dur = (ts2-ts1) / 100;
+        for (long ts = ts1; ts < ts2; ts += dur)
+        {
+            itt.taskSubmit("submitted", ts, dur / 2, 0, 0);
+        }
+    }
+
 };
-
-//domain and string ids
-//returning task as object
-//having counter as object
-
-//see for example: /Users/aaraud/Perforce/gpa/mainline/SystemAnalyzer/PackageInfo/src/com/intel/gpa/packageinfo/SystemView.java
-

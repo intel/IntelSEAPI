@@ -18,19 +18,54 @@
 
 #include "Utils.h"
 
+#ifdef __ANDROID__
+
+#include <unwind.h>
+
+struct BacktraceState
+{
+    void** current;
+    void** end;
+};
+
+_Unwind_Reason_Code Unwind(struct _Unwind_Context* ctx, void* arg)
+{
+    BacktraceState* state = static_cast<BacktraceState*>(arg);
+    uintptr_t frame = _Unwind_GetIP(ctx);
+    if (frame)
+    {
+        if (state->current == state->end)
+            return _URC_END_OF_STACK;
+        else
+        {
+            *state->current = reinterpret_cast<void*>(frame);
+            ++state->current;
+        }
+    }
+    return _URC_NO_REASON;
+}
+
+size_t GetStack(TStack& stack)
+{
+    BacktraceState state = {stack, stack + StackSize};
+    _Unwind_Backtrace(Unwind, &state);
+    return state.current - stack;
+}
+
+#else
+
 #ifndef _WIN32
     #include <execinfo.h>
 #endif
 
-using TStack = void*[100];
 size_t GetStack(TStack& stack)
 {
-    const size_t size = sizeof(stack)/sizeof(stack[0]);
 #ifdef _WIN32
     typedef USHORT (WINAPI *FCaptureStackBackTrace)(__in ULONG, __in ULONG, __out PVOID*, __out_opt PULONG);
     static FCaptureStackBackTrace CaptureStackBackTrace = (FCaptureStackBackTrace)(GetProcAddress(LoadLibraryA("kernel32.dll"), "RtlCaptureStackBackTrace"));
-    return CaptureStackBackTrace ? CaptureStackBackTrace( 0, size, stack, NULL ) : 0;
+    return CaptureStackBackTrace ? CaptureStackBackTrace(0, StackSize, stack, NULL) : 0;
 #else
-    return backtrace(stack, size);
+    return backtrace(stack, StackSize);
 #endif
 }
+#endif
