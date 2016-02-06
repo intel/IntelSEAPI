@@ -348,7 +348,7 @@ def sea_reader(folder): #reads the structure of .sea format folder into dictiona
             elif filename.endswith(".pid"): #named groups (pseudo pids) makes record: group is the handle and content is the value
                 tree["groups"][filename.replace(".pid", "")] = file.readline()
             elif filename.endswith(".mdl"): #registered modules - for symbol resolving
-                tree["modules"][int(filename.replace(".mdl", ""))] = file.readline()
+                tree["modules"][int(filename.replace(".mdl", ""))] = file.readline().split()
             elif filename == "process.dct": #process info
                 tree["process"] = eval(file.read())
     for domain in toplevel[1]:#data from every domain gets recorded into separate folder which is named after the domain name
@@ -638,8 +638,9 @@ def get_module_by_ptr(tree, ptr):
         if key > ptr:
             break;
         item = key
-    if item < ptr:
-        return (item, tree['modules'][item])
+    module = tree['modules'][item]
+    if item < ptr < item + int(module[1]):
+        return (item, module[0])
     else:
         return (None, None)
 
@@ -680,8 +681,11 @@ def resolve_pointer(args, tree, ptr, call, cache = {}):
             call['str'] = lines[1]
             (call['__file__'], call['__line__']) = lines[0].rstrip(")").rsplit("(", 1)
     elif sys.platform == 'darwin':
-        if '+' in lines[0]:
-            call['str'] = lines[0].split(" (in ")[0]
+        if '(in' in lines[0]:
+            parts = lines[0].split(" (in ")
+            call['str'] = parts[0]
+            (call['__file__'], call['__line__']) = parts[1].split(") (")[1].split(':')
+            call['__line__'] = call['__line__'].strip(')')
         else:
             return False
     else:
@@ -778,6 +782,7 @@ class TaskCombiner:
         self.events = []
         self.event_map = {}
         self.prev_sample = 0
+        self.memory = {}
 
     def global_metadata(self, data):
         pass
@@ -830,13 +835,27 @@ class TaskCombiner:
                 return None
 
         def find_task(id):
-            for _, thread_stacks in domain['tasks'].iteritems(): #look in all threads
-                if thread_stacks['byid'].has_key(id) and len(thread_stacks['byid'][id]):
+            for thread_stacks in domain['tasks'].itervalues(): #look in all threads
+                if thread_stacks['byid'].has_key(id) and thread_stacks['byid'][id]:
                     return thread_stacks['byid'][id][-1]
                 else:
                     for item in thread_stacks['stack']:
                         if item.has_key('id') and item['id'] == id:
                             return item
+
+        def current_task(tid):
+            candidates = []
+            for domain in self.domains.itervalues():
+                if not domain['tasks'].has_key(tid):
+                    continue
+                thread = domain['tasks'][tid]
+                for byid in thread['byid'].itervalues():
+                    if byid:
+                        candidates.append(byid[-1])
+                if thread['stack']:
+                    candidates.append(thread['stack'][-1])
+            candidates.sort(key=lambda item: item['time'])
+            return candidates[-1] if candidates else None
 
         def get_last_index(tasks, type):
             if not len(tasks):
@@ -931,6 +950,17 @@ class TaskCombiner:
                 counter['begin'] = min(counter['begin'], data['time'])
                 counter['end'] = max(counter['end'], data['time'])
             else:
+                if data['domain'] == 'Memory':
+                    counter_name = data['str']
+                    prev_value = 0.
+                    if self.memory.has_key(counter_name):
+                        prev_value = self.memory[counter_name]
+                    delta = data['delta'] - prev_value #data['delta'] has current value of the counter
+                    self.memory[counter_name] = data['delta']
+                    current = current_task(data['tid'])
+                    if current:
+                        values = current.setdefault('memory',{}).setdefault(counter_name, [])
+                        values.append(delta)
                 self.complete_task(fn, data, data)
         elif fn == "relation":
             self.relation(
@@ -1126,8 +1156,8 @@ class GoogleTrace(TaskCombiner):
 
         if not res:
             return
-        if type in ['task', 'counter'] and begin.has_key('data'): #FIXME: move closer to the place where stack is demanded
-            self.handle_stack(begin, resolve_stack(self.args, self.tree, begin['data']), type)
+        if type in ['task', 'counter'] and begin.has_key('data') and begin.has_key('str'): #FIXME: move closer to the place where stack is demanded
+            self.handle_stack(begin, resolve_stack(self.args, self.tree, begin['data']), begin['str'])
         if self.args.debug:
             res = "".join(res)
             try:
@@ -1143,6 +1173,8 @@ class GoogleTrace(TaskCombiner):
             self.start_new_trace()
 
     def handle_stack(self, task, stack, name='stack'):
+    	if not stack:
+    		return
         parent = None
         for frame in reversed(stack): #going from parents to childs
             if parent == None:
@@ -1237,6 +1269,17 @@ class GoogleTrace(TaskCombiner):
             args["__line__"] = begin["__line__"]
         if 'counter' == type:
             args[name] = begin['delta']
+        if begin.has_key('memory'):
+            total = 0
+            breakdown = {}
+            for name, values in begin['memory'].iteritems():
+                size = int(name.split('<')[1].split('>')[0])
+                all = sum(values)
+                total += size * all
+                if all:
+                    breakdown[size] = all
+            breakdown['TOTAL'] = total
+            args['CRT:Memory'] = breakdown
         if args:
             res.append(', "args":')
             res.append(self.format_value(args))
@@ -1523,7 +1566,8 @@ class GraphCombiner(TaskCombiner):
         return re.sub("[^a-z0-9]", "_", res.lower())
 
     def relation(self, data, head, tail):
-        self.add_relation({'label': data['str'], 'from': self.make_id(head['domain'], head['str']), 'to': self.make_id(tail['domain'], tail['str']), 'color': 'red'})
+        if head and tail:
+            self.add_relation({'label': data['str'], 'from': self.make_id(head['domain'], head['str']), 'to': self.make_id(tail['domain'], tail['str']), 'color': 'red'})
 
     def add_relation(self, relation):
         key = frozenset(relation.iteritems())

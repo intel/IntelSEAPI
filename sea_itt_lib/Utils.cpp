@@ -17,6 +17,24 @@
 **********************************************************************************************************************************************************************************************************************************************************************************************/
 
 #include "Utils.h"
+#include "IttNotifyStdSrc.h"
+#include <string.h>
+
+#ifdef _WIN32
+    #include <Psapi.h>
+#else
+    #include <cxxabi.h>
+    #include <dlfcn.h>
+
+    #ifndef __ANDROID__
+        #include <execinfo.h>
+    #endif
+
+#endif
+
+#ifdef __APPLE__
+    #include <mach-o/dyld.h>
+#endif
 
 #ifdef __ANDROID__
 
@@ -54,10 +72,6 @@ size_t GetStack(TStack& stack)
 
 #else
 
-#ifndef _WIN32
-    #include <execinfo.h>
-#endif
-
 size_t GetStack(TStack& stack)
 {
 #ifdef _WIN32
@@ -69,3 +83,75 @@ size_t GetStack(TStack& stack)
 #endif
 }
 #endif
+
+namespace sea {
+
+#ifdef _WIN32
+const char* GetProcessName(bool bFullPath)
+{
+    assert(bFullPath);
+    static char process_name[1024] = {};
+    if (!process_name[0])
+        GetModuleFileNameA(NULL, process_name, sizeof(process_name) - 1);
+    return process_name;
+}
+
+SModuleInfo Fn2Mdl(void* fn)
+{
+    HMODULE hModule = NULL;
+    GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCTSTR)fn, &hModule);
+    char filename[1024] = {};
+    GetModuleFileNameA(hModule, filename, sizeof(filename) - 1);
+    MODULEINFO mi = {};
+    GetModuleInformation(GetCurrentProcess(), hModule, &mi, sizeof(MODULEINFO));
+    return SModuleInfo{hModule, mi.SizeOfImage, filename};
+}
+
+#else
+
+#include <sys/stat.h>
+
+size_t GetFileSize(const char *path) {
+    struct stat st = {};
+
+    if (0 == stat(path, &st))
+        return st.st_size;
+
+    return -1;
+}
+
+sea::SModuleInfo Fn2Mdl(void* fn)
+{
+    //FIXME: Linux: dl_iterate_phdr(), OSX: http://stackoverflow.com/questions/28846503/getting-sizeofimage-and-entrypoint-of-dylib-module
+    Dl_info dl_info = {};
+    dladdr(fn, &dl_info);
+    if (dl_info.dli_fname[0] == '/') //path is absolute
+        return SModuleInfo{dl_info.dli_fbase, GetFileSize(dl_info.dli_fname), dl_info.dli_fname};
+    else
+    {
+        const char * absolute = realpath(dl_info.dli_fname, nullptr);
+        SModuleInfo mdlInfo{dl_info.dli_fbase, GetFileSize(dl_info.dli_fname), absolute};
+        free((void*) absolute);
+        return mdlInfo;
+    }
+}
+
+const char* GetProcessName(bool bFullPath)
+{
+    static char process_name[1024] = {};
+#ifdef __APPLE__
+    uint32_t size = 1023;
+    _NSGetExecutablePath(process_name, &size);
+#else
+    if (!process_name[0])
+        process_name[readlink("/proc/self/exe", process_name, sizeof(process_name)/sizeof(process_name[0]) - 1 )] = 0;
+#endif //__APPLE__
+    if (bFullPath) return process_name;
+    return strrchr(process_name, '/') + 1;
+}
+
+#endif
+
+} //namespace sea
+
+

@@ -72,8 +72,13 @@ namespace sea {
     void SetFolder(const std::string& path);
     void SetRing(uint64_t nanoseconds);
     const char* GetProcessName(bool bFullPath);
-    typedef std::pair<void*, std::string> TMdlInfo;
-    TMdlInfo Fn2Mdl(void* fn);
+    struct SModuleInfo
+    {
+        void* base;
+        size_t size;
+        std::string path;
+    };
+    SModuleInfo Fn2Mdl(void* fn);
     std::string GetDir(std::string path, const std::string& append = "");
 }
 

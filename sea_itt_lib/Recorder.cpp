@@ -516,12 +516,13 @@ bool ReportModule(void* fn)
     if (g_savepath.empty())
         return true;
 
-    TMdlInfo module_info = Fn2Mdl(fn);
+    SModuleInfo module_info = Fn2Mdl(fn);
 
-    std::string path = GetDir(g_savepath) + std::to_string((uint64_t)module_info.first) + ".mdl";
+    std::string path = GetDir(g_savepath) + std::to_string((uint64_t)module_info.base) + ".mdl";
     int fd = open(path.c_str(), O_WRONLY|O_CREAT|O_EXCL, FilePermissions);
     if (-1 == fd) return true; //file already exists
-    int res = write(fd, module_info.second.c_str(), (unsigned int)module_info.second.size());
+    std::string text = module_info.path + " " + std::to_string(module_info.size);
+    int res = write(fd, text.c_str(), (unsigned int)text.size());
     close(fd);
     return res != -1;
 }
