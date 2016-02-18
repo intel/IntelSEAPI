@@ -19,6 +19,7 @@
 
 
 #include "IttNotifyStdSrc.h"
+#include "Utils.h"
 #include <stdlib.h>
 #include <cstdio>
 #include <string.h>
@@ -45,13 +46,13 @@
 int GlobalInit()
 {
     static const char var_name[] = INTEL_LIBITTNOTIFY BIT_SUFFIX;
-    sea::TMdlInfo mdlinfo = sea::Fn2Mdl((void*)GlobalInit);
+    sea::SModuleInfo mdlinfo = sea::Fn2Mdl((void*)GlobalInit);
 
-    VerbosePrint("IntelSEAPI: %s=%s | Loaded from: %s\n", var_name, get_environ_value(var_name).c_str(), mdlinfo.second.c_str());
+    VerbosePrint("IntelSEAPI: %s=%s | Loaded from: %s\n", var_name, get_environ_value(var_name).c_str(), mdlinfo.path.c_str());
 
     std::string value = var_name;
     value += "=";
-    value += mdlinfo.second;
+    value += mdlinfo.path;
 
     setenv(_strdup(value.c_str()));
     return 1;
@@ -113,8 +114,8 @@ extern "C" {
     SEA_EXPORT void ITTAPI __itt_api_init(__itt_global* pGlob, __itt_group_id id)
     {
         const char* procname = sea::GetProcessName(true);
-        sea::TMdlInfo mdlinfo = sea::Fn2Mdl(pGlob);
-        VerbosePrint("IntelSEAPI init is called from process '%s' at module '%s'\n", procname, mdlinfo.second.c_str());
+        sea::SModuleInfo mdlinfo = sea::Fn2Mdl(pGlob);
+        VerbosePrint("IntelSEAPI init is called from process '%s' at module '%s'\n", procname, mdlinfo.path.c_str());
         GetITTGlobal(pGlob);
         sea::FillApiList(pGlob->api_list_ptr);
         for (___itt_domain* pDomain = pGlob->domain_list; pDomain; pDomain = pDomain->next)

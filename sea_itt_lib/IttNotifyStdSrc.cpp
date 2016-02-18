@@ -30,77 +30,11 @@
 #ifdef _WIN32
     #include <io.h>
     #include <direct.h>
-#else
-    #ifndef __ANDROID__
-        #include <execinfo.h>
-    #endif
-    #include <cxxabi.h>
-    #include <dlfcn.h>
 #endif
 
-
-#ifdef __APPLE__
-    #include <mach-o/dyld.h>
-#endif
-
-namespace sea { //TODO: consider moving to Utils.cpp
-
+namespace sea {
     IHandler* g_handlers[MAX_HANDLERS] = {}; //10 is more than enough for now
-
-#ifdef _WIN32
-const char* GetProcessName(bool bFullPath)
-{
-    assert(bFullPath);
-    static char process_name[1024] = {};
-    if (!process_name[0])
-        GetModuleFileNameA(NULL, process_name, sizeof(process_name) - 1);
-    return process_name;
 }
-
-TMdlInfo Fn2Mdl(void* fn)
-{
-    HMODULE hModule = NULL;
-    GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCTSTR)fn, &hModule);
-    char filename[1024] = {};
-    GetModuleFileNameA(hModule, filename, sizeof(filename) - 1);
-    return TMdlInfo(hModule, filename);
-}
-
-#else
-
-sea::TMdlInfo Fn2Mdl(void* fn)
-{
-    Dl_info dl_info = {};
-    dladdr(fn, &dl_info);
-    if (dl_info.dli_fname[0] == '/') //path is absolute
-        return TMdlInfo(dl_info.dli_fbase, dl_info.dli_fname);
-    else
-    {
-        const char * absolute = realpath(dl_info.dli_fname, nullptr);
-        TMdlInfo mdlInfo(dl_info.dli_fbase, absolute);
-        free((void*) absolute);
-        return mdlInfo;
-    }
-}
-
-const char* GetProcessName(bool bFullPath)
-{
-    static char process_name[1024] = {};
-#ifdef __APPLE__
-    uint32_t size = 1023;
-    _NSGetExecutablePath(process_name, &size);
-#else
-    if (!process_name[0])
-        process_name[readlink("/proc/self/exe", process_name, sizeof(process_name)/sizeof(process_name[0]) - 1 )] = 0;
-#endif //__APPLE__
-    if (bFullPath) return process_name;
-    return strrchr(process_name, '/') + 1;
-}
-
-#endif
-
-} //namespace sea
-
 
 //FIXME: in general add much more comments
 
@@ -588,6 +522,7 @@ void counter_set_value(__itt_counter id, void *value_ptr)
 
 void UNICODE_AGNOSTIC(sync_create)(void *addr, const char *objtype, const char *objname, int attribute)
 {
+    return; //XXX
     ITT_FUNCTION_STAT();
 
     std::string name((attribute == __itt_attr_mutex) ? "mutex:" : "barrier:");
@@ -610,6 +545,7 @@ void sync_createW(void *addr, const wchar_t *objtype, const wchar_t *objname, in
 
 void sync_destroy(void *addr)
 {
+    return; //XXX
     ITT_FUNCTION_STAT();
 
     __itt_id id = __itt_id_make(addr, 0);
@@ -619,6 +555,7 @@ void sync_destroy(void *addr)
 
 inline void SyncState(void * addr, const char * state)
 {
+    return; //XXX
     __itt_id id = __itt_id_make(addr, 0);
 
     CTraceEventFormat::SRegularFields rf = GetRegularFields();
@@ -1254,7 +1191,6 @@ protected:
     typedef std::pair<__itt_string_handle*, size_t/*count*/> TBlockData;
     std::map<size_t/*block size*/, TBlockData> m_counter_map;
     bool m_bInitialized = false;
-    size_t m_common_size = 0;
 public:
     CMemoryTracker()
         : m_bInitialized(true)
@@ -1277,23 +1213,9 @@ public:
             {
                 ++it->second.second;
             }
-            m_common_size += size;
             block = it->second;
         }
         Counter(pHeapFunction->pDomain, block.first, double(block.second));
-/*XXX
-        Counter(pHeapFunction->pDomain, pHeapFunction->pName, double(m_common_size));
-        if (STaskDescriptor* pTask = GetThreadRecord()->pTask)
-        {
-            for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
-            {
-                //TODO: this show blocks allocated by this task with their number on this moment
-                //but user needs to know how many is allocated by this task, not common value on this moment
-                std::string data = std::to_string(it->second.second);
-                g_handlers[i]->AddArg(*pTask, it->second.first, data.c_str(), data.size());
-            }
-        }
-*/
     }
 
     void Free(SHeapFunction* pHeapFunction, const void* addr)
@@ -1311,7 +1233,6 @@ public:
         {
             --it->second.second;
         }
-        m_common_size -= size;
         Counter(pHeapFunction->pDomain, it->second.first, double(it->second.second));
     }
 
