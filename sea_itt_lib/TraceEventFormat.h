@@ -107,7 +107,7 @@ public:
         }
         CArgs& Add(const std::string& name, const char* value)
         {
-            m_args[name] = value;
+            m_args[name] = value ? value : "";
             return *this;
         }
         template<class T>

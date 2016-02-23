@@ -1,1 +1,1 @@
-python ./runtool/sea_runtool.py -b ./build_darwin/bin -o ./build_darwin/Test -f gt -v --stacks ! ./build_darwin/bin/TestIntelSEAPI
+python ./runtool/sea_runtool.py -b ./build_darwin/bin -o ./build_darwin/Test -f gt --stacks ! ./build_darwin/bin/TestIntelSEAPI
