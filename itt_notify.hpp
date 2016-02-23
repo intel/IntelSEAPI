@@ -76,13 +76,13 @@ public:
     }
 };
 
-#define ITT_DOMAIN(domain)\
+#define ITT_DOMAIN(/*const char* */domain)\
     static const __itt_domain* __itt_domain_name = __itt_domain_create(domain)
 
 #if defined(_MSC_VER) && _MSC_VER >= 1900 //since VS 2015 magic statics are supported, TODO: check with other compilers
     #define ITT_MAGIC_STATIC(static_variable)
 #else
-//the 'while' below is to protect code from crash in multithreaded environment under compiler without magic statics support
+//the 'while' below is to protect code from crash in multi-threaded environment under compiler without magic statics support
     #define ITT_MAGIC_STATIC(static_variable) while(!(static_variable)) std::this_thread::yield();
 #endif
 
@@ -91,12 +91,12 @@ public:
     ITT_MAGIC_STATIC(__itt_scope_name);\
     itt_notify::Task<region> __itt_scope_item(__itt_domain_name, __itt_scope_name)
 
-#define ITT_SCOPE_TASK(name) ITT_SCOPE(false, name)
-#define ITT_SCOPE_REGION(name) ITT_SCOPE(true, name)
+#define ITT_SCOPE_TASK(/*const char* */name) ITT_SCOPE(false, name)
+#define ITT_SCOPE_REGION(/*const char* */name) ITT_SCOPE(true, name)
 
 #define ITT_FUNCTION_TASK() ITT_SCOPE_TASK(__FUNCTION__); ITT_ARG("__file__", __FILE__); ITT_ARG("__line__", __LINE__)
 
-#define ITT_ARG(name, value) {\
+#define ITT_ARG(/*const char* */name, /*number or string*/ value) {\
     static __itt_string_handle* __itt_arg_name = __itt_string_handle_create(name);\
     ITT_MAGIC_STATIC(__itt_arg_name);\
     __itt_scope_item.AddArg(__itt_arg_name, value);\
@@ -110,13 +110,13 @@ enum Scope
     scope_task =__itt_scope_task, //means a task that will long until another marker with task scope in this thread occures
 };
 
-#define ITT_MARKER(name, scope) {\
+#define ITT_MARKER(/*const char* */name, /*enum Scope*/scope) {\
     static __itt_string_handle* __itt_marker_name = __itt_string_handle_create(name);\
     ITT_MAGIC_STATIC(__itt_marker_name);\
     __itt_marker(__itt_domain_name, __itt_null, __itt_marker_name, (__itt_scope)itt_notify::scope);\
 }
 
-#define ITT_COUNTER(name, value) { \
+#define ITT_COUNTER(/*const char* */name, /*double */value) { \
     static __itt_string_handle* __itt_counter_name = __itt_string_handle_create(name);\
     ITT_MAGIC_STATIC(__itt_counter_name);\
     double counter_value = value;\
@@ -137,7 +137,7 @@ public:
 };
 
 //'group' defines virtual process (null means current process), track defines virtual thread
-#define ITT_SCOPE_TRACK(group, track)\
+#define ITT_SCOPE_TRACK(/*const char* */group, /*const char* */ track)\
     static __itt_track* itt_track_name = __itt_track_create(__itt_track_group_create(((group) ? __itt_string_handle_create(group) : nullptr), __itt_track_group_type_normal), __itt_string_handle_create(track), __itt_track_type_normal);\
     ITT_MAGIC_STATIC(itt_track_name);\
     itt_notify::ScopeTrack itt_track(itt_track_name);
