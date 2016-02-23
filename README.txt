@@ -7,7 +7,7 @@ You can use it as memory/performance/whatever profiler.
 
 itt_notify is open-source cross-platform plain C library for instrumentation of C/C++ code with tasks/markers/counters/etc...
 Some documentation can be found here: https://software.intel.com/en-us/node/544201
-For usage examples please see main.cpp and memory.cpp of Intel® SEAPI package
+For usage examples please see https://github.com/01org/IntelSEAPI/blob/master/InstrumentationExample.cpp and https://github.com/01org/IntelSEAPI/blob/master/memory.cpp of Intel® SEAPI package
 
 After your code is instrumented with itt, to load up the library follow these steps:
     On Windows and Linux:
