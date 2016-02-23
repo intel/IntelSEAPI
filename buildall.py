@@ -85,7 +85,8 @@ def GetJDKPath():
         if err or not path:
             return None
         if sys.platform == 'darwin':
-            return "/System/Library/Frameworks/JavaVM.framework/Headers"
+            path = "/System/Library/Frameworks/JavaVM.framework/Headers"
+            return (path if os.path.exists(path) else None)
         else:
             matches = []
             for root, dirnames, filenames in os.walk('/usr/lib/jvm'):
@@ -107,10 +108,12 @@ def main():
     yocto = get_yocto()
     if not yocto:
         target_bits = ['64']
-        if sys.platform != 'darwin': #on MAC OSX we produce FAT library including both 32 and 64 bits
+        if (sys.platform != 'darwin') or args.android: #on MAC OSX we produce FAT library including both 32 and 64 bits
             target_bits.append('32')
     else:
         target_bits = [yocto['bits']]
+
+    print "target_bits", target_bits
 
     jdk_path = GetJDKPath()
     print "Found JDK:", jdk_path
