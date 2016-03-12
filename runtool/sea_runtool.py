@@ -25,7 +25,7 @@ import binascii
 from glob import glob
 from subprocess import Popen, PIPE
 
-ProgressConst = 10000
+ProgressConst = 20000
 
 
 def format_time(time):
@@ -112,6 +112,7 @@ def parse_args(args):
     parser.add_argument("--stacks", action="store_true")
     parser.add_argument("--min_dur", type=int, default=0)
     parser.add_argument("--sampling")
+    parser.add_argument("--distinct", action="store_true")
     parser.add_argument("--memory", choices=["total", "detailed"], default="total")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--profile", action="store_true")
@@ -376,7 +377,7 @@ def launch(args, victim):
         args.input = "%s-%d" % (args.output, proc.pid)
         output = transform(args)
         output = join_output(args, output)
-        print "result:", output
+        print "result:", [os.path.abspath(path) for path in output]
 
 
 def join_output(args, output):
@@ -418,7 +419,8 @@ def sea_reader(folder):  # reads the structure of .sea format folder into dictio
             elif filename.endswith(".pid"): #named groups (pseudo pids) makes record: group is the handle and content is the value
                 tree["groups"][filename.replace(".pid", "")] = file.readline()
             elif filename.endswith(".mdl"):  # registered modules - for symbol resolving
-                tree["modules"][int(filename.replace(".mdl", ""))] = file.readline().split()
+                parts = file.readline().split()
+                tree["modules"][int(filename.replace(".mdl", ""))] = [' '.join(parts[0:-1]), parts[-1]]
             elif filename == "process.dct":  # process info
                 tree["process"] = eval(file.read())
     for domain in toplevel[1]:#data from every domain gets recorded into separate folder which is named after the domain name
@@ -762,11 +764,11 @@ def resolve_pointer(args, tree, ptr, call, cache={}):
         if sys.platform == 'win32':
             script_dir = os.path.abspath(args.bindir) if args.bindir else os.path.dirname(os.path.realpath(__file__))
             executable = os.path.sep.join([script_dir, 'TestIntelSEAPI32.exe'])
-            cmd = "%s %s:%d" % (executable, path, ptr - load_addr)
+            cmd = '"%s" "%s":%d' % (executable, path, ptr - load_addr)
         elif sys.platform == 'darwin':
-            cmd = "atos -o %s -l %s %s" % (path, to_hex(load_addr), to_hex(ptr))
+            cmd = 'atos -o "%s" -l %s %s' % (path, to_hex(load_addr), to_hex(ptr))
         elif 'linux' in sys.platform:
-            cmd = "addr2line %s -e %s -i -p -f -C" % (to_hex(ptr), path)
+            cmd = 'addr2line %s -e "%s" -i -p -f -C' % (to_hex(ptr), path)
         else:
             assert (not "Unsupported platform!")
 
@@ -873,7 +875,7 @@ struct_decoders = {
 }
 
 
-def represent_data(name, data):
+def represent_data(tree, name, data):
     for key in struct_decoders.iterkeys():
         if key in name:
             return struct_decoders[key](data)
@@ -996,7 +998,7 @@ class TaskCombiner:
             self.time_bounds[0] = min(self.time_bounds[0], data['time'])
             get_tasks(None if fn == "task_begin" else data['id']).append(data)
         elif fn == "task_end" or fn == "task_end_overlapped":
-            if data.has_key('delta'):
+            if data.has_key('delta'):  # turbo mode, only ends are written
                 self.time_bounds[0] = min(self.time_bounds[0], data['time'])
                 end = data.copy()
                 end['time'] = data['time'] + data['delta']
@@ -1036,7 +1038,7 @@ class TaskCombiner:
                 else:
                     args = thread['args'].setdefault(data['id'], {})
 
-                args[data['str']] = data['delta'] if data.has_key('delta') else represent_data(data['str'], data['data']) if data.has_key('data') else '0x0'
+                args[data['str']] = data['delta'] if data.has_key('delta') else represent_data(self.tree, data['str'], data['data']) if data.has_key('data') else '0x0'
             else:  # global metadata
                 self.global_metadata(data)
         elif fn == "object_snapshot":
@@ -1058,6 +1060,7 @@ class TaskCombiner:
                     item = markers.pop()
                     item['type'] = 7  # frame_begin
                     item['domain'] += ".continuous_markers"
+                    item['time'] += 1
                     self.complete_task("frame", item, data)
                 markers.append(data)
             elif fn == "counter" and self.args.sampling:
@@ -1096,6 +1099,9 @@ class TaskCombiner:
                             self.complete_task(fn, data, data)
                             self.prev_memory = data
                         return
+                if data.has_key('id') and thread['args'].has_key(data['id']):
+                    data['args'] = thread['args'][data['id']]
+                    del thread['args'][data['id']]
                 self.complete_task(fn, data, data)
         elif fn == "relation":
             self.relation(

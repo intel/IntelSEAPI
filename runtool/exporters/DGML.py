@@ -1,4 +1,6 @@
 import cgi
+import os
+import shutil
 from sea_runtool import GraphCombiner, to_hex, format_time
 
 class DGML(GraphCombiner):

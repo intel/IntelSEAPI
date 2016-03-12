@@ -96,13 +96,40 @@ def GetJDKPath():
                 return None
             return os.path.split(matches[0])[0]
 
+def get_vs_versions():
+    if sys.platform != 'win32':
+        return []
+    import _winreg
+    try:
+        aKey = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\Microsoft\VisualStudio', 0, _winreg.KEY_READ | _winreg.KEY_WOW64_64KEY)
+    except WindowsError:
+        print "No Visual Studio found"
+        return []
+    subkeys = []
+    try:
+        i = 0
+        while True:
+            subkey = _winreg.EnumKey(aKey, i)
+            if '.' in subkey:
+                subkeys.append(subkey.split('.')[0])
+            i += 1
+    except WindowsError:
+        pass
+    if not subkeys:
+        print "No Visual Studio version found"
+        return []
+    return sorted(subkeys)
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
+    vs_versions = get_vs_versions()
     parser.add_argument("-i", "--install", action="store_true")
     parser.add_argument("-d", "--debug", action="store_true")
     parser.add_argument("-a", "--android", action="store_true")
     parser.add_argument("-c", "--clean", action="store_true")
+    if sys.platform == 'win32':
+        parser.add_argument("--vs", choices=vs_versions, default=vs_versions[0])
     args = parser.parse_args()
 
     yocto = get_yocto()
@@ -147,7 +174,10 @@ def main():
                 print "Set ANDROID_NDK environment to build Android!"
             continue
         if sys.platform == 'win32':
-            generator = 'Visual Studio 12 Win64' if bits == '64' else 'Visual Studio 12'
+            if vs_versions:
+                generator = ('Visual Studio %s' % args.vs) + (' Win64' if bits == '64' else '')
+            else:
+                generator = 'Ninja'
         else:
             generator = 'Unix Makefiles'
         run_shell('cmake "%s" -G"%s" %s' % (work_dir, generator, " ".join([
