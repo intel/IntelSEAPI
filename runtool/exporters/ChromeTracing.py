@@ -1,6 +1,6 @@
 import os
 import json
-from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex
+from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst
 
 MAX_GT_SIZE = 50 * 1024 * 1024
 GT_FLOAT_TIME = False
@@ -19,6 +19,7 @@ class GoogleTrace(TaskCombiner):
         self.counters = {}
         self.frames = {}
         self.samples = []
+        self.last_task = None
         if self.args.trace:
             if self.args.trace.endswith(".etl"):
                 self.handle_etw_trace(self.args.trace)
@@ -164,6 +165,10 @@ class GoogleTrace(TaskCombiner):
     Phase = {'task':'X', 'counter':'C', 'marker':'i', 'object_new':'N', 'object_snapshot':'O', 'object_delete':'D', 'frame':'X'}
 
     def complete_task(self, type, begin, end):
+        if self.args.distinct:
+            if self.last_task == (type, begin, end):
+                return
+            self.last_task = (type, begin, end)
         assert (GoogleTrace.Phase.has_key(type))
         if begin['type'] == 7:  # frame_begin
             begin['id'] = begin['tid'] if begin.has_key('tid') else 0  # Async events are groupped by cat & id
@@ -179,7 +184,7 @@ class GoogleTrace(TaskCombiner):
             return
         if type in ['task', 'counter'] and begin.has_key('data') and begin.has_key('str'): #FIXME: move closer to the place where stack is demanded
             self.handle_stack(begin, resolve_stack(self.args, self.tree, begin['data']), begin['str'])
-        if self.args.debug:
+        if self.args.debug and begin['type'] != 7:
             res = "".join(res)
             try:
                 json.loads(res)

@@ -187,6 +187,18 @@ install(
     DESTINATION bin
 )
 
+install(
+    DIRECTORY "${PROJECT_SOURCE_DIR}/runtool/importers"
+    DESTINATION bin
+    PATTERN "*.pyc" EXCLUDE
+)
+
+install(
+    DIRECTORY "${PROJECT_SOURCE_DIR}/runtool/exporters"
+    DESTINATION bin
+    PATTERN "*.pyc" EXCLUDE
+)
+
 if (WIN32)
 
     install(

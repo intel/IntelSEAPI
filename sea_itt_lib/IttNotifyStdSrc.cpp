@@ -87,13 +87,13 @@ uint64_t g_features = sea::GetFeatureSet();
 
 class DomainFilter
 {
+protected:
     std::string m_path;
-    std::map<std::string/*domain*/, bool/*disabled*/> m_domains;
-public:
-    DomainFilter()
+    typedef std::map<std::string/*domain*/, bool/*disabled*/> TDomains;
+    TDomains m_domains;
+
+    void ReadFilters(TDomains& domains)
     {
-        m_path = get_environ_value("INTEL_SEA_FILTER");
-        if (m_path.empty()) return;
         std::ifstream ifs(m_path);
         for (std::string domain; std::getline(ifs, domain);)
         {
@@ -102,6 +102,13 @@ public:
             else
                 m_domains[domain] = false;
         }
+    }
+public:
+    DomainFilter()
+    {
+        m_path = get_environ_value("INTEL_SEA_FILTER");
+        if (m_path.empty()) return;
+        ReadFilters(m_domains);
     }
 
     operator bool() const
@@ -117,6 +124,11 @@ public:
     void Finish()
     {
         if (m_path.empty()) return;
+        TDomains domains;
+        ReadFilters(domains);
+        domains.insert(m_domains.begin(), m_domains.end());
+        m_domains.swap(domains);
+
         std::ofstream ifs(m_path);
         for (const auto& pair : m_domains)
         {
@@ -977,7 +989,10 @@ void metadata_add(const __itt_domain *pDomain, __itt_id id, __itt_string_handle 
             }
             else
             {
-                MetadataAdd(pDomain, id, pKey, (const char *)data, count);
+                if (count)
+                    MetadataAdd(pDomain, id, pKey, (const char*)data, count); //raw data with size
+                else
+                    MetadataAdd(pDomain, id, pKey, (double)(uint64_t)data); //just pointer, convert it to number
             }
         }
     }

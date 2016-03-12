@@ -26,9 +26,24 @@
 #endif
 
 #ifdef _WIN32
+#if _MSC_VER == 1800 //VS2013
     #define _CRTBLD //hack, no words
         #include <../crt/src/dbgint.h> //for definition of _CrtMemBlockHeader
     #undef _CRTBLD
+#elif _MSC_VER == 1900 //VS2015
+    struct _CrtMemBlockHeader //it's in debug_heap.cpp now
+    {
+        _CrtMemBlockHeader* _block_header_next;
+        _CrtMemBlockHeader* _block_header_prev;
+        char const*         _file_name;
+        int                 _line_number;
+
+        int                 _block_use;
+        size_t              _data_size;
+
+        long                lRequest;
+    };
+#endif
     #include <crtdbg.h>
 
     class CRecursionScope
@@ -57,7 +72,7 @@
             case _HOOK_ALLOC:
             {
                 //In crt hooks we don't know address of the block on allocation, using request number as id
-                void* fakePtr = reinterpret_cast<void*>(requestNumber);
+                void* fakePtr = (void*)(uintptr_t)requestNumber;
                 __itt_heap_allocate_begin(g_heap, size, 0); //since we are called before real allocation we can't measure the time of it
                 __itt_heap_allocate_end(g_heap, &fakePtr, size, 0);
                 break;
@@ -66,7 +81,7 @@
             {
                 //requestNumber is not passed here on _HOOK_FREE, using a bit of knowledge of the internals
                 requestNumber = (((_CrtMemBlockHeader*)userData)-1)->lRequest;
-                void* fakePtr = reinterpret_cast<void*>(requestNumber);
+                void* fakePtr = (void*)(uintptr_t)requestNumber;
                 __itt_heap_free_begin(g_heap, fakePtr); //since we are called before real deallocation we can't measure the time of it
                 __itt_heap_free_end(g_heap, fakePtr);
                 break;
