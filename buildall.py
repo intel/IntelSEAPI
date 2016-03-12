@@ -128,7 +128,8 @@ def main():
     parser.add_argument("-d", "--debug", action="store_true")
     parser.add_argument("-a", "--android", action="store_true")
     parser.add_argument("-c", "--clean", action="store_true")
-    parser.add_argument("--vs", choices=vs_versions, default=vs_versions[0])
+    if sys.platform == 'win32':
+        parser.add_argument("--vs", choices=vs_versions, default=vs_versions[0])
     args = parser.parse_args()
 
     yocto = get_yocto()
