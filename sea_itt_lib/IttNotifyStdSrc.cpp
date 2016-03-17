@@ -1629,6 +1629,12 @@ void InitSEA()
     size_t i = 0;
     for (auto ptr: relations)
         g_relations[i++] = ptr ? UNICODE_AGNOSTIC(string_handle_create)(ptr) : nullptr;
+
+#ifdef _WIN32 //adding information about process explicitly
+    ReportModule(GetModuleHandle(NULL));
+#else
+    ReportModule(dlopen(NULL, RTLD_LAZY));
+#endif
 }
 
 void FinitaLaComedia()

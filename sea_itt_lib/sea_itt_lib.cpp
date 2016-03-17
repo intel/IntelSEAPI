@@ -146,7 +146,6 @@ extern "C" {
         sea::FinitaLaComedia();
 #ifdef _WIN32
         EventUnregisterIntelSEAPI();
-        _flushall();
 #endif
     }
 
