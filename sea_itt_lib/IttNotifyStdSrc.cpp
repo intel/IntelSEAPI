@@ -1633,7 +1633,7 @@ void InitSEA()
 #ifdef _WIN32 //adding information about process explicitly
     ReportModule(GetModuleHandle(NULL));
 #else
-    ReportModule(dlopen(NULL, RTLD_LAZY));
+    //XXX ReportModule(dlopen(NULL, RTLD_LAZY));
 #endif
 }
 

@@ -335,7 +335,7 @@ def launch(args, victim):
         paths.append((bits, files[0]))
     if not len(paths):
         print "Error: didn't find any *IntelSEAPI%s files. Please check that you run from bin directory, or use --bindir." % os_lib_ext()
-            sys.exit(-1)
+        sys.exit(-1)
     if macosx:
         env["DYLD_INSERT_LIBRARIES"] = paths[0][1]
     else:
