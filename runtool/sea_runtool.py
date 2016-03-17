@@ -96,21 +96,21 @@ def parse_args(args):
         format_choices.append("xcode")
     elif sys.platform == 'linux':
         format_choices.append("kernelshark")
-    parser.add_argument("-f", "--format", choices=format_choices, nargs='*', required=True, help='One or many output formats.')
-    parser.add_argument("-o", "--output", help='Output folder pattern -<pid> will be added to it')
-    parser.add_argument("-b", "--bindir", help='If you run script not from its location')
-    parser.add_argument("-i", "--input", help='Provide input folder for transformation (<the one you passed to -o>-<pid>)')
+    parser.add_argument("-f", "--format", choices=format_choices, nargs='*')
+    parser.add_argument("-o", "--output")
+    parser.add_argument("-b", "--bindir")
+    parser.add_argument("-i", "--input")
     parser.add_argument("-t", "--trace")
-    parser.add_argument("-d", "--dir", help='Working directory for target (your program)')
+    parser.add_argument("-d", "--dir")
     parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("-c", "--cuts", nargs='*', help='Set "all" to merge all cuts in one trace')
+    parser.add_argument("-c", "--cuts", nargs='*')
     parser.add_argument("-s", "--sync")
-    parser.add_argument("-l", "--limit", help='define')
+    parser.add_argument("-l", "--limit")
     parser.add_argument("--ssh")
     parser.add_argument("-p", "--password")
-    parser.add_argument("--dry", action="store_true", help='Dry mode, only prints what it would do')
-    parser.add_argument("--stacks", action="store_true", help='Collect stacks')
-    parser.add_argument("--min_dur", type=int, default=0, help='Sets minimal task length threshold (in float, microseconds). Helps opening huge traces.')
+    parser.add_argument("--dry", action="store_true")
+    parser.add_argument("--stacks", action="store_true")
+    parser.add_argument("--min_dur", type=int, default=0)
     parser.add_argument("--sampling")
     parser.add_argument("--distinct", action="store_true")
     parser.add_argument("--memory", choices=["total", "detailed"], default="total")
@@ -218,7 +218,6 @@ class ETWTrace:
 
 
 def start_etw(args):
-    print "Trying to start ETW..."
     trace = ETWTrace(args)
     return trace if trace.start() else None
 
@@ -330,20 +329,14 @@ def launch(args, victim):
         search = os.path.sep.join([script_dir, "*IntelSEAPI" + bits + os_lib_ext()])
         files = glob(search)
         if not len(files):
-            print "Warning: didn't find any files for:", search
-            continue
-        paths.append((bits, files[0]))
-    if not len(paths):
-        print "Error: didn't find any *IntelSEAPI%s files. Please check that you run from bin directory, or use --bindir." % os_lib_ext()
+            print "Error: didn't find any files for:", search
             sys.exit(-1)
+        paths.append(files[0])
     if macosx:
-        env["DYLD_INSERT_LIBRARIES"] = paths[0][1]
+        env["DYLD_INSERT_LIBRARIES"] = paths[0]
     else:
-        paths = dict(paths)
-        if '32' in paths:
-            env["INTEL_LIBITTNOTIFY32"] = paths['32']
-        if '64' in paths:
-            env["INTEL_LIBITTNOTIFY64"] = paths['64']
+        env["INTEL_LIBITTNOTIFY32"] = paths[0]
+        env["INTEL_LIBITTNOTIFY64"] = paths[1]
 
     env["INTEL_SEA_FEATURES"] = os.environ['INTEL_SEA_FEATURES'] if os.environ.has_key('INTEL_SEA_FEATURES') else ""
     env["INTEL_SEA_FEATURES"] += (" " + str(args.format)) if args.format else ""
@@ -412,8 +405,6 @@ def default_tree():
 
 
 def sea_reader(folder):  # reads the structure of .sea format folder into dictionary
-    if not os.path.exists(folder):
-        print """Error: folder "%s" doesn't exist""" % folder
     tree = default_tree()
     pos = folder.rfind("-")  # pid of the process is encoded right in the name of the folder
     tree["pid"] = int(folder[pos + 1:])

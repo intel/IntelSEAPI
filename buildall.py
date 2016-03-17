@@ -126,7 +126,6 @@ def main():
     vs_versions = get_vs_versions()
     parser.add_argument("-i", "--install", action="store_true")
     parser.add_argument("-d", "--debug", action="store_true")
-    parser.add_argument("--force_bits", choices=["32", "64"])
     parser.add_argument("-a", "--android", action="store_true")
     parser.add_argument("-c", "--clean", action="store_true")
     if sys.platform == 'win32':
@@ -134,15 +133,12 @@ def main():
     args = parser.parse_args()
 
     yocto = get_yocto()
-    if args.force_bits:
-        target_bits = [args.force_bits]
+    if not yocto:
+        target_bits = ['64']
+        if (sys.platform != 'darwin') or args.android: #on MAC OSX we produce FAT library including both 32 and 64 bits
+            target_bits.append('32')
     else:
-        if not yocto:
-            target_bits = ['64']
-            if (sys.platform != 'darwin') or args.android: #on MAC OSX we produce FAT library including both 32 and 64 bits
-                target_bits.append('32')
-        else:
-            target_bits = [yocto['bits']]
+        target_bits = [yocto['bits']]
 
     print "target_bits", target_bits
 

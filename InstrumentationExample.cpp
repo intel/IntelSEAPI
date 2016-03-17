@@ -15,6 +15,7 @@
 #   HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 **********************************************************************************************************************************************************************************************************************************************************************************************/
+#include "itt_notify.hpp"
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -38,26 +39,6 @@
     #include <sys/types.h>
     #include <unistd.h>
 #endif
-
-#define INTEL_ITTNOTIFY_ENABLE_LEGACY
-#ifdef _WIN32
-    #define message(ignore) //suffocates #pragma message("WARNING!!!... about using "INTEL_ITTNOTIFY_ENABLE_LEGACY"
-#elif defined(__APPLE__)
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-W#warnings"
-#else
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-Wcpp"
-#endif
-
-#include "itt_notify.hpp"
-
-#ifdef _WIN32
-    #undef message
-#else
-    #pragma GCC diagnostic pop
-#endif
-
 
 bool g_done = false;
 // Forward declaration of a thread function.

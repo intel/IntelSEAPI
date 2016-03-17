@@ -2,10 +2,26 @@
 #include <stdint.h>
 #include <string>
 #include <type_traits>
-#include <thread>
+
+#ifdef _WIN32
+    #define message(ignore) //suffocates #pragma message("WARNING!!!... about using "INTEL_ITTNOTIFY_ENABLE_LEGACY"
+#elif defined(__APPLE__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-W#warnings"
+#else
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wcpp"
+#endif
 
 #define INTEL_ITTNOTIFY_API_PRIVATE
+#define INTEL_ITTNOTIFY_ENABLE_LEGACY
 #include "ittnotify.h"
+
+#ifdef _WIN32
+    #undef message
+#else
+    #pragma GCC diagnostic pop
+#endif
 
 namespace itt_notify {
 
