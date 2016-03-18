@@ -328,7 +328,7 @@ class ETWXMLHandler:
                     self.callbacks.on_event('task_begin_overlapped', begin_data)# and start again
 
     def on_event(self, system, data, info, static={'queue':{}, 'frames':{}, 'paging':{}, 'dmabuff':{}, 'tex2d':{}, 'resident':{}, 'fence':{}}):
-        if self.count % ProgressConst == 0:
+        if self.count % (ProgressConst / 4) == 0:
             self.progress.tick(self.file.tell())
         self.count += 1
         if not info or not data:
@@ -353,7 +353,9 @@ class ETWXMLHandler:
             return
 
         if data.has_key('QuantumStatus'):
-            data['QuantumStatusStr'] = QUANTUM_STATUS[int(data['QuantumStatus'])]
+            quantum_status = int(data['QuantumStatus'])
+            if quantum_status < len(QUANTUM_STATUS):
+                data['QuantumStatusStr'] = QUANTUM_STATUS[quantum_status]
 
         if 'Start' in opcode:
             call_data["type"] = 2
@@ -374,7 +376,8 @@ class ETWXMLHandler:
             call_data['pid'] = -1  # GUI 'process'
             tid = int(self.context_to_node[context])
             call_data['tid'] = tid
-            call_data['str'] = DMA_PACKET_TYPE[int(data['PacketType'])]
+            PacketType = int(data['PacketType'])
+            call_data['str'] = DMA_PACKET_TYPE[PacketType] if PacketType < len(DMA_PACKET_TYPE) else str(PacketType)
             id = int(data['uliSubmissionId'] if data.has_key('uliSubmissionId') else data['uliCompletionId'])
             call_data['id'] = id
             if 'Start' in opcode:
@@ -391,10 +394,13 @@ class ETWXMLHandler:
             call_data['tid'] = -call_data['tid']
             id = int(data['SubmitSequence'])
             if not data.has_key('PacketType'):  # workaround, PacketType is not set for Waits
-                call_data['str'] = 'WAIT'
-                assert (data.has_key('FenceValue'))
+                if data.has_key('FenceValue'):
+                    call_data['str'] = 'WAIT'
+                else:
+                    call_data['str'] = 'Unknown'
             else:
-                call_data['str'] = QUEUE_PACKET_TYPE[int(data['PacketType'])]
+                PacketType = long(data['PacketType'])
+                call_data['str'] = QUEUE_PACKET_TYPE[PacketType] if PacketType < len(QUEUE_PACKET_TYPE) else str(PacketType)
             call_data['id'] = id
             if 'Start' in opcode:
                 if static['queue'].has_key(id):  # forcefully closing the previous one
@@ -455,7 +461,8 @@ class ETWXMLHandler:
             call_data['id'] = id
             if data.has_key('PagingQueueType'):
                 VidMmOpType = int(data['VidMmOpType'])
-                call_data['str'] = PAGING_QUEUE_TYPE[int(data['PagingQueueType'])] + ":" + (VIDMM_OPERATION[VidMmOpType] if VIDMM_OPERATION.has_key(VidMmOpType) else "Unknown")
+                PagingQueueType = int(data['PagingQueueType'])
+                call_data['str'] = (PAGING_QUEUE_TYPE[PagingQueueType] if PagingQueueType < len(PAGING_QUEUE_TYPE) else str(PagingQueueType)) + ":" + (VIDMM_OPERATION[VidMmOpType] if VidMmOpType in VIDMM_OPERATION else str(VidMmOpType))
                 static['paging'][id] = call_data
             elif static['paging'].has_key(id):
                 start = static['paging'][id]

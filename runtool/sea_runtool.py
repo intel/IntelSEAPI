@@ -42,6 +42,7 @@ class DummyWith():  # for conditional with statements
     def __exit__(self, type, value, traceback):
         return False
 
+
 class Profiler():
     def __enter__(self):
         try:
@@ -58,33 +59,33 @@ class Profiler():
         return False
 
 
-def get_exporters():
+def get_extensions(name):
+    big_name = (name + 's').upper()
     this_module = sys.modules[__name__]
-    if 'EXPORTERS' in dir(this_module):
-        return this_module.EXPORTERS
-    EXPORTERS = {}
-    root = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'exporters')
-    for exporter in glob(os.path.join(root, '*.py')):
-        module = imp.load_source(os.path.splitext(os.path.basename(exporter))[0], exporter)
-        for desc in module.EXPORTER_DESCRIPTORS:
+    if big_name in dir(this_module):
+        return getattr(this_module, big_name)
+    extensions = {}
+    root = os.path.join(os.path.dirname(os.path.realpath(__file__)), name+'s')
+    for extension in glob(os.path.join(root, '*.py')):
+        module = imp.load_source(os.path.splitext(os.path.basename(extension))[0], extension)
+        for desc in getattr(module, name.upper() + '_DESCRIPTORS'):
             if desc['available']:
-                EXPORTERS[desc['format']] = desc['exporter']
-    setattr(this_module, 'EXPORTERS', EXPORTERS)
-    return EXPORTERS
+                extensions[desc['format']] = desc[name]
+    setattr(this_module, big_name, extensions)
+    return extensions
+
+
+def get_exporters():
+    return get_extensions('exporter')
+
 
 def get_importers():
-    this_module = sys.modules[__name__]
-    if 'IMPORTERS' in dir(this_module):
-        return this_module.IMPORTERS
-    IMPORTERS = {}
-    root = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'importers')
-    for importer in glob(os.path.join(root, '*.py')):
-        module = imp.load_source(os.path.splitext(os.path.basename(importer))[0], importer)
-        for desc in module.IMPORTER_DESCRIPTORS:
-            if desc['available']:
-                IMPORTERS[desc['format']] = desc['importer']
-    setattr(this_module, 'IMPORTERS', IMPORTERS)
-    return IMPORTERS
+    return get_extensions('importer')
+
+
+def get_collectors():
+    return get_extensions('collector')
+
 
 def parse_args(args):
     import argparse
@@ -105,6 +106,7 @@ def parse_args(args):
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-c", "--cuts", nargs='*', help='Set "all" to merge all cuts in one trace')
     parser.add_argument("-s", "--sync")
+    parser.add_argument("--time_shift", type=int, default=0)
     parser.add_argument("-l", "--limit", help='define')
     parser.add_argument("--ssh")
     parser.add_argument("-p", "--password")
@@ -157,50 +159,6 @@ def os_lib_ext():
     elif 'linux' in sys.platform:
         return '.so'
     assert (not "Unsupported platform")
-
-
-class FTrace:
-    def __init__(self, args, remote):
-        self.args = args
-        self.file = args.output + ".ftrace"
-        self.remote = remote
-
-    def echo(self, what, where):
-        try:
-            if self.remote:
-                self.remote.execute('echo %s > %s' % (what, where))
-            else:
-                with open(where, "w") as file:
-                    file.write(what)
-        except:
-            return False
-        return True
-
-    def start(self):
-        self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
-        self.echo("", "/sys/kernel/debug/tracing/trace")  # cleansing ring buffer (we need it's header only)
-        if self.remote:
-            Popen('%s "cat /sys/kernel/debug/tracing/trace > %s"' % (self.remote.execute_prefix, self.file), shell=True).wait()
-            self.proc = Popen('%s "cat /sys/kernel/debug/tracing/trace_pipe >> %s"' % (self.remote.execute_prefix, self.file), shell=True)
-        else:
-            Popen('cat /sys/kernel/debug/tracing/trace > %s' % self.file, shell=True).wait()
-            self.proc = Popen('cat /sys/kernel/debug/tracing/trace_pipe >> %s' % self.file, shell=True)
-        self.echo("*:*", "/sys/kernel/debug/tracing/set_event")  # enabling all events
-        self.echo("1", "/sys/kernel/debug/tracing/tracing_on")
-
-    def stop(self):
-        self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
-        self.proc.wait()
-        return self.file
-
-
-def start_ftrace(args, remote=None):
-    ftrace = FTrace(args, remote)
-    if not ftrace.echo("nop", "/sys/kernel/debug/tracing/current_tracer"):
-        print "Warning: failed to access ftrace subsystem"
-        return None
-    ftrace.start()
-    return ftrace
 
 
 class ETWTrace:
@@ -291,7 +249,8 @@ def launch_remote(args, victim):
     args.output = trace + '/nop'
 
     print 'Starting ftrace...'
-    ftrace = start_ftrace(args, remote)
+
+    ftrace = get_collectors()['ftrace'](args, remote)
     print 'Executing:', ' '.join(victim), '...'
     print remote.execute("%s=%s INTEL_SEA_SAVE_TO=%s/pid %s %s" % (load_lib, target, trace, ('INTEL_SEA_VERBOSE=1' if args.verbose else ''), ' '.join(victim)))
     if ftrace:
@@ -372,7 +331,7 @@ def launch(args, victim):
     tracer = None
     if ('gt' in args.format and args.output):
         if 'linux' in sys.platform:
-            tracer = start_ftrace(args)
+            tracer = get_collectors()['ftrace'](args)
         elif 'win32' == sys.platform:
             tracer = start_etw(args)
 
@@ -917,7 +876,7 @@ class TaskCombiner:
         self.prev_memory = None
 
     def convert_time(self, time):
-        return time / 1000. # nanoseconds to microseconds
+        return self.args.time_shift + (time / 1000.) # nanoseconds to microseconds
 
     def global_metadata(self, data):
         pass

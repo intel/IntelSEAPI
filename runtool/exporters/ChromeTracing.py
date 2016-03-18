@@ -10,7 +10,7 @@ class GoogleTrace(TaskCombiner):
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, tree)
         self.args = args
-        self.target_scale_start = 0
+        self.target_scale_start = self.args.time_shift
         self.source_scale_start = 0
         self.ratio = 1 / 1000.  # nanoseconds to microseconds
         self.size_keeper = None
@@ -160,7 +160,7 @@ class GoogleTrace(TaskCombiner):
                     return val
         except:
             pass
-        return '"%s"' % str(arg).replace("\\", "\\\\").replace('"', '\\"')
+        return '"%s"' % unicode(arg).encode('ascii', 'ignore').replace("\\", "\\\\").replace('"', '\\"')
 
     Phase = {'task':'X', 'counter':'C', 'marker':'i', 'object_new':'N', 'object_snapshot':'O', 'object_delete':'D', 'frame':'X'}
 

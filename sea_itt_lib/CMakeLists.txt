@@ -199,6 +199,13 @@ install(
     PATTERN "*.pyc" EXCLUDE
 )
 
+install(
+    DIRECTORY "${PROJECT_SOURCE_DIR}/runtool/collectors"
+    DESTINATION bin
+    PATTERN "*.pyc" EXCLUDE
+)
+
+
 if (WIN32)
 
     install(
