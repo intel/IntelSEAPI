@@ -55,13 +55,13 @@
 #include <sys/stat.h>
 
 
-__itt_global* GetITTGlobal(__itt_global* pGlob = nullptr);
+__itt_global* GetITTGlobal();
 
 namespace sea {
     extern std::string g_savepath;
     extern uint64_t g_nAutoCut;
 #ifdef __linux
-    bool WriteFTraceTimeSyncMarkers();
+    bool WriteFTraceTimeSyncMarkers(); //For Driver instrumentation see: http://lwn.net/Articles/379903/
 #endif
     void InitSEA();
     void FillApiList(__itt_api_info* pApiInfo);
@@ -152,6 +152,9 @@ enum SEAFeature
     sfMetricsFrameworkPublisher = 0x4,
     sfMetricsFrameworkConsumer = 0x8,
     sfStack = 0x10,
+    sfConcurrencyVisualizer = 0x20,
+    sfRemotery = 0x40,
+    sfBrofiler = 0x80,
 };
 
 uint64_t GetFeatureSet();
@@ -327,17 +330,13 @@ inline bool IsVerboseMode()
 
 #define CHECKRET(cond, res) {if (!(cond)) {VerbosePrint("Error: !(%s) at %s, %s:(%d)\n", #cond, __FUNCTION__, __FILE__, __LINE__); return res;}}
 
+
 class CIttLocker
 {
+    __itt_global* m_pGlobal = nullptr;
 public:
-    CIttLocker()
-    {
-        __itt_mutex_lock(&GetITTGlobal()->mutex);
-    }
-    ~CIttLocker()
-    {
-        __itt_mutex_unlock(&GetITTGlobal()->mutex);
-    }
+    CIttLocker();
+    ~CIttLocker();
 };
 
 #ifdef _WIN32

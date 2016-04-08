@@ -62,9 +62,21 @@ int nSetLib = GlobalInit();
 
 void AtExit();
 
-void ChainGlobal(__itt_global* pRoot, __itt_global* pNew)
+extern "C"
 {
-    __itt_global* pCurrent = pRoot;
+    extern __itt_global ITT_JOIN(INTEL_ITTNOTIFY_PREFIX, _ittapi_global);
+}
+
+bool g_bInitialized = false;
+
+__itt_global* GetITTGlobal()
+{
+    return &ITT_JOIN(INTEL_ITTNOTIFY_PREFIX, _ittapi_global);
+}
+
+void ChainGlobal(__itt_global* pNew)
+{
+    __itt_global* pCurrent = GetITTGlobal();
     while (pCurrent->next)
     {
         if (pCurrent->next == pNew) //already chained
@@ -74,49 +86,82 @@ void ChainGlobal(__itt_global* pRoot, __itt_global* pNew)
     pCurrent->next = pNew;
 }
 
-__itt_global* GetITTGlobal(__itt_global* pGlob)
+void UnchainGlobal(__itt_global* pOld)
 {
-    static __itt_global* pGlobal = pGlob;
-    assert(pGlobal);
-    if (pGlob && pGlobal != pGlob)
-        ChainGlobal(pGlobal, pGlob);
-    return pGlobal;
+    __itt_global* pCurrent = GetITTGlobal();
+    while (pCurrent->next)
+    {
+        if (pCurrent->next == pOld)
+        {
+            pCurrent->next = pOld->next; //removing it from list
+            return;
+        }
+        pCurrent = pCurrent->next;
+    }
 }
 
-#ifdef _WIN32
-#include <windows.h>
 
-#define FIX_STR(type, ptr, name)\
-    if (!ptr->name##A) {\
-        if (ptr->name##W) {\
-            size_t len = lstrlenW((const wchar_t*)ptr->name##W);\
-            char* dest = (char*)malloc(len + 2);\
-            wcstombs_s(&len, dest, len + 1, (const wchar_t*)ptr->name##W, len + 1);\
-            const_cast<type*>(ptr)->name##A = dest;\
-                }\
-                else\
-        {\
-            const_cast<type*>(ptr)->name##A = _strdup("null");\
-        }\
+
+#ifdef _WIN32
+    #include <windows.h>
+
+    #define FIX_STR(type, ptr, name)\
+        if (!ptr->name##A) {\
+            if (ptr->name##W) {\
+                size_t len = lstrlenW((const wchar_t*)ptr->name##W);\
+                char* dest = (char*)malloc(len + 2);\
+                wcstombs_s(&len, dest, len + 1, (const wchar_t*)ptr->name##W, len + 1);\
+                const_cast<type*>(ptr)->name##A = dest;\
+            }\
+            else\
+            {\
+                const_cast<type*>(ptr)->name##A = _strdup("null");\
+            }\
         }
 
 #else
-#define FIX_STR(type, ptr, name)
-
+    #define FIX_STR(type, ptr, name)\
+        if (!ptr->name##A) {\
+            if (ptr->name##W) {\
+                size_t len = wcslen((const wchar_t*)ptr->name##W);\
+                char* dest = (char*)malloc(len + 2);\
+                wcstombs(dest, (const wchar_t*)ptr->name##W, len + 1);\
+                const_cast<type*>(ptr)->name##A = dest;\
+            }\
+            else\
+            {\
+                const_cast<type*>(ptr)->name##A = _strdup("null");\
+            }\
+        }
 #endif
 
 #define FIX_DOMAIN(ptr) FIX_STR(__itt_domain, ptr, name)
 #define FIX_STRING(ptr) FIX_STR(__itt_string_handle, ptr, str)
+
+void __itt_report_error(__itt_error_code, ...)
+{}
 
 
 extern "C" {
 
     SEA_EXPORT void ITTAPI __itt_api_init(__itt_global* pGlob, __itt_group_id id)
     {
+        if (!g_bInitialized)
+        {
+            g_bInitialized = true;
+
+            __itt_global* pGlobal = GetITTGlobal();
+            __itt_mutex_init(&pGlobal->mutex);
+            pGlobal->mutex_initialized = 1;
+            sea::CIttLocker locker;
+            __itt_api_init(pGlobal, id);
+            pGlobal->api_initialized = 1;
+        }
         const char* procname = sea::GetProcessName(true);
         sea::SModuleInfo mdlinfo = sea::Fn2Mdl(pGlob);
         VerbosePrint("IntelSEAPI init is called from process '%s' at module '%s'\n", procname, mdlinfo.path.c_str());
-        GetITTGlobal(pGlob);
+        if (GetITTGlobal() != pGlob)
+            ChainGlobal(pGlob);
         sea::FillApiList(pGlob->api_list_ptr);
         for (___itt_domain* pDomain = pGlob->domain_list; pDomain; pDomain = pDomain->next)
         {
@@ -143,6 +188,15 @@ extern "C" {
 
     SEA_EXPORT void ITTAPI __itt_api_fini(__itt_global* pGlob)
     {
+        if (pGlob)
+        {
+            UnchainGlobal(pGlob);
+            return;
+        }
+
+        if (!g_bInitialized) return;
+        g_bInitialized = false;
+
         sea::FinitaLaComedia();
 #ifdef _WIN32
         EventUnregisterIntelSEAPI();

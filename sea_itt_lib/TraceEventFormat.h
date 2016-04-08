@@ -43,6 +43,14 @@ public:
         int64_t pid;
         int64_t tid;
         uint64_t nanoseconds;
+        enum EChanged
+        {
+            ecNothing = 0x0,
+            ecPid = 0x1,
+            ecTid = 0x2,
+            ecTime = 0x4,
+        };
+        uint64_t changed;
     };
 
     enum EventPhase

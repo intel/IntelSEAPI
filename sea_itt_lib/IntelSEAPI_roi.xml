@@ -6,31 +6,31 @@
             <RegionRoot Guid="{4E07710B-1A65-496C-89E4-A9C70C56FC34}"
                         Name="Root"
                         FriendlyName="Intel SEAPI Regions">
-                <Region Guid="{5234C612-9840-4C33-BF89-2530FCE2EF15}"
-                        Name="Root-itt_task"
-                        FriendlyName="ITT Task">
+                <Region Guid="{24944A71-C759-4D0B-A5C0-288DC973991C}" Name="" FriendlyName="">
+                    <Region Guid="{88CD6C2C-83F9-46EC-9D8B-8F2811EBB9B0}" Name="" FriendlyName="">
+                        <Start>
+                            <Duration Provider="{13863EEB-81B3-4F34-8962-FACAFB230475}" Id="1" Version="0" Duration="duration" Multiplier="1"/>
+                        </Start>
+                        <Stop>
+                            <Event Provider="{13863EEB-81B3-4F34-8962-FACAFB230475}" Id="1" Version="0"/>
+                        </Stop>
+                        <Match>
+                            <Event PID="true" TID="true">
+                                <Payload FieldName="corrector" TargetFieldName="corrector"/>
+                            </Event>
+                        </Match>
+                    </Region>
+                </Region>
+                <Region Guid="{93783B2C-A67F-49cb-89BC-BF305D7E2CEA}" Name="ITT Task" FriendlyName="ITT Task">
                     <Start>
-                        <Event Provider="{13863EEB-81B3-4F34-8962-FACAFB230475}" Id="3" Version="0" />
+                        <Region RegionGuid="{88CD6C2C-83F9-46EC-9D8B-8F2811EBB9B0}" Endpoint="Start"/>
                     </Start>
                     <Stop>
-                        <Event Provider="{13863EEB-81B3-4F34-8962-FACAFB230475}" Id="4" Version="0" />
+                        <Region RegionGuid="{88CD6C2C-83F9-46EC-9D8B-8F2811EBB9B0}" Endpoint="Stop"/>
                     </Stop>
                     <Naming>
                         <PayloadBased NameField="name"/>
                     </Naming>
-                    <Match>
-                        <Event PID="true" TID="true">
-                            <Payload FieldName="id" TargetFieldName="id"/>
-                        </Event>
-                        <!--
-                        <Parent PID="true" TID="true">
-                            <Payload FieldName="parent_level" TargetFieldName="level" />
-                        </Parent>
-                        <SelfNest PID="true" TID="true">
-                           <Payload FieldName="parent_level" TargetFieldName="level" />
-                        </SelfNest>
-                        -->
-                    </Match>
                 </Region>
             </RegionRoot>
         </Regions>

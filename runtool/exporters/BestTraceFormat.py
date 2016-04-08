@@ -10,8 +10,7 @@ class BestTraceFormat(TaskCombiner):
 
     def __init__(self, args, tree):
         """Open the .btf file and write its header."""
-        TaskCombiner.__init__(self, tree)
-        self.args = args
+        TaskCombiner.__init__(self, args, tree)
         self.file = open(self.get_targets()[-1], "w+b")
         self.file.write('#version 2.1.3\n')
         self.file.write('#creator GDP-SEA\n')

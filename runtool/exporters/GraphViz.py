@@ -1,6 +1,7 @@
 import cgi
 from sea_runtool import GraphCombiner, to_hex, format_time
 
+
 class GraphViz(GraphCombiner):
     def __init__(self, args, tree):
         GraphCombiner.__init__(self, args, tree)
@@ -25,19 +26,20 @@ class GraphViz(GraphCombiner):
             for task_name, task_data in data['tasks'].iteritems():
                 id = self.make_id(domain, task_name)
                 time = task_data['time']
-                self.file.write('%s [label="{TASK: %s|min=%s|max=%s|avg=%s|count=%d%s}"];\n' % (
-                    id,
+                self.file.write(
+                    '%s [label="{TASK: %s|min=%s|max=%s|avg=%s|count=%d%s}"];\n' % (
+                        id,
                         cgi.escape(task_name), format_time(min(time)), format_time(max(time)), format_time(sum(time) / len(time)), len(time),
-                    (("|%s" % task_data['src'].replace('\\', '/')) if task_data.has_key('src') else "")
+                        (("|%s" % task_data['src'].replace('\\', '/')) if task_data.has_key('src') else "")
+                    )
                 )
-                                )
-                cluster.append("%s;" % (id))
+                cluster.append("%s;" % id)
             #: {}, 'objects':{}, 'frames': {}, 'markers': {}
             cluster_index += 1
         # threads
         thread_names = self.tree['threads']
         for tid in self.threads:
-            tid_str, tid_hex = str(tid), to_hex(tid)
+            tid_str, tid_hex = str(tid), (to_hex(tid) if tid is not None else "None")
             id = self.make_id("threads", tid_str)
             thread_name = thread_names[tid_str] if thread_names.has_key(tid_str) else ""
             self.file.write('%s [label="{THREAD: %s|%s}" color=gray fontcolor=gray];\n' % (id, tid_hex, cgi.escape(thread_name)))

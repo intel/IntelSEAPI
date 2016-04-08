@@ -19,7 +19,16 @@ import os
 import sys
 import time
 import platform
-from ctypes import cdll, c_char_p, c_void_p, c_ulonglong, c_int, c_double
+import threading
+from ctypes import cdll, c_char_p, c_void_p, c_ulonglong, c_int, c_double, c_long
+
+
+class Dummy:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
 
 class Task:
     def __init__(self, itt, name, id, parent):
@@ -58,44 +67,63 @@ class ITT:
         self.strings = {}
         self.tracks = {}
         self.counters = {}
-        if os.environ.has_key(env_name):
-            self.lib = cdll.LoadLibrary(os.environ[env_name])
+        if env_name not in os.environ:
+            print "Warning:", env_name, "is not set..."
+            return
+        self.lib = cdll.LoadLibrary(os.environ[env_name])
+        if not self.lib:
+            print "Warning: Failed to load", os.environ[env_name], "..."
+            return
 
-            #void* itt_create_domain(const char* str)
-            self.lib.itt_create_domain.argtypes = [c_char_p]
-            self.lib.itt_create_domain.restype = c_void_p
+        # void* itt_create_domain(const char* str)
+        self.lib.itt_create_domain.argtypes = [c_char_p]
+        self.lib.itt_create_domain.restype = c_void_p
 
-            #void* itt_create_string(const char* str)
-            self.lib.itt_create_string.argtypes = [c_char_p]
-            self.lib.itt_create_string.restype = c_void_p
+        # void* itt_create_string(const char* str)
+        self.lib.itt_create_string.argtypes = [c_char_p]
+        self.lib.itt_create_string.restype = c_void_p
 
-            #void itt_marker(void* domain, uint64_t id, void* name, int scope)
-            self.lib.itt_marker.argtypes = [c_void_p, c_ulonglong, c_void_p, c_int, c_ulonglong]
+        # void itt_marker(void* domain, uint64_t id, void* name, int scope)
+        self.lib.itt_marker.argtypes = [c_void_p, c_ulonglong, c_void_p, c_int, c_ulonglong]
 
-            #void itt_task_begin(void* domain, uint64_t id, uint64_t parent, void* name)
-            self.lib.itt_task_begin.argtypes = [c_void_p, c_ulonglong, c_ulonglong, c_void_p, c_ulonglong]
-            
-            #void itt_task_end(void* domain)
-            self.lib.itt_task_end.argtypes = [c_void_p, c_ulonglong]
+        # void itt_task_begin(void* domain, uint64_t id, uint64_t parent, void* name)
+        self.lib.itt_task_begin.argtypes = [c_void_p, c_ulonglong, c_ulonglong, c_void_p, c_ulonglong]
 
-            #void* itt_counter_create(void* domain, void* name)
-            self.lib.itt_counter_create.argtypes = [c_void_p, c_void_p]
-            self.lib.itt_counter_create.restype = c_void_p
+        # void itt_metadata_add(void* domain, uint64_t id, void* name, double value)
+        self.lib.itt_metadata_add.argtypes = [c_void_p, c_ulonglong, c_void_p, c_double]
 
-            #void itt_set_counter(void* id, double value, uint64_t timestamp)
-            self.lib.itt_set_counter.argtypes = [c_void_p, c_double, c_ulonglong]
+        # void itt_metadata_add_str(void* domain, uint64_t id, void* name, const char* value)
+        self.lib.itt_metadata_add_str.argtypes = [c_void_p, c_ulonglong, c_void_p, c_char_p]
 
-            #void* itt_create_track(const char* group, const char* track)
-            self.lib.itt_create_track.argtypes = [c_char_p, c_char_p]
-            self.lib.itt_create_track.restype = c_void_p
+        # void itt_task_end(void* domain)
+        self.lib.itt_task_end.argtypes = [c_void_p, c_ulonglong]
 
-            #void itt_set_track(void* track)
-            self.lib.itt_set_track.argtypes = [c_void_p]
+        # void* itt_counter_create(void* domain, void* name)
+        self.lib.itt_counter_create.argtypes = [c_void_p, c_void_p]
+        self.lib.itt_counter_create.restype = c_void_p
 
-            #uint64_t itt_get_timestamp()
-            self.lib.itt_get_timestamp.restype = c_ulonglong
+        # void itt_set_counter(void* id, double value, uint64_t timestamp)
+        self.lib.itt_set_counter.argtypes = [c_void_p, c_double, c_ulonglong]
 
-            self.domain = self.lib.itt_create_domain(domain)
+        # void* itt_create_track(const char* group, const char* track)
+        self.lib.itt_create_track.argtypes = [c_char_p, c_char_p]
+        self.lib.itt_create_track.restype = c_void_p
+
+        # void itt_set_track(void* track)
+        self.lib.itt_set_track.argtypes = [c_void_p]
+
+        # uint64_t itt_get_timestamp()
+        self.lib.itt_get_timestamp.restype = c_ulonglong
+
+        if sys.platform == 'win32':
+            # long relog_etl(const char* szInput, const char* szOutput)
+            self.lib.relog_etl.argtypes = [c_char_p, c_char_p]
+            self.lib.relog_etl.restype = c_long
+        elif 'linux' in sys.platform:
+            # void itt_write_time_sync_markers()
+            self.lib.itt_write_time_sync_markers.argtypes = []
+
+        self.domain = self.lib.itt_create_domain(domain)
 
     def get_string_id(self, text):
         try:
@@ -104,37 +132,37 @@ class ITT:
             id = self.strings[text] = self.lib.itt_create_string(text)
             return id
 
-    def marker(self, text, scope = scope_process, timestamp = 0, id = 0):
+    def marker(self, text, scope=scope_process, timestamp=0, id=0):
         if not self.lib:
             return
         self.lib.itt_marker(self.domain, id, self.get_string_id(text), scope, timestamp)
 
-    def task(self, name, id = 0, parent = 0):
+    def task(self, name, id=0, parent=0):
         if not self.lib:
-            return
+            return Dummy()
         return Task(self, name, id, parent)
 
-    def task_submit(self, name, timestamp, dur, id = 0, parent = 0):
+    def task_submit(self, name, timestamp, dur, id=0, parent=0):
         self.lib.itt_task_begin(self.domain, id, parent, self.get_string_id(name), timestamp)
         self.lib.itt_task_end(self.domain, timestamp + dur)
 
-    def counter(self, name, value, timestamp = 0):
+    def counter(self, name, value, timestamp=0):
         if not self.lib:
             return
         try:
-            counter = counters[name]
+            counter = self.counters[name]
         except:
-            counter = counters[name] = self.lib.itt_counter_create(self.domain, self.get_string_id(name))
+            counter = self.counters[name] = self.lib.itt_counter_create(self.domain, self.get_string_id(name))
         self.lib.itt_set_counter(counter, value, timestamp)
 
     def track(self, group, name):
         if not self.lib:
-            return
+            return Dummy()
         key = group+ "/" + name
         try:
             track = self.tracks[key]
         except:
-            track = self.tracks[key] = self.lib.itt_create_track(group, name);
+            track = self.tracks[key] = self.lib.itt_create_track(group, name)
         return Track(self, track)
 
     def get_timestamp(self):
@@ -142,13 +170,65 @@ class ITT:
             return 0
         return self.lib.itt_get_timestamp()
 
+    def relog(self, frm, to):
+        if sys.platform == 'win32':
+            if not self.lib:
+                return
+            self.lib.relog_etl(frm, to)
+
+    def time_sync(self):
+        if 'linux' in sys.platform:
+            if not self.lib:
+                return
+            self.lib.itt_write_time_sync_markers()
+
+
+def trace_execution(fn, *args):
+    import inspect
+
+    itt = ITT("python")
+
+    if itt.lib:
+        trace_execution.depth = 0
+        file_id = itt.get_string_id('__FILE__')
+        line_id = itt.get_string_id('__LINE__')
+        module_id = itt.get_string_id('__MODULE__')
+
+        def profiler(frame, event, arg):
+            if 'call' in event:
+                trace_execution.depth += 1
+                name = frame.f_code.co_name
+                if 'self' in frame.f_locals:
+                    cls = frame.f_locals['self'].__class__.__name__
+                    name = cls + "." + name
+                mdl = inspect.getmodule(frame)
+                itt.lib.itt_task_begin(itt.domain, trace_execution.depth, 0, itt.get_string_id(name), 0)
+                itt.lib.itt_metadata_add_str(itt.domain, trace_execution.depth, file_id, frame.f_code.co_filename)
+                itt.lib.itt_metadata_add(itt.domain, trace_execution.depth, line_id, frame.f_code.co_firstlineno)
+                if mdl:
+                    itt.lib.itt_metadata_add_str(itt.domain, trace_execution.depth, module_id, mdl.__name__)
+            if 'return' in event:
+                itt.lib.itt_task_end(itt.domain, 0)
+                trace_execution.depth -= 1
+
+        old_profiler = sys.getprofile()
+        sys.setprofile(profiler)
+        old_threading_profiler = threading.setprofile(profiler)
+        fn(*args)
+        sys.setprofile(old_profiler)
+        threading.setprofile(old_threading_profiler)
+    else:
+        fn(*args)
+
+
 def stack_task(itt):
     import random
     with itt.task("python_task"):
         time.sleep(0.01)
-        if random.randrange(0,2):
+        if random.randrange(0, 2):
             stack_task(itt)
         time.sleep(0.01)
+
 
 def test_itt():
     itt = ITT("python")
@@ -162,9 +242,9 @@ def test_itt():
     itt.marker("End")
 
     with itt.track("group", "track"):
-        dur = (ts2-ts1) / 100
+        dur = (ts2-ts1) / 100 + 1
         for ts in range(ts1, ts2, dur):
             itt.task_submit("submitted", ts, dur / 2)
 
 if __name__ == "__main__":
-    test_itt()
+    trace_execution(test_itt)

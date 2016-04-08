@@ -33,7 +33,23 @@
 #endif
 
 namespace sea {
-    IHandler* g_handlers[MAX_HANDLERS] = {}; //10 is more than enough for now
+IHandler* g_handlers[MAX_HANDLERS] = {}; //10 is more than enough for now
+
+CIttLocker::CIttLocker()
+{
+    m_pGlobal = GetITTGlobal();
+    __itt_mutex_lock(&m_pGlobal->mutex);
+}
+
+
+CIttLocker::~CIttLocker()
+{
+    if (m_pGlobal)
+    {
+        __itt_mutex_unlock(&m_pGlobal->mutex);
+    }
+}
+
 }
 
 //FIXME: in general add much more comments
@@ -267,12 +283,15 @@ CTraceEventFormat::SRegularFields GetRegularFields(__itt_clock_domain* clock_dom
     if (pTrack)
     {
         CTraceEventFormat::SRegularFields& trackRF = *(CTraceEventFormat::SRegularFields*)pTrack->extra2;
+        rf.changed |= (rf.pid != trackRF.pid) ? CTraceEventFormat::SRegularFields::ecPid : CTraceEventFormat::SRegularFields::ecNothing;
         rf.pid = trackRF.pid;
+        rf.changed |= (rf.tid != trackRF.tid) ? CTraceEventFormat::SRegularFields::ecTid : CTraceEventFormat::SRegularFields::ecNothing;
         rf.tid = trackRF.tid;
     }
     if (clock_domain || timestamp)
     {
         rf.nanoseconds = ConvertClockDomains(timestamp, clock_domain);
+        rf.changed |= CTraceEventFormat::SRegularFields::ecTime;
     }
     return rf;
 }
@@ -286,15 +305,17 @@ __itt_domain* UNICODE_AGNOSTIC(domain_create)(const char* name)
     {
         return NULL;
     }
-    CIttLocker locker;
-    static __itt_global* pGlobal = GetITTGlobal();
-    for (h_tail = NULL, h = pGlobal->domain_list; h != NULL; h_tail = h, h = h->next)
     {
-        if (h->nameA != NULL && !__itt_fstrcmp(h->nameA, name)) break;
-    }
-    if (h == NULL)
-    {
-        NEW_DOMAIN_A(pGlobal,h,h_tail,name);
+        CIttLocker locker;
+        static __itt_global* pGlobal = GetITTGlobal();
+        for (h_tail = NULL, h = pGlobal->domain_list; h != NULL; h_tail = h, h = h->next)
+        {
+            if (h->nameA != NULL && !__itt_fstrcmp(h->nameA, name)) break;
+        }
+        if (h == NULL)
+        {
+            NEW_DOMAIN_A(pGlobal,h,h_tail,name);
+        }
     }
     InitDomain(h);
     return h;
@@ -315,6 +336,8 @@ __itt_string_handle* ITTAPI UNICODE_AGNOSTIC(string_handle_create)(const char* n
     {
         return NULL;
     }
+
+
     CIttLocker locker;
     static __itt_global* pGlobal = GetITTGlobal();
 
@@ -324,7 +347,7 @@ __itt_string_handle* ITTAPI UNICODE_AGNOSTIC(string_handle_create)(const char* n
     }
     if (h == NULL)
     {
-        NEW_STRING_HANDLE_A(pGlobal,h,h_tail,name);
+        NEW_STRING_HANDLE_A(pGlobal, h, h_tail, name);
     }
 
     sea::ReportString(h);
@@ -919,7 +942,7 @@ void MetadataAdd(const __itt_domain *pDomain, __itt_id id, __itt_string_handle *
     if (id.d1 || id.d2) //task can have id and not be overlapped, it would be stored in pThreadRecord->pTask then
     {
         SThreadRecord* pThreadRecord = GetThreadRecord();
-        if (!COverlapped::Get().AddArg(pDomain, id, pKey, args...) && pThreadRecord->pTask->id == id)
+        if (!COverlapped::Get().AddArg(pDomain, id, pKey, args...) && pThreadRecord->pTask && pThreadRecord->pTask->id == id)
         {
             for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
             {
@@ -1474,21 +1497,27 @@ uint64_t GetFeatureSet()
     |
         (save.size() ? sfSEA : 0)
 #ifdef __ANDROID__
-    |   sfSystrace
+    |
+        sfSystrace
 #endif
-    |   (std::string::npos != env.find("stack") ? sfStack : 0)
+    |
+        (std::string::npos != env.find("stack") ? sfStack : 0)
+    |
+        (std::string::npos != env.find("vscv") ? sfConcurrencyVisualizer : 0)
+    |
+        (std::string::npos != env.find("rmtr") ? sfRemotery : 0)
+    |
+        (std::string::npos != env.find("brflr") ? sfBrofiler : 0)
     ;
     return features;
 }
 
 void TraverseDomains(const std::function<void(___itt_domain&)>& callback)
 {
-    for (__itt_global* pGlobal = GetITTGlobal(); pGlobal; pGlobal = pGlobal->next)
+    __itt_global* pGlobal = GetITTGlobal();
+    for(___itt_domain* pDomain = pGlobal->domain_list; pDomain; pDomain = pDomain->next)
     {
-        for(___itt_domain* pDomain = pGlobal->domain_list; pDomain; pDomain = pDomain->next)
-        {
-            callback(*pDomain);
-        }
+        callback(*pDomain);
     }
 }
 
@@ -1648,7 +1677,6 @@ void FinitaLaComedia()
     }
 
     __itt_global* pGlobal = GetITTGlobal();
-    if (!pGlobal) return;
 
     {
         CIttLocker locker;
@@ -1705,6 +1733,29 @@ extern "C" //plain C interface for languages like python
             reinterpret_cast<__itt_string_handle*>(name)
         );
     }
+
+    SEA_EXPORT void itt_metadata_add(void* domain, uint64_t id, void* name, double value)
+    {
+        __itt_metadata_add(
+            reinterpret_cast<__itt_domain*>(domain),
+            id ? __itt_id_make(domain, id) : __itt_null,
+            reinterpret_cast<__itt_string_handle*>(name),
+            __itt_metadata_double, 1,
+            &value
+        );
+    }
+
+    SEA_EXPORT void itt_metadata_add_str(void* domain, uint64_t id, void* name, const char* value)
+    {
+        __itt_metadata_str_add(
+            reinterpret_cast<__itt_domain*>(domain),
+            id ? __itt_id_make(domain, id) : __itt_null,
+            reinterpret_cast<__itt_string_handle*>(name),
+            value,
+            0
+        );
+    }
+
     SEA_EXPORT void itt_task_end(void* domain, uint64_t timestamp)
     {
         __itt_task_end_ex(
@@ -1745,5 +1796,12 @@ extern "C" //plain C interface for languages like python
     SEA_EXPORT uint64_t itt_get_timestamp()
     {
         return (uint64_t)__itt_get_timestamp();
+    }
+
+    SEA_EXPORT void itt_write_time_sync_markers()
+    {
+#ifdef __linux
+        sea::WriteFTraceTimeSyncMarkers();
+#endif
     }
 };

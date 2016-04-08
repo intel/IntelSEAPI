@@ -6,8 +6,7 @@ from sea_runtool import TaskCombiner, get_name, to_hex
 
 class QTProfiler(TaskCombiner):
     def __init__(self, args, tree):
-        TaskCombiner.__init__(self, tree)
-        self.args = args
+        TaskCombiner.__init__(self, args, tree)
         self.file_name = self.get_targets()[-1]
         self.file = open(self.file_name, "w")
         self.notes = []
@@ -28,16 +27,28 @@ class QTProfiler(TaskCombiner):
             self.end_time = max(end, self.end_time)
 
     def complete_task(self, type, begin, end):
+        if 'tid' not in begin:
+            return
+
+        start_time = round(begin['time'] / 1000)  # sad but it's limiter to milliseconds only
+        end_time = round(end['time'] / 1000)
+        dur = end_time - start_time
+        if dur < self.args.min_dur:
+            return
+
         name = get_name(begin)
 
         details = (type + ":") if type != 'task' else ""
         if begin.has_key('parent'):
             details += to_hex(begin['parent']) + "->"
+        details += name
+        """XXX
         details += name + ":"
         if begin.has_key('id'):
             details += "(" + to_hex(begin['id']) + ")"
         else:
             details = details.rstrip(":")
+        """
 
         if type == 'counter' or type == 'marker':
             kind = 'Painting'
@@ -52,11 +63,20 @@ class QTProfiler(TaskCombiner):
         else:
             thread_name = str(begin['tid'])
 
+        """XXX
         record = (
             begin['__file__'].replace("\\", "/") if begin.has_key('__file__') else "",
             begin['__line__'] if begin.has_key('__line__') else "0",
             kind,
             "%s | %s | %s" % (details, thread_name, begin['domain']),
+            name
+        )
+        """
+        record = (
+            begin['__file__'].replace("\\", "/") if begin.has_key('__file__') else "",
+            begin['__line__'] if begin.has_key('__line__') else "0",
+            kind,
+            "%s | %s" % (details, begin['domain']),
             name
         )
         record = tuple([cgi.escape(item) for item in record])
@@ -67,11 +87,7 @@ class QTProfiler(TaskCombiner):
             index = len(self.events)
             self.events.append(record)
             self.event_map[record] = index
-        start_time = round(begin['time'] / 1000)  # sad but it's limiter to milliseconds only
-        end_time = round(end['time'] / 1000)
-        dur = end_time - start_time
-        if not dur or dur < 0:  # QT Creator doesn't show notes on objects with zero duration
-            dur = 1
+
         tag = '<range startTime="%d" duration="%d" eventIndex="%d"/>\n' % (start_time, dur, index)
 
         args = {}

@@ -484,9 +484,8 @@ bool WriteThreadName(const CTraceEventFormat::SRegularFields& rf, const char* na
     return res != -1;
 }
 
-bool WriteGroupName(int64_t pid, const char* name)
+bool WriteGroupName(int64_t pid, const char* name) // must be called from locked code
 {
-    CIttLocker lock;
     if (g_savepath.empty()) return true;
     std::string path = g_savepath + "/";
     path += std::to_string(pid) + ".pid";
@@ -497,9 +496,8 @@ bool WriteGroupName(int64_t pid, const char* name)
     return res != -1;
 }
 
-bool ReportString(__itt_string_handle* pStr)
+bool ReportString(__itt_string_handle* pStr) // must be called from locked code
 {
-    CIttLocker lock;
     if (g_savepath.empty()) return true;
     std::string path = g_savepath + "/";
     path += std::to_string((uint64_t)pStr) + ".str";
@@ -510,9 +508,8 @@ bool ReportString(__itt_string_handle* pStr)
     return res != -1;
 }
 
-bool ReportModule(void* fn)
+bool ReportModule(void* fn) // must be called from locked code
 {
-    CIttLocker lock;
     if (g_savepath.empty())
         return true;
 

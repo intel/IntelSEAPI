@@ -37,6 +37,7 @@ if (WIN32)
 
     set(EXTRA_SOURCE
         ETWHandler.cpp
+        ETLRelogger.cpp
         ${PROJECT_BINARY_DIR}/IntelSEAPI.rc
         ${PROJECT_BINARY_DIR}/IntelSEAPI.h
         ${PROJECT_BINARY_DIR}/IntelSEAPI_km.h

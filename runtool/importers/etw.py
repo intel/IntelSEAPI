@@ -1,5 +1,6 @@
 import os
-from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, ProgressConst, TaskTypes
+import struct
+from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, ProgressConst, TaskTypes, format_bytes
 
 class ETWXML:
     def __init__(self, callback, providers):
@@ -17,14 +18,18 @@ class ETWXML:
         except:
             import xml.etree.ElementTree as ET
         level = 0
-        for event, elem in ET.iterparse(file, events=('start', 'end')):
-            if event == 'start':
-                level += 1
-            else:
-                if level == 2:
-                    yield elem
-                    elem.clear()
-                level -= 1
+        try:
+            for event, elem in ET.iterparse(file, events=('start', 'end')):
+                if event == 'start':
+                    level += 1
+                else:
+                    if level == 2:
+                        yield elem
+                        elem.clear()
+                    level -= 1
+        except ET.ParseError, exc:
+            print "\nError: Bad XML file: %s\n", file
+            print exc.message
 
     def as_dict(self, elem):
         return dict((self.tag_name(child.tag), child) for child in elem.getchildren())
@@ -286,7 +291,7 @@ class ETWXMLHandler:
                     pid = data['ProcessId'] if '0x0' != data['ProcessId'] else hex(int(system['pid']))
                     self.thread_pids[int(data['TThreadId'], 16)] = pid
             elif info['Opcode'] == 'CSwitch':
-                if self.ftrace == None and not self.first_ftrace_record:
+                if self.ftrace is None and not self.first_ftrace_record:
                     return
                 time = self.convert_time(system['time'])
                 if not self.callbacks.check_time_in_limits(time):
@@ -316,18 +321,27 @@ class ETWXMLHandler:
     def auto_break_gui_packets(self, call_data, tid, begin):
         id = call_data['id']
         if begin:
+            call_data['realtime'] = call_data['time']  # as we gonna change 'time'
             self.gui_packets.setdefault(tid, {})[id] = call_data
         else:
             if self.gui_packets.has_key(tid) and self.gui_packets[tid].has_key(id):
-                del self.gui_packets[tid][id] #the task has ended, removing it from the pipeline
-                for begin_data in self.gui_packets[tid].itervalues(): #finish all and start again to form melting task queue
-                    begin_data['time'] = call_data['time'] #new begin for every task is here
-                    end_data = begin_data.copy() #the end of previous part of task is also here
+                packets = self.gui_packets[tid]
+                real_time = packets[id]['realtime']
+                to_remove = []
+                del packets[id]  # the task has ended, removing it from the pipeline
+                for begin_data in packets.itervalues():  # finish all and start again to form melting task queue
+                    begin_data['time'] = call_data['time']  # new begin for every task is here
+                    end_data = begin_data.copy()  # the end of previous part of task is also here
                     end_data['type'] = call_data['type']
-                    self.callbacks.on_event('task_end_overlapped', end_data) #finish it
-                    self.callbacks.on_event('task_begin_overlapped', begin_data)# and start again
+                    self.callbacks.on_event('task_end_overlapped', end_data)  # finish it
+                    if len(packets) > 10 and begin_data['realtime'] < real_time:  # packet line is too long we seem lost the end ETW call
+                        to_remove.append(begin_data['id'])  # main candidate is the event that started earlier but nor finished when finished the one started later
+                    else:
+                        self.callbacks.on_event('task_begin_overlapped', begin_data)  # and start again
+                for id in to_remove:  # FIXME: but it's better somehow to detect never ending tasks and not show them at all or mark somehow
+                    del packets[id]  # the task end was probably lost
 
-    def on_event(self, system, data, info, static={'queue':{}, 'frames':{}, 'paging':{}, 'dmabuff':{}, 'tex2d':{}, 'resident':{}, 'fence':{}}):
+    def on_event(self, system, data, info, static={'queue': {}, 'frames': {}, 'paging': {}, 'dmabuff': {}, 'tex2d': {}, 'resident': {}, 'fence': {}}):
         if self.count % (ProgressConst / 4) == 0:
             self.progress.tick(self.file.tell())
         self.count += 1
@@ -603,7 +617,8 @@ class ETWXMLHandler:
     def parse(self):
         with open(self.args.input) as file:
             self.file = file
-            with Progress(os.path.getsize(self.args.input), 50, "Parsing ETW XML: " + os.path.basename(self.args.input)) as progress:
+            size = os.path.getsize(self.args.input)
+            with Progress(size, 50, 'Parsing ETW XML: %s (%s)' % (os.path.basename(self.args.input), format_bytes(size))) as progress:
                 self.progress = progress
                 etwxml = ETWXML(self.on_event, [
                     'Microsoft-Windows-DXGI',
@@ -619,14 +634,14 @@ class ETWXMLHandler:
                 unhandled_providers = etwxml.parse(file)
                 self.finish()
             print "Unhandled providers:", str(unhandled_providers)
-        if self.ftrace != None:
+        if self.ftrace is not None:
             self.ftrace.close()
             for pid, data in self.process_names.iteritems():
                 for callback in self.callbacks.callbacks:
                     proc_name = data['name']
                     if len(data['cmd']) > len(proc_name):
                         proc_name = data['cmd'].replace('\\"', '').replace('"', '')
-                    callback("metadata_add", {'domain':'IntelSEAPI', 'str':'__process__', 'pid':int(pid, 16), 'tid':-1, 'data':proc_name})
+                    callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': int(pid, 16), 'tid': -1, 'data': proc_name})
 
 
 def transform_etw_xml(args):

@@ -1,6 +1,5 @@
 import cgi
-import os
-import shutil
+
 from sea_runtool import GraphCombiner, to_hex, format_time
 
 class DGML(GraphCombiner):
@@ -33,7 +32,7 @@ class DGML(GraphCombiner):
         # threads
         thread_names = self.tree['threads']
         for tid in self.threads:
-            tid_str, tid_hex = str(tid), to_hex(tid)
+            tid_str, tid_hex = str(tid), (to_hex(tid) if tid is not None else "None")
             id = self.make_id("threads", tid_str)
             thread_name = thread_names[tid_str] if thread_names.has_key(tid_str) else ""
             self.file.write('<Node Id="%s" Label="%s(%s)"/>\n' % (id, cgi.escape(thread_name), tid_hex))
@@ -61,13 +60,26 @@ class DGML(GraphCombiner):
         self.file.close()
 
     @staticmethod
-    def join_traces(traces, output):  # FIXME: implement real joiner
-        sorting = []
-        for trace in traces:
-            sorting.append((os.path.getsize(trace), trace))
-        sorting.sort(key=lambda (size, trace): size, reverse=True)
-        shutil.copyfile(sorting[0][1], output + ".dgml")
+    def join_traces(traces, output):
+        with open(output + ".dgml", 'wb') as outfile:
+            outfile.write("""<?xml version='1.0' encoding='utf-8'?>\n<DirectedGraph xmlns="http://schemas.microsoft.com/vs/2009/dgml">""")
+            outfile.write('<Nodes>\n')
+            for file in traces:
+                with open(file, 'rb') as infile:
+                    for line in infile:
+                        if line.startswith("<Node "):
+                            outfile.write(line)
+            outfile.write('</Nodes>\n')
+            outfile.write('<Links>\n')
+            for file in traces:
+                with open(file, 'rb') as infile:
+                    for line in infile:
+                        if line.startswith("<Link "):
+                            outfile.write(line)
+            outfile.write('</Links>\n')
+            outfile.write("</DirectedGraph>\n")
         return output + ".dgml"
+
 
 EXPORTER_DESCRIPTORS = [{
     'format': 'dgml',

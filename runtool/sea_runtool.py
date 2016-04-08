@@ -35,6 +35,14 @@ def format_time(time):
     return "%.3fs" % (float(time) / 10 ** 9)
 
 
+def format_bytes(num):
+    for unit in ['', 'K', 'M', 'G']:
+        if abs(num) < 1024.0:
+            return "%3.1f %sB" % (num, unit)
+        num /= 1024.0
+    return str(num) + 'B'
+
+
 class DummyWith():  # for conditional with statements
     def __enter__(self):
         return self
@@ -59,18 +67,21 @@ class Profiler():
         return False
 
 
-def get_extensions(name):
+def get_extensions(name, multiple=False):
     big_name = (name + 's').upper()
     this_module = sys.modules[__name__]
     if big_name in dir(this_module):
         return getattr(this_module, big_name)
     extensions = {}
-    root = os.path.join(os.path.dirname(os.path.realpath(__file__)), name+'s')
+    root = os.path.join(os.path.dirname(os.path.realpath(__file__)), name + 's')
     for extension in glob(os.path.join(root, '*.py')):
         module = imp.load_source(os.path.splitext(os.path.basename(extension))[0], extension)
         for desc in getattr(module, name.upper() + '_DESCRIPTORS'):
             if desc['available']:
-                extensions[desc['format']] = desc[name]
+                if multiple:
+                    extensions.setdefault(desc['format'], []).append(desc[name])
+                else:
+                    extensions[desc['format']] = desc[name]
     setattr(this_module, big_name, extensions)
     return extensions
 
@@ -87,6 +98,10 @@ def get_collectors():
     return get_extensions('collector')
 
 
+def get_decoders():
+    return get_extensions('decoder', multiple=True)
+
+
 def parse_args(args):
     import argparse
     parser = argparse.ArgumentParser(epilog="After this command line add ! followed by command line of your program")
@@ -101,11 +116,13 @@ def parse_args(args):
     parser.add_argument("-o", "--output", help='Output folder pattern -<pid> will be added to it')
     parser.add_argument("-b", "--bindir", help='If you run script not from its location')
     parser.add_argument("-i", "--input", help='Provide input folder for transformation (<the one you passed to -o>-<pid>)')
-    parser.add_argument("-t", "--trace")
+    parser.add_argument("-t", "--trace", nargs='*', help='Additional trace file in one of supported formats')
     parser.add_argument("-d", "--dir", help='Working directory for target (your program)')
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-c", "--cuts", nargs='*', help='Set "all" to merge all cuts in one trace')
     parser.add_argument("-s", "--sync")
+    parser.add_argument("-m", "--multiproc", action="store_true", help='Allows to capture follow-child mode and handle several processes writing trace')
+    parser.add_argument("-r", "--ring", type=int, help='Makes trace to cycle inside ring buffer of given length in seconds')
     parser.add_argument("--time_shift", type=int, default=0)
     parser.add_argument("-l", "--limit", help='define')
     parser.add_argument("--ssh")
@@ -118,6 +135,7 @@ def parse_args(args):
     parser.add_argument("--memory", choices=["total", "detailed"], default="total")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--collector", choices=list(get_collectors().iterkeys()) + ['default'])
 
     if "!" in args:
         separator = args.index("!")
@@ -130,9 +148,10 @@ def parse_args(args):
             args[-1] = args[-1].strip()  # removal of trailing '\r' - when launched from .sh
         parsed_args = parser.parse_args(args)
         if parsed_args.input:
+            setattr(parsed_args, 'user_input', parsed_args.input)
             if not parsed_args.output:
                 parsed_args.output = parsed_args.input
-            return (parsed_args, None)
+            return parsed_args, None
         print "--input argument is required for transformation mode."
         parser.print_help()
         sys.exit(-1)
@@ -142,11 +161,15 @@ def main():
     (args, victim) = parse_args(sys.argv[1:])  # skipping the script name
     with Profiler() if args.profile else DummyWith():
         if victim:
+            if args.multiproc:
+                if os.path.exists(args.output):
+                    shutil.rmtree(args.output)
+                os.makedirs(args.output)
             launch(args, victim)
         else:
             ext = os.path.splitext(args.input)[1]
             if not ext:
-                transform(args)
+                transform_all(args)
             else:
                 get_importers()[ext.lstrip('.')](args)
 
@@ -159,26 +182,6 @@ def os_lib_ext():
     elif 'linux' in sys.platform:
         return '.so'
     assert (not "Unsupported platform")
-
-
-class ETWTrace:
-    def __init__(self, args):
-        self.file = args.output + ".etl"
-
-    def start(self):
-        process = Popen('logman start "NT Kernel Logger" -p "Windows Kernel Trace" (process,thread,cswitch) -ct perf -o "%s" -ets' % (self.file), shell=True)
-        process.wait()
-        return 0 == process.returncode
-
-    def stop(self):
-        Popen('logman stop "NT Kernel Logger" -ets', shell=True).wait()
-        return self.file
-
-
-def start_etw(args):
-    print "Trying to start ETW..."
-    trace = ETWTrace(args)
-    return trace if trace.start() else None
 
 
 class Remote:
@@ -252,7 +255,16 @@ def launch_remote(args, victim):
 
     ftrace = get_collectors()['ftrace'](args, remote)
     print 'Executing:', ' '.join(victim), '...'
-    print remote.execute("%s=%s INTEL_SEA_SAVE_TO=%s/pid %s %s" % (load_lib, target, trace, ('INTEL_SEA_VERBOSE=1' if args.verbose else ''), ' '.join(victim)))
+
+    variables = dict()
+    variables[load_lib] = target
+    variables['INTEL_SEA_SAVE_TO'] = trace
+    if args.verbose:
+        variables['INTEL_SEA_VERBOSE'] = '1'
+    if args.ring:
+        variables['INTEL_SEA_RING'] = str(args.ring)
+    suffix = ' '.join(['%s=%s' % pair for pair in variables.iteritems()])
+    print remote.execute(suffix + ' '.join(victim))
     if ftrace:
         args.trace = ftrace.stop()
     args.output = output
@@ -271,9 +283,9 @@ def launch_remote(args, victim):
         sys.exit(-1)
     args.input = files[0]
     if args.trace:
-        args.trace = glob(os.path.join(local_tmp, '*', 'nop.ftrace'))[0]
+        args.trace = [glob(os.path.join(local_tmp, '*', 'nop.ftrace'))[0]]
     output = transform(args)
-    output = join_output(args, output)
+    output = join_gt_output(args, output)
     shutil.rmtree(local_tmp)
     print "result:", output
 
@@ -307,11 +319,13 @@ def launch(args, victim):
     env["INTEL_SEA_FEATURES"] = os.environ['INTEL_SEA_FEATURES'] if os.environ.has_key('INTEL_SEA_FEATURES') else ""
     env["INTEL_SEA_FEATURES"] += (" " + str(args.format)) if args.format else ""
     env["INTEL_SEA_FEATURES"] += " stacks" if args.stacks else ""
+    if args.ring:
+        env["INTEL_SEA_RING"] = str(args.ring)
 
     if args.output:
-        env["INTEL_SEA_SAVE_TO"] = args.output
+        env["INTEL_SEA_SAVE_TO"] = os.path.join(args.output, 'pid') if args.multiproc else args.output
 
-    if (args.dry):
+    if args.dry:
         for key, val in env.iteritems():
             if val:
                 print key + "=" + val
@@ -321,32 +335,56 @@ def launch(args, victim):
         print "Running:", victim
         print "Environment:", str(env)
 
-    new_env = dict(os.environ)
-    new_env.update(env)
-    env = new_env
+    os.environ.update(env)
 
     if 'kernelshark' in args.format:
         victim = 'trace-cmd record -e IntelSEAPI/* ' + victim
 
     tracer = None
-    if ('gt' in args.format and args.output):
-        if 'linux' in sys.platform:
-            tracer = get_collectors()['ftrace'](args)
-        elif 'win32' == sys.platform:
-            tracer = start_etw(args)
+    if args.collector:
+        tracer = get_collectors()[args.collector](args)
 
-    proc = Popen(victim, env=env, shell=False, cwd=args.dir)
+    if not tracer:
+        if 'gt' in args.format and args.output:
+            if 'linux' in sys.platform:
+                tracer = get_collectors()['ftrace'](args)
+            elif 'win32' == sys.platform:
+                tracer = get_collectors()['etw'](args)
+
+    proc = Popen(victim, env=os.environ, shell=False, cwd=args.dir)
     proc.wait()
     if tracer:
         args.trace = tracer.stop()
-    if args.output:
-        args.input = "%s-%d" % (args.output, proc.pid)
+
+    if not args.output:
+        return []
+
+    args.input = "%s-%d" % (args.output, proc.pid)
+    transform_all(args)
+
+
+def transform_all(args):
+    if args.multiproc:
+        multi_out = []
+        saved_output = args.output
+        setattr(args, 'user_input', args.output)
+        for folder in glob(os.path.join(args.output, 'pid-*')):
+            args.input = folder
+            args.output = saved_output + '.' + os.path.basename(folder)
+            multi_out += transform(args)
+            if multi_out:
+                args.trace = None
+        output = join_gt_output(args, multi_out)
+        args.output = saved_output
+    else:
+        setattr(args, 'user_input', args.input)
         output = transform(args)
-        output = join_output(args, output)
-        print "result:", [os.path.abspath(path) for path in output]
+        output = join_gt_output(args, output)
+    print "result:", [os.path.abspath(path).replace('\\', '/') for path in output]
+    return output
 
 
-def join_output(args, output):
+def join_gt_output(args, output):
     google_traces = [item for item in output if os.path.splitext(item)[1] in ['.json', '.ftrace']]
     if google_traces:
         res = get_exporters()['gt'].join_traces(google_traces, args.output)
@@ -367,7 +405,7 @@ def split_filename(path):
 
 
 def default_tree():
-    return {"strings":{}, "domains": {}, "threads":{}, "groups":{}, "modules":{}, "ring_buffer": False, "cuts":set()}
+    return {"strings": {}, "domains": {}, "threads": {}, "groups": {}, "modules": {}, "ring_buffer": False, "cuts": set()}
 
 
 def sea_reader(folder):  # reads the structure of .sea format folder into dictionary
@@ -455,7 +493,7 @@ class Progress:
 def read_chunk_header(file):
     chunk = file.read(10)  # header of the record, see STinyRecord in Recorder.cpp
     if chunk == '':
-        return (0, 0, 0)
+        return 0, 0, 0
     return struct.unpack('Qbb', chunk)
 
 
@@ -479,7 +517,7 @@ def transform(args):
                 if current_cut:  # read only those having this cut name in filename
                     if current_cut != split_filename(filename)['cut']:
                         return True
-                else:  # reading those haveing not cut name in filename
+                else:  # reading those having not cut name in filename
                     if "!" in filename:
                         return True
                 return False
@@ -677,7 +715,8 @@ def transform2(args, tree, skip_fn=None):
             print path
             progress = DummyWith()
         else:
-            progress = Progress(sum([file.get_size() for file in files]), 50, "Translation: " + os.path.basename(args.input))
+            size = sum([file.get_size() for file in files])
+            progress = Progress(size, 50, 'Translation: %s (%s)' % (os.path.basename(args.input), format_bytes(size)))
 
         with progress:
             count = 0
@@ -847,7 +886,7 @@ def represent_data(tree, name, data):
     for key in struct_decoders.iterkeys():
         if key in name:
             return struct_decoders[key](data)
-    if (all(31 < ord(chr) < 128 for chr in data)):  # string we will show as string
+    if all((31 < ord(chr) < 128) or (chr in ['\t', '\r', '\n']) for chr in data):  # string we will show as string
         return data
     return binascii.hexlify(data)  # the rest as hex buffer
 
@@ -863,10 +902,11 @@ class TaskCombiner:
         self.finish()
         return False
 
-    def __init__(self, tree):
+    def __init__(self, args, tree):
         self.no_begin = []  # for the ring buffer case when we get task end but no task begin
         self.time_bounds = [2 ** 64, 0]  # left and right time bounds
         self.tree = tree
+        self.args = args
         self.domains = {}
         self.events = []
         self.event_map = {}
@@ -874,9 +914,15 @@ class TaskCombiner:
         self.memory = {}
         self.total_memory = 0
         self.prev_memory = None
+        (self.source_scale_start, self.target_scale_start, self.ratio) = tuple([0, 0, 1. / 1000])  # nanoseconds to microseconds
+        if self.args.sync:
+            self.set_sync(*self.args.sync)
+
+    def set_sync(self, *sync):
+        (self.source_scale_start, self.target_scale_start, self.ratio) = tuple(sync)
 
     def convert_time(self, time):
-        return self.args.time_shift + (time / 1000.) # nanoseconds to microseconds
+        return (time - self.source_scale_start) * self.ratio + self.target_scale_start
 
     def global_metadata(self, data):
         pass
@@ -1103,26 +1149,27 @@ def get_name(begin):
 
 class GraphCombiner(TaskCombiner):
     def __init__(self, args, tree):
-        TaskCombiner.__init__(self, tree)
+        TaskCombiner.__init__(self, args, tree)
         self.args = args
         self.per_domain = {}
         self.relations = {}
         self.threads = set()
 
     def complete_task(self, type, begin, end):
-        self.threads.add(begin['tid'])
+        tid = begin['tid'] if 'tid' in begin else None
+        self.threads.add(tid)
         domain = self.per_domain.setdefault(begin['domain'], {'counters': {}, 'objects':{}, 'frames': {}, 'tasks': {}, 'markers': {}})
         if type == 'task':
             task = domain['tasks'].setdefault(get_name(begin), {'time': []})
             task['time'].append(end['time'] - begin['time'])
             if begin.has_key('__file__'):
                 task['src'] = begin['__file__'] + ":" + begin['__line__']
-            stack = self.domains[begin['domain']]['tasks'][begin['tid']]['stack']
+            stack = self.domains[begin['domain']]['tasks'][tid]['stack']
             if len(stack):
                 parent = stack[-1]
                 self.add_relation({'label':'calls', 'from': self.make_id(parent['domain'], get_name(parent)), 'to': self.make_id(begin['domain'], get_name(begin))})
             else:
-                self.add_relation({'label':'executes', 'from': self.make_id("threads", str(begin['tid'])), 'to': self.make_id(begin['domain'], get_name(begin)), 'color': 'gray'})
+                self.add_relation({'label':'executes', 'from': self.make_id("threads", str(tid)), 'to': self.make_id(begin['domain'], get_name(begin)), 'color': 'gray'})
         elif type == 'marker':
             domain['markers'].setdefault(begin['str'], [])
         elif type == 'frame':

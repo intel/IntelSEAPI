@@ -1,6 +1,7 @@
 import os
 import json
-from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst
+import subprocess
+from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst, get_importers
 
 MAX_GT_SIZE = 50 * 1024 * 1024
 GT_FLOAT_TIME = False
@@ -8,11 +9,7 @@ GT_FLOAT_TIME = False
 
 class GoogleTrace(TaskCombiner):
     def __init__(self, args, tree):
-        TaskCombiner.__init__(self, tree)
-        self.args = args
-        self.target_scale_start = self.args.time_shift
-        self.source_scale_start = 0
-        self.ratio = 1 / 1000.  # nanoseconds to microseconds
+        TaskCombiner.__init__(self, args, tree)
         self.size_keeper = None
         self.targets = []
         self.trace_number = 0
@@ -21,10 +18,11 @@ class GoogleTrace(TaskCombiner):
         self.samples = []
         self.last_task = None
         if self.args.trace:
-            if self.args.trace.endswith(".etl"):
-                self.handle_etw_trace(self.args.trace)
-            else:
-                self.args.sync = self.handle_ftrace(self.args.trace)
+            for trace in self.args.trace:
+                if trace.endswith(".etl"):
+                    self.handle_etw_trace(trace)
+                else:
+                    self.handle_ftrace(trace)
         self.start_new_trace()
 
     def start_new_trace(self):
@@ -32,8 +30,6 @@ class GoogleTrace(TaskCombiner):
         self.trace_number += 1
         self.file = open(self.targets[-1], "w")
         self.file.write('{')
-        if self.args.sync:
-            self.apply_time_sync(self.args.sync)
         self.file.write('\n"traceEvents": [\n')
 
         for key, value in self.tree["threads"].iteritems():
@@ -45,9 +41,6 @@ class GoogleTrace(TaskCombiner):
     def get_targets(self):
         return self.targets
 
-    def convert_time(self, time):
-        return (time - self.source_scale_start) * self.ratio + self.target_scale_start
-
     @staticmethod
     def read_ftrace_lines(trace, time_sync):
         write_chrome_time_sync = True
@@ -57,7 +50,7 @@ class GoogleTrace(TaskCombiner):
                 for line in file:
                     if 'IntelSEAPI_Time_Sync' in line:
                         parts = line.split()
-                        time_sync.append((float(parts[-4].strip(":")), int(parts[-1]))) #target (ftrace), source (nanosecs)
+                        time_sync.append((float(parts[-4].strip(":")), int(parts[-1])))  # target (ftrace), source (nanosecs)
                         if write_chrome_time_sync:  # chrome time sync, pure zero doesn't work, so we shift on very little value
                             yield "%strace_event_clock_sync: parent_ts=%s\n" % (line.split("IntelSEAPI_Time_Sync")[0], line.split(":")[-4].split()[-1])
                             write_chrome_time_sync = False  # one per trace is enough
@@ -72,16 +65,39 @@ class GoogleTrace(TaskCombiner):
         self.targets.append(self.args.output + '.cut.ftrace')
         with open(self.targets[-1], 'w') as file:
             for line in GoogleTrace.read_ftrace_lines(trace, time_sync):
-                if line.startswith('#') or 0 < len(time_sync) < 10: #we don't need anything outside proc execution but comments
-                    file.write(line)
-        return time_sync
+                # XXX if line.startswith('#') or 0 < len(time_sync) < 10: #we don't need anything outside proc execution but comments
+                file.write(line)
+        sync = self.apply_time_sync(time_sync)
 
-    def handle_etw_trace(self, trace):
-        assert (not "Implemented")
+        save = (self.args.input, self.args.output, self.args.trace)
+        (self.args.input, self.args.output, self.args.trace) = (trace, trace, None)
+        self.args.sync = [0, 0, 1. / 1000]  # since ftrace is already set as time sync the events coming from it shall have source time
+        res = get_importers()['ftrace'](self.args)
+        self.args.sync = sync
+        (self.args.input, self.args.output, self.args.trace) = save
+
+        self.set_sync(*sync)
+        self.targets += res
+
+    def handle_etw_trace(self, etw_file):
+        etw_xml = etw_file + ".xml"
+        proc = subprocess.Popen('tracerpt "%s" -of XML -rts -lr -o "%s" -y' % (etw_file, etw_xml), shell=True, stderr=subprocess.PIPE)
+        (out, err) = proc.communicate()
+        if err:
+            return None
+
+        save = (self.args.input, self.args.output, self.args.trace)
+        (self.args.input, self.args.output, self.args.trace) = (etw_xml, etw_xml, None)
+        res = get_importers()['xml'](self.args)
+        (self.args.input, self.args.output, self.args.trace) = save
+
+        self.targets += res
+
+        return res
 
     def apply_time_sync(self, time_sync):
         if len(time_sync) < 2:  # too few markers to sync
-            return
+            return None
         Target = 0
         Source = 1
         # looking for closest time points to calculate start points
@@ -105,12 +121,12 @@ class GoogleTrace(TaskCombiner):
         # S   /b  |  |  I  /e
         # T      /b  I  |  |  /e
 
-        # run 3: takes more time before Targer measurement
+        # run 3: takes more time before Target measurement
         # S   /b  |  |  I  /e
         # T              /b  I  |  |  /e
 
         # From these runs obvious that in all cases the closest points (I) of global timeline are:
-        #   Quater to end of Source and Quater after begin of Target
+        # Quarter to end of Source and Quarter after begin of Target
         self.source_scale_start = time_sync[index - 1][Source] + int(diff[Source] * 0.75)  # to keep the precision
         self.target_scale_start = (time_sync[index - 1][Target] + (diff[Target] * 0.25)) * 1000000. #multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
 
@@ -118,27 +134,32 @@ class GoogleTrace(TaskCombiner):
 
         # taking farest time points to calculate frequencies
         diff = (time_sync[-1][Target] - time_sync[0][Target], time_sync[-1][Source] - time_sync[0][Source])
-        self.ratio = 1000000. * diff[Target] / diff[Source] # when you multiply Source value with this ratio you get Target units, multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
+        self.ratio = 1000000. * diff[Target] / diff[Source]  # when you multiply Source value with this ratio you get Target units, multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
+        return [self.source_scale_start, self.target_scale_start, self.ratio]
 
     def global_metadata(self, data):
         if data['str'] == "__process__":  # this is the very first record in the trace
             if data.has_key('data'):
                 self.file.write(
-                    '{"name": "process_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], data['data'].replace("\\", "\\\\"))
+                    '{"name": "process_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\"))
                 )
             if data.has_key('delta'):
                 self.file.write(
                     '{"name": "process_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":%d}},\n' % (data['pid'], data['tid'], data['delta'])
                 )
-            if data['tid'] >= 0 and not self.tree['threads'].has_key('%d,%d' % (data['pid'], data['tid'])): #marking the main thread
+            if data['tid'] >= 0 and not self.tree['threads'].has_key('%d,%d' % (data['pid'], data['tid'])):  # marking the main thread
                 self.file.write(
                     '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], "<main>")
                 )
+        elif data['str'] == "__thread__":
+            self.file.write(
+                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\"))
+            )
 
     def relation(self, data, head, tail):
         if not head or not tail:
             return
-        items = sorted([head, tail], key=lambda item: item['time']) #we can't draw lines in backward direction, so we sort them by time
+        items = sorted([head, tail], key=lambda item: item['time'])  # we can't draw lines in backward direction, so we sort them by time
         if GT_FLOAT_TIME:
             template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%.3f, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
         else:
@@ -160,9 +181,9 @@ class GoogleTrace(TaskCombiner):
                     return val
         except:
             pass
-        return '"%s"' % unicode(arg).encode('ascii', 'ignore').replace("\\", "\\\\").replace('"', '\\"')
+        return '"%s"' % unicode(arg).encode('ascii', 'ignore').strip().replace("\\", "\\\\").replace('"', '\\"').replace('\n', '\\n')
 
-    Phase = {'task':'X', 'counter':'C', 'marker':'i', 'object_new':'N', 'object_snapshot':'O', 'object_delete':'D', 'frame':'X'}
+    Phase = {'task': 'X', 'counter': 'C', 'marker': 'i', 'object_new': 'N', 'object_snapshot': 'O', 'object_delete': 'D', 'frame': 'X'}
 
     def complete_task(self, type, begin, end):
         if self.args.distinct:
@@ -194,7 +215,7 @@ class GoogleTrace(TaskCombiner):
         else:
             res = "".join(res + [',\n'])
         self.file.write(res)
-        if (self.file.tell() > MAX_GT_SIZE):
+        if self.file.tell() > MAX_GT_SIZE:
             self.finish()
             self.start_new_trace()
 
@@ -203,13 +224,13 @@ class GoogleTrace(TaskCombiner):
             return
         parent = None
         for frame in reversed(stack):  # going from parents to childs
-            if parent == None:
+            if parent is None:
                 frame_id = '%d' % frame['ptr']
             else:
                 frame_id = '%d:%s' % (frame['ptr'], parent)
             if not self.frames.has_key(frame_id):
                 data = {'category': os.path.basename(frame['module']), 'name': frame['str']}
-                if parent != None:
+                if parent is not None:
                     data['parent'] = parent
                 self.frames[frame_id] = data
             parent = frame_id
@@ -272,19 +293,19 @@ class GoogleTrace(TaskCombiner):
                 name = name.rstrip(":")
 
         assert (name or "object_" in type)
-        res.append(', "name":"%s"' % (name))
+        res.append(', "name":"%s"' % name)
         res.append(', "cat":"%s"' % (begin['domain']))
 
         if begin.has_key('id'):
             res.append(', "id":%s' % (begin['id']))
         if type in ['task']:
             dur = self.convert_time(end['time']) - self.convert_time(begin['time'])
+            if dur < self.args.min_dur:
+                return []
             if GT_FLOAT_TIME:
-                res.append(', "dur":%.3f' % (dur))
+                res.append(', "dur":%.3f' % dur)
             else:
-                if dur < self.args.min_dur:
-                    return []  # google misbehaves on tasks of 0 length
-                res.append(', "dur":%d' % (dur))
+                res.append(', "dur":%d' % dur)
         args = {}
         if begin.has_key('args'):
             args = begin['args'].copy()
@@ -313,7 +334,7 @@ class GoogleTrace(TaskCombiner):
         if args:
             res.append(', "args":')
             res.append(self.format_value(args))
-        res.append('}');
+        res.append('}')
         return res
 
     def handle_leftovers(self):

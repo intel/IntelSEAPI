@@ -1,5 +1,14 @@
+import os
+import sys
 import glob
 import shutil
+
+
+def time_sync():
+    sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+    import sea
+    sea.ITT('lin').time_sync()
+
 
 supported_events = [
     "binder_locked",
@@ -92,13 +101,14 @@ supported_events = [
     "workqueue_activate_work",
 ]
 
+
 class FTrace:
     def __init__(self, args, remote):
         self.args = args
-        self.file = args.output + ".ftrace"
         self.remote = remote
         self.event_list = []
         self.proc = None
+        self.file = self.args.output + ".nop.ftrace"
 
         for event in supported_events:
             for path in glob.glob('/sys/kernel/debug/tracing/events/*/%s/enable' % event):
@@ -122,27 +132,31 @@ class FTrace:
         self.echo("", "/sys/kernel/debug/tracing/trace")  # cleansing ring buffer (we need it's header only)
 
         # best is to write sync markers here
-        """
-        echo(FTRACE("tracing_on"), "1"); //activate tracing
-        SEA::FTraceSync(); //writing synchronization markers
-        echo(FTRACE("tracing_on"), "0"); //deactivate tracing
-        //saving first part of synchronization as it will be wiped out in ring
-        int res = std::system(("cat /sys/kernel/debug/tracing/trace > " + m_folder + "/nop.ftrace").c_str());
-        if (-1 == res) return false;
-        echo(FTRACE("trace"));// cleansing ring buffer again
-        """
+        self.echo("1", "/sys/kernel/debug/tracing/tracing_on")  # activate tracing
+        time_sync()
+        self.echo("0", "/sys/kernel/debug/tracing/tracing_on")  # deactivate tracing
+        # saving first part of synchronization as it will be wiped out in ring
+        self.copy_from_target("/sys/kernel/debug/tracing/trace", self.file)
+        self.echo("", "/sys/kernel/debug/tracing/trace")  # cleansing ring buffer again
 
         for event in self.event_list:  # enabling only supported
             self.echo("1", event)
         self.echo("1", "/sys/kernel/debug/tracing/tracing_on")
 
+    def copy_from_target(self, what, where):
+        if self.remote:
+            self.remote.copy('%s:%s' % (self.args.ssh, what), where)
+        else:
+            shutil.copy(what, where)
+
     def stop(self):
         self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
-        if self.remote:
-            self.remote.copy('%s:%s' % (self.args.ssh, "/sys/kernel/debug/tracing/trace"), self.file)
-        else:
-            shutil.copy("/sys/kernel/debug/tracing/trace", self.file)
-        return self.file
+        file_name = self.args.output + "tmp.ftrace"
+        self.copy_from_target("/sys/kernel/debug/tracing/trace", file_name)
+        with open(file_name) as file_from, open(self.file, 'a') as file_to:
+            shutil.copyfileobj(file_from, file_to)
+        os.remove(file_name)
+        return [self.file]
 
 
 def start_ftrace(args, remote=None):
@@ -152,7 +166,6 @@ def start_ftrace(args, remote=None):
         return None
     ftrace.start()
     return ftrace
-
 
 COLLECTOR_DESCRIPTORS = [{
     'format': 'ftrace',
