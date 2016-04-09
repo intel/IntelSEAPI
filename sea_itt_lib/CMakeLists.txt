@@ -181,10 +181,10 @@ if (INSTALL_SOURCES)
     )
 endif()
 
-set (INSTALL_BIN "${PROJECT_SOURCE_DIR}/runtool/sea_runtool.py")
 install(
     FILES
-        ${INSTALL_BIN}
+        "${PROJECT_SOURCE_DIR}/runtool/sea_runtool.py"
+        "${PROJECT_SOURCE_DIR}/runtool/sea.py"
     DESTINATION bin
 )
 
