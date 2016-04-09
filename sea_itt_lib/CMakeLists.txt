@@ -206,6 +206,11 @@ install(
     PATTERN "*.pyc" EXCLUDE
 )
 
+install(
+    DIRECTORY "${PROJECT_SOURCE_DIR}/runtool/decoders"
+    DESTINATION bin
+    PATTERN "*.pyc" EXCLUDE
+)
 
 if (WIN32)
 
