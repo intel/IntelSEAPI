@@ -1,6 +1,5 @@
 import os
-import glob
-from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_decoders
+from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_decoders, build_tid_map
 
 
 class FTrace:
@@ -10,29 +9,20 @@ class FTrace:
         self.tid_map = {}
         self.decoders = []
         if hasattr(self.args, 'user_input') and os.path.isdir(self.args.user_input):
-            self.build_tid_map(self.args.user_input)
+            self.tid_map = build_tid_map(self.args, self.args.user_input)
         decoders = get_decoders()
         if 'ftrace' in decoders:
             for decoder in decoders['ftrace']:
                 self.decoders.append(decoder(callbacks))
 
-    def build_tid_map(self, src):
-        if self.args.multiproc:
-            for folder in glob.glob(os.path.join(src, 'pid-*')):
-                self.parse_process(folder)
-        else:
-            self.parse_process(src)
-
-    def parse_process(self, src):
-        pid = int(src.rsplit('-', 1)[1])
-        for folder in glob.glob(os.path.join(src, '*', '*.sea')):
-            tid = int(os.path.basename(folder).split('.')[0])
-            self.tid_map[tid] = pid
-
     def handle_record(self, proc, tid, cpu, flags, timestamp, name, args):
         pid = self.tid_map[tid] if tid in self.tid_map else None
-        timestamp *= 1000000000.  # seconds to nanoseconds
+        timestamp = int(timestamp * 1000000000)  # seconds to nanoseconds
         for decoder in self.decoders:
+            if name == 'tracing_mark_write' or name == '0':
+                parts = args.split(':', 1)
+                if len(parts) == 2:
+                    name, args = tuple(parts)
             decoder.handle_record(proc, pid, tid, cpu, flags, timestamp, name, args)
 
 
@@ -51,7 +41,7 @@ def transform_ftrace(args):
                     count += 1
                     if line.startswith('#'):
                         continue
-                    regular = line[:46]
+                    regular = line[:48].rstrip(' :')
                     payload = line[48:]
                     parts = regular.split()
                     if len(parts) != 4:

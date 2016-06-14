@@ -36,7 +36,7 @@ class BestTraceFormat(TaskCombiner):
         self.file.close()
 
     @staticmethod
-    def join_traces(traces, output):
+    def join_traces(traces, output, args):
         with open(output + ".btf", 'wb') as outfile:
             for file in traces:
                 with open(file, 'rb') as infile:

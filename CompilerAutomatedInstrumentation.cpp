@@ -20,7 +20,7 @@
 extern __itt_domain* g_domain;
 extern __itt_clock_domain* clock_domain;
 
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
 thread_local bool g_bCAIRecursion = false;
 extern "C" {
     void __cyg_profile_func_enter (void *, void *) __attribute__((no_instrument_function));

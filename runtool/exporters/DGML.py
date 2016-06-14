@@ -60,7 +60,7 @@ class DGML(GraphCombiner):
         self.file.close()
 
     @staticmethod
-    def join_traces(traces, output):
+    def join_traces(traces, output, args):
         with open(output + ".dgml", 'wb') as outfile:
             outfile.write("""<?xml version='1.0' encoding='utf-8'?>\n<DirectedGraph xmlns="http://schemas.microsoft.com/vs/2009/dgml">""")
             outfile.write('<Nodes>\n')

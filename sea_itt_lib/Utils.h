@@ -29,7 +29,6 @@
 #include <chrono>
 #include <map>
 
-
 #ifdef _WIN32
     #include <windows.h>
 #else
@@ -38,18 +37,20 @@
     #include <fcntl.h>
 #endif
 
-#if defined(__ANDROID__)
-    #include <sstream>
+#ifdef STANDARD_SOURCES
+    #include <standardsources.h>
+#else
+    #if defined(__ANDROID__)
     namespace std { //android NDK is missing this functionality
         template <typename T>
         std::string to_string(T value)
         {
-            std::ostringstream os ;
-            os << value ;
-            return os.str() ;
+            std::ostringstream os;
+            os << value;
+            return os.str();
         }
     }
-
+    #endif
 #endif
 
 static std::string get_environ_value(const std::string& name)

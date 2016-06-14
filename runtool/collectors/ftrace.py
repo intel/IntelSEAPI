@@ -2,13 +2,15 @@ import os
 import sys
 import glob
 import shutil
+import traceback
+from sea_runtool import Collector
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+import sea
+
 
 
 def time_sync():
-    sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
-    import sea
     sea.ITT('lin').time_sync()
-
 
 supported_events = [
     "binder_locked",
@@ -102,19 +104,19 @@ supported_events = [
 ]
 
 
-class FTrace:
-    def __init__(self, args, remote):
-        self.args = args
+class FTrace(Collector):
+    def __init__(self, args, remote=False):
+        Collector.__init__(self, args)
         self.remote = remote
         self.event_list = []
-        self.proc = None
-        self.file = self.args.output + ".nop.ftrace"
-
+        self.file = None
         for event in supported_events:
             for path in glob.glob('/sys/kernel/debug/tracing/events/*/%s/enable' % event):
                 self.event_list.append(path)
+        self.start()
 
     def echo(self, what, where):
+        self.log("echo %s > %s" % (what, where))
         try:
             if self.remote:
                 self.remote.execute('echo %s > %s' % (what, where))
@@ -122,10 +124,16 @@ class FTrace:
                 with open(where, "w") as file:
                     file.write(what)
         except:
+            self.log("Failed: " + traceback.format_exc())
             return False
         return True
 
     def start(self):
+        if not self.echo("nop", "/sys/kernel/debug/tracing/current_tracer"):
+            self.log("Warning: failed to access ftrace subsystem")
+            return
+        self.file = os.path.join(self.args.output, 'nop-%s.ftrace' % (self.args.cuts[0] if self.args.cuts else '0'))
+
         self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
         self.echo("nop", "/sys/kernel/debug/tracing/current_tracer")  # google chrome understands this format
         self.echo("", "/sys/kernel/debug/tracing/set_event")  # disabling all events
@@ -144,31 +152,27 @@ class FTrace:
         self.echo("1", "/sys/kernel/debug/tracing/tracing_on")
 
     def copy_from_target(self, what, where):
+        self.log("copy %s > %s" % (what, where))
         if self.remote:
             self.remote.copy('%s:%s' % (self.args.ssh, what), where)
         else:
             shutil.copy(what, where)
 
-    def stop(self):
+    def stop(self, wait=True):
+        if not self.file:
+            return []
         self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
-        file_name = self.args.output + "tmp.ftrace"
+        file_name = os.path.join(self.args.output, "tmp.ftrace")
         self.copy_from_target("/sys/kernel/debug/tracing/trace", file_name)
+        self.log("append %s > %s" % (file_name, self.file))
         with open(file_name) as file_from, open(self.file, 'a') as file_to:
             shutil.copyfileobj(file_from, file_to)
         os.remove(file_name)
         return [self.file]
 
 
-def start_ftrace(args, remote=None):
-    ftrace = FTrace(args, remote)
-    if not ftrace.echo("nop", "/sys/kernel/debug/tracing/current_tracer"):
-        print "Warning: failed to access ftrace subsystem"
-        return None
-    ftrace.start()
-    return ftrace
-
 COLLECTOR_DESCRIPTORS = [{
     'format': 'ftrace',
     'available': True,
-    'collector': start_ftrace
+    'collector': FTrace
 }]

@@ -97,7 +97,7 @@ inline bool operator == (const __itt_id& left, const __itt_id& right)
 
 namespace sea {
 
-uint64_t g_nRingBuffer = 1000000000ull * atoi(get_environ_value("INTEL_SEA_RING").c_str()); //in nanoseconds
+int64_t g_nRingBuffer = 1000000000ll * atoi(get_environ_value("INTEL_SEA_RING").c_str()); //in nanoseconds
 uint64_t g_nAutoCut = 1024ull * 1024 * atoi(get_environ_value("INTEL_SEA_AUTOCUT").c_str()); //in MB
 uint64_t g_features = sea::GetFeatureSet();
 
@@ -362,16 +362,23 @@ __itt_string_handle* string_handle_createW(const wchar_t* name)
 }
 #endif
 
-void marker(const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope scope)
+void marker_ex(const __itt_domain *pDomain, __itt_clock_domain* clock_domain, unsigned long long timestamp, __itt_id id, __itt_string_handle *pName, __itt_scope scope)
 {
     ITT_FUNCTION_STAT();
-    CTraceEventFormat::SRegularFields rf = GetRegularFields();
+    CTraceEventFormat::SRegularFields rf = GetRegularFields(clock_domain, timestamp);
 
     for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
     {
         g_handlers[i]->Marker(rf, pDomain, id, pName, scope);
     }
 }
+
+void marker(const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope scope)
+{
+    ITT_FUNCTION_STAT();
+    marker_ex(pDomain, nullptr, 0, id, pName, scope);
+}
+
 
 bool IHandler::RegisterHandler(IHandler* pHandler)
 {
@@ -1323,6 +1330,7 @@ _AW(ITT_STUB_IMPL,thread_set_name)\
     ITT_STUB_IMPL(task_end)\
 _AW(ITT_STUB_IMPL,metadata_str_add)\
     ITT_STUB_IMPL(marker)\
+    ITT_STUB_IMPL(marker_ex)\
     ITT_STUB_IMPL(counter_inc_delta_v3)\
     ITT_STUB_IMPL(counter_inc_v3)\
     ITT_STUB_IMPL(counter_inc_delta)\
@@ -1454,7 +1462,6 @@ _AW(ITT_STUB_NO_IMPL,mark_global)\
     ITT_STUB_NO_IMPL(id_create_ex)\
     ITT_STUB_NO_IMPL(id_destroy_ex)\
     ITT_STUB_NO_IMPL(task_begin_fn_ex)\
-    ITT_STUB_NO_IMPL(marker_ex)\
     ITT_STUB_NO_IMPL(metadata_add_with_scope)\
 _AW(ITT_STUB_NO_IMPL,metadata_str_add_with_scope)\
 _AW(ITT_STUB_NO_IMPL,av_save)

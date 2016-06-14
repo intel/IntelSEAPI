@@ -7,45 +7,14 @@ import tempfile
 import platform
 import traceback
 import subprocess
-
-class Collector:
-    output = None
-
-    def __init__(self, args):
-        self.args = args
-
-    @classmethod
-    def set_output(cls, output):
-        cls.output = output
-
-    @classmethod
-    def log(cls, msg):
-        if cls.output:
-            cls.output.write(msg + '\n')
-        else:
-            print msg
-
-    @classmethod
-    def execute(cls, cmd, **kwargs):
-        start_time = time.time()
-        (out, err) = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).communicate()
-        cls.log("\n%s:\n%s\n%s\nTime: %s" % (cmd, out, err, str(timedelta(seconds=(time.time() - start_time)))))
-        return out, err
-
-
-def prepare_environ(args):
-    if 'INTEL_LIBITTNOTIFY32' not in os.environ:
-        bin_dir = os.path.abspath(args.bindir) if args and args.bindir else os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-        os.environ['INTEL_LIBITTNOTIFY32'] = os.path.join(bin_dir, 'IntelSEAPI32.dll')
-    if 'INTEL_SEA_SAVE_TO' in os.environ:
-        del os.environ['INTEL_SEA_SAVE_TO']
-    return os.environ
+from sea_runtool import Collector
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+import sea
 
 
 def relog_etl(frm, to):
-    sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
-    import sea
     sea.ITT('win').relog(frm, to)
+
 
 class WPRCollector(Collector):
     def __init__(self, args):
@@ -53,7 +22,7 @@ class WPRCollector(Collector):
         self.wpr = self.detect()
         self.started = False
         if self.args.cuts:
-            self.file = os.path.join(args.output, "wpa-%s.etl" % self.args.cuts[0])
+            self.file = os.path.join(args.output, "wpa-%s.etl" % (self.args.cuts[0] if self.args.cuts else '0'))
         else:
             self.file = os.path.join(args.output, "wpa.etl")
         if self.wpr:
@@ -123,7 +92,7 @@ class WPRCollector(Collector):
             return []
         assert(self.file in out)
         tmp = os.path.join(self.args.output, 'tmp.etl')
-        prepare_environ(self.args)
+        sea.prepare_environ(self.args)
         relog_etl(self.file, tmp)
         os.remove(self.file)
         os.rename(tmp, self.file)
@@ -136,7 +105,7 @@ class GPUViewCollector(Collector):
         self.gpuview = self.detect()
         self.started = None
         if self.args.cuts:
-            self.file = os.path.join(args.output, "gpuview-%s.etl" % self.args.cuts[0])
+            self.file = os.path.join(args.output, "gpuview-%s.etl" % (self.args.cuts[0] if self.args.cuts else '0'))
         else:
             self.file = os.path.join(args.output, "gpuview.etl")
         if self.gpuview:
@@ -202,16 +171,16 @@ class GPUViewCollector(Collector):
         else:
             cmd = 'start "GPUView merge" /MIN /LOW "%s" "%s" gpuview "%s" "%s"' % (sys.executable, os.path.realpath(__file__), file, started)
             cls.log(cmd)
-            subprocess.Popen(cmd, shell=True, stdin=None, stdout=None, stderr=None, creationflags=0x00000008, env=prepare_environ(args))  # DETACHED_PROCESS
+            subprocess.Popen(cmd, shell=True, stdin=None, stdout=None, stderr=None, creationflags=0x00000008, env=sea.prepare_environ(args))  # DETACHED_PROCESS
 
     @classmethod
     def launch(cls, args):
         cls.merge(GPUViewCollector.detect(), args[0], args[1], True)
 
 
-def is_domain_enabled(domain):
+def is_domain_enabled(domain, default=True):
     if 'INTEL_SEA_FILTER' not in os.environ:
-        return True
+        return default
     filter = os.environ['INTEL_SEA_FILTER']
     filter = os.path.expandvars(filter) if sys.platform == 'win32' else os.path.expanduser(filter)
     with open(filter) as file:
@@ -219,12 +188,14 @@ def is_domain_enabled(domain):
             enabled = not line.startswith('#')
             if domain == line.strip(' #\n\r'):
                 return enabled
-    return True
+    return default
 
 
 class ETWTrace(Collector):
     def __init__(self, args):
         Collector.__init__(self, args)
+        wpr = WPRCollector.detect()
+        self.xperf = os.path.normpath(os.path.join(os.path.dirname(wpr), 'xperf')) if wpr else None
         self.files = []
         self.start()
 
@@ -233,11 +204,11 @@ class ETWTrace(Collector):
         cmd = None
 
         if self.args.cuts:
-            self.files.append('%s.etw-%s.etl' % (self.args.output, self.args.cuts[0]))
-            self.files.append('%s.kernel-%s.etl' % (self.args.output, self.args.cuts[0]))
+            self.files.append('%s\\etw-%s.etl' % (self.args.output, (self.args.cuts[0] if self.args.cuts else '0')))
+            self.files.append('%s\\kernel-%s.etl' % (self.args.output, (self.args.cuts[0] if self.args.cuts else '0')))
         else:
-            self.files.append('%s.etw.etl' % self.args.output)
-            self.files.append('%s.kernel.etl' % self.args.output)
+            self.files.append('%s\\etw.etl' % self.args.output)
+            self.files.append('%s\\kernel.etl' % self.args.output)
 
         if 'Windows-8' in platform.platform():
             logman_pf = os.path.join(tempfile.gettempdir(), 'gpa_logman.pf')
@@ -258,32 +229,75 @@ class ETWTrace(Collector):
             else:
                 del self.files[0]
         else:
-            wpr = WPRCollector.detect()
-            if wpr:
-                xperf = os.path.normpath(os.path.join(os.path.dirname(wpr), 'xperf'))
-                cmd = '"%s" -start GPA_SEA -on DX -f "%s" -ClockType PerfCounter' % (xperf, self.files[0])
+            if self.xperf:
+                cmd = '"%s" -start GPA_SEA -on DX -f "%s" -ClockType PerfCounter' % (self.xperf, self.files[0])
                 if self.args.ring:
                     cmd += ' -MaxFile %d -FileMode Circular' % (self.args.ring * 10)  # turning seconds into megabytes...
-
         if cmd:
             (out, err) = self.execute(cmd)
             if err:
                 return None
-        if is_domain_enabled('MSNT_SystemTrace'):
-            cmd = 'logman start "NT Kernel Logger" -p "Windows Kernel Trace" (process,thread,cswitch) -ct perf'
-            cmd += ' -o "%s" %s -ets' % (self.files[-1], (('-max %d -f bincirc' % (self.args.ring * 5)) if self.args.ring else ''))
-            (out, err) = self.execute(cmd)
-            if err or 'Error:' in out:
+
+        if self.xperf:
+            kernel_logger = []  # logman query providers "Windows Kernel Trace"
+            complimentary = ''
+            if is_domain_enabled('Kernel::ContextSwitches'):
+                kernel_logger += ['PROC_THREAD', 'CSWITCH']
+            if is_domain_enabled('Kernel::Stacks', False):
+                kernel_logger += ['LOADER', 'PROFILE']
+                complimentary += ' -stackwalk PROFILE+CSWITCH -SetProfInt 1000000'
+            if is_domain_enabled('Kernel::IO'):
+                kernel_logger += ['FILE_IO', 'FILE_IO_INIT', 'DISK_IO', 'DISK_IO_INIT', 'FILENAME', 'OPTICAL_IO', 'OPTICAL_IO_INIT']
+            if is_domain_enabled('Kernel::Network', False):
+                kernel_logger += ['NETWORKTRACE']
+            if is_domain_enabled('Kernel::Memory', False):
+                kernel_logger += ['VIRT_ALLOC', 'MEMORY', 'MEMINFO', 'VAMAP', 'POOL', 'FOOTPRINT', 'MEMINFO_WS']
+            if is_domain_enabled('Kernel::PageFaults', False):
+                kernel_logger += ['ALL_FAULTS', 'HARD_FAULTS']
+            if kernel_logger:
+                cmd = '"%s" -on %s %s -f "%s" -ClockType PerfCounter' % (self.xperf, '+'.join(kernel_logger), complimentary, self.files[-1])
+                if self.args.ring:
+                    cmd += ' -MaxFile %d -FileMode Circular' % (self.args.ring * 10)  # turning seconds into megabytes...
+                (out, err) = self.execute(cmd)
+                if err or 'Error:' in out:
+                    del self.files[-1]
+                    return self
+            else:
                 del self.files[-1]
-                return self
         else:
-            del self.files[-1]
+            kernel_logger = []  # logman query providers "Windows Kernel Trace"
+            if is_domain_enabled('Kernel::ContextSwitches'):
+                kernel_logger += ['process', 'thread', 'cswitch']
+            if is_domain_enabled('Kernel::Stacks', False):
+                kernel_logger += ['img', 'profile']
+            if is_domain_enabled('Kernel::IO'):
+                kernel_logger += ['fileio', 'disk']
+            if is_domain_enabled('Kernel::Network', False):
+                kernel_logger += ['net']
+            if is_domain_enabled('Kernel::Memory', False):
+                kernel_logger += ['virtalloc']
+            if is_domain_enabled('Kernel::PageFaults', False):
+                kernel_logger += ['pf', 'hf']
+            if kernel_logger:
+                cmd = 'logman start "NT Kernel Logger" -p "Windows Kernel Trace" (%s) -ct perf' % ','.join(kernel_logger)
+                cmd += ' -o "%s" %s -ets' % (self.files[-1], (('-max %d -f bincirc' % (self.args.ring * 5)) if self.args.ring else ''))
+                (out, err) = self.execute(cmd)
+                if err or 'Error:' in out:
+                    del self.files[-1]
+                    return self
+            else:
+                del self.files[-1]
         return self
 
-    def stop(self, wait=True):
-        proc = subprocess.Popen('logman stop "NT Kernel Logger" -ets', shell=True)
-        if wait:
-            proc.wait()
+    def stop(self, wait=True):  # TODO: stop without waits
+        if self.xperf:
+            proc = subprocess.Popen('xperf -stop', shell=True)
+            if wait:
+                proc.wait()
+        else:
+            proc = subprocess.Popen('logman stop "NT Kernel Logger" -ets', shell=True)
+            if wait:
+                proc.wait()
         if 'Windows-8' in platform.platform():
             proc = subprocess.Popen('logman stop "GPA_SEA" -ets', shell=True)
         else:

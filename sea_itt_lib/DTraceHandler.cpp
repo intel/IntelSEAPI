@@ -26,7 +26,7 @@ class CDTrace: public IHandler
         }
     }
 
-    void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length)
+    void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length) override
     {
         Cookie<CTraceEventFormat::CArgs>(oTask).Add(pKey->strA, length ? std::string(data, length).c_str() : data);
     }
@@ -46,12 +46,12 @@ class CDTrace: public IHandler
         }
     }
 
-    void Marker(const CTraceEventFormat::SRegularFields&, const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope scope)
+    void Marker(const CTraceEventFormat::SRegularFields&, const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope scope) override
     {
         DTraceMarker(pDomain->nameA, id.d1, pName->strA, GetScope(scope));
     }
 
-    void Counter(const CTraceEventFormat::SRegularFields&, const __itt_domain *pDomain, const __itt_string_handle *pName, double value)
+    void Counter(const CTraceEventFormat::SRegularFields&, const __itt_domain *pDomain, const __itt_string_handle *pName, double value) override
     {
         DTraceTaskCounter(pDomain->nameA, (int64_t)value, pName->strA);
     }

@@ -20,7 +20,7 @@ import sys
 import time
 import platform
 import threading
-from ctypes import cdll, c_char_p, c_void_p, c_ulonglong, c_int, c_double, c_long
+from ctypes import cdll, c_char_p, c_void_p, c_ulonglong, c_int, c_double, c_long, c_bool, c_short, c_wchar_p, POINTER, CFUNCTYPE
 
 
 class Dummy:
@@ -30,29 +30,45 @@ class Dummy:
     def __exit__(self, *_):
         return False
 
+
 class Task:
     def __init__(self, itt, name, id, parent):
         self.itt = itt
         self.name = name
         self.id = id
         self.parent = parent
+
     def __enter__(self):
         self.itt.lib.itt_task_begin(self.itt.domain, self.id, self.parent, self.itt.get_string_id(self.name), 0)
         return self
+
     def __exit__(self, type, value, traceback):
         self.itt.lib.itt_task_end(self.itt.domain, 0)
         return False
+
 
 class Track:
     def __init__(self, itt, track):
         self.itt = itt
         self.track = track
+
     def __enter__(self):
         self.itt.lib.itt_set_track(self.track)
         return self
+
     def __exit__(self, type, value, traceback):
         self.itt.lib.itt_set_track(None)
         return False
+
+
+def prepare_environ(args):
+    if 'INTEL_LIBITTNOTIFY32' not in os.environ or 'SEAPI' not in os.environ['INTEL_LIBITTNOTIFY32']:
+        bin_dir = os.path.abspath(args.bindir) if args and args.bindir else os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+        os.environ['INTEL_LIBITTNOTIFY32'] = os.path.join(bin_dir, 'IntelSEAPI32.dll')
+    if 'INTEL_SEA_SAVE_TO' in os.environ:
+        del os.environ['INTEL_SEA_SAVE_TO']
+    return os.environ
+
 
 class ITT:
     scope_global = 1
@@ -119,9 +135,21 @@ class ITT:
             # long relog_etl(const char* szInput, const char* szOutput)
             self.lib.relog_etl.argtypes = [c_char_p, c_char_p]
             self.lib.relog_etl.restype = c_long
+            # const char* resolve_pointer(const char* szModulePath, uint64_t addr)
+            self.lib.resolve_pointer.argtypes = [c_char_p, c_ulonglong]
+            self.lib.resolve_pointer.restype = c_char_p
         elif 'linux' in sys.platform:
             # void itt_write_time_sync_markers()
             self.lib.itt_write_time_sync_markers.argtypes = []
+
+        # typedef bool (*receive_t)(void* pReceiver, uint64_t time, uint16_t count, const wchar_t** names, const wchar_t** values, double progress);
+        self.receive_t = CFUNCTYPE(c_bool, c_ulonglong, c_ulonglong, c_short, POINTER(c_wchar_p), POINTER(c_wchar_p), c_double)
+        # typedef void* (*get_receiver_t)(const wchar_t* provider, const wchar_t* opcode, const wchar_t* taskName);
+        self.get_receiver_t = CFUNCTYPE(c_ulonglong, c_wchar_p, c_wchar_p, c_wchar_p)
+        if hasattr(self.lib, 'parse_standard_source'):
+            # bool parse_standard_source(const char* file, get_receiver_t get_receiver, receive_t receive)
+            self.lib.parse_standard_source.argtypes = [c_char_p, self.get_receiver_t, self.receive_t]
+            self.lib.parse_standard_source.restype = c_bool
 
         self.domain = self.lib.itt_create_domain(domain)
 
@@ -176,11 +204,40 @@ class ITT:
                 return
             self.lib.relog_etl(frm, to)
 
+    def resolve_pointer(self, module, addr):
+        if sys.platform == 'win32':
+            if not self.lib:
+                return
+            return self.lib.resolve_pointer(module, addr)
+
     def time_sync(self):
         if 'linux' in sys.platform:
             if not self.lib:
                 return
             self.lib.itt_write_time_sync_markers()
+
+    def parse_standard_source(self, path, reader):
+        if not hasattr(self.lib, 'parse_standard_source'):
+            return None
+        receivers = []
+
+        def receive(receiver, time, count, names, values, progress):  # typedef bool (*receive_t)(void* receiver, uint64_t time, uint16_t count, const wchar_t** names, const wchar_t** values, double progress);
+            receiver = receivers[receiver - 1]  # receiver = cast(receiver, POINTER(py_object)).contents.value
+            args = {}
+            for i in range(0, count):
+                args[names[i]] = values[i]
+            reader.set_progress(progress)
+            receiver.receive(time, args)
+            return True
+
+        def get_receiver(provider, opcode, taskName):  # typedef void* (*get_receiver_t)(const wchar_t* provider, const wchar_t* opcode, const wchar_t* taskName);
+            receiver = reader.get_receiver(provider, opcode, taskName)
+            if not receiver:
+                return 0
+            receivers.append(receiver)
+            return len(receivers)  # cast(pointer(py_object(receiver)), c_void_p).value
+        
+        return self.lib.parse_standard_source(path, self.get_receiver_t(get_receiver), self.receive_t(receive))
 
 
 def trace_execution(fn, *args):
@@ -242,9 +299,26 @@ def test_itt():
     itt.marker("End")
 
     with itt.track("group", "track"):
-        dur = (ts2-ts1) / 100 + 1
+        dur = (ts2 - ts1) / 100 + 1
         for ts in range(ts1, ts2, dur):
             itt.task_submit("submitted", ts, dur / 2)
 
 if __name__ == "__main__":
+    itt = ITT("python")
+
+    class Reader:
+        def set_progress(self, progress):
+            pass
+
+        def get_receiver(self, provider, opcode, taskName):
+            class Receiver:
+                def __init__(self, provider, opcode, taskName):
+                    pass
+
+                def receive(self, time, args):
+                    pass
+
+            return Receiver(provider, opcode, taskName)
+
+    itt.parse_standard_source(r"etw-1.etl", Reader())
     trace_execution(test_itt)

@@ -30,6 +30,9 @@
     #define setenv _putenv
     #include <windows.h>
     #include "IntelSEAPI.h"
+    #undef API_VERSION
+    #include <Dbghelp.h>
+    #pragma comment(lib, "dbghelp")
 #else
     #define setenv putenv
     #define _strdup strdup
@@ -210,3 +213,131 @@ void AtExit()
     __itt_api_fini(nullptr);
 }
 
+
+extern "C"
+{
+#ifdef STANDARD_SOURCES
+    typedef bool(*receive_t)(uint64_t receiver, uint64_t time, uint16_t count, const stdsrc::uchar_t** names, const stdsrc::uchar_t** values, double progress);
+    typedef uint64_t(*get_receiver_t)(const stdsrc::uchar_t* provider, const stdsrc::uchar_t* opcode, const stdsrc::uchar_t* taskName);
+
+    SEA_EXPORT bool parse_standard_source(const char* file, get_receiver_t get_receiver, receive_t receive)
+    {
+        STDSRC_CHECK_RET(file, false);
+        class Receiver : public stdsrc::Receiver
+        {
+        protected:
+            uint64_t m_receiver = 0;
+            receive_t m_receive = nullptr;
+            stdsrc::Reader& m_reader;
+
+        public:
+            Receiver(stdsrc::Reader& reader, uint64_t receiver, receive_t receive)
+                : m_receiver(receiver)
+                , m_reader(reader)
+                , m_receive(receive)
+            {
+            }
+
+            virtual bool onEvent(uint64_t time, const stdsrc::CVariantTree& props)
+            {
+                size_t size = props.get_bags().size();
+                std::vector<const stdsrc::uchar_t*> names(size), values(size);
+                std::vector<stdsrc::ustring> values_temp(size);
+                names.reserve(size);
+                values.reserve(size);
+                size_t i = 0;
+                for (const auto& pair : props.get_bags())
+                {
+                    const stdsrc::CVariantTree& prop = pair.second;
+                    const stdsrc::CVariant& name = prop.get_variant(stdsrc::bagname::Name);
+                    names[i] = name.is_empty() ? nullptr : name.get<stdsrc::ustring>().c_str();
+                    const stdsrc::CVariant& value = prop.get_variant(stdsrc::bagname::Value);
+                    values[i] = value.is_empty() ? nullptr : value.as_str(values_temp[i]).c_str();
+                    ++i;
+                }
+                return m_receive(m_receiver, time, (uint16_t)size, size ? &names[0] : nullptr, size ? &values[0] : nullptr, m_reader.getProgress());
+            }
+        };
+
+        class Reader : public stdsrc::Reader
+        {
+            get_receiver_t m_get_receiver = nullptr;
+            receive_t m_receive = nullptr;
+        public:
+            Reader(get_receiver_t get_receiver, receive_t receive)
+                : m_get_receiver(get_receiver)
+                , m_receive(receive)
+            {
+            }
+            virtual stdsrc::Receiver::Ptr getReceiver(
+                const stdsrc::ustring& provider, const stdsrc::ustring& opcode, const stdsrc::ustring& taskName,
+                stdsrc::CVariantTree& props)
+            {
+                uint64_t receiver = m_get_receiver(provider.c_str(), opcode.c_str(), taskName.c_str());
+                if (!receiver) return nullptr;
+                return std::make_shared<Receiver>(*this, receiver, m_receive);
+            }
+        };
+        Reader reader(get_receiver, receive);
+        std::string path(file);
+#ifdef _WIN32
+        if (path.substr(path.size() - 4) == ".etl")
+            return stdsrc::readETLFile(reader, file, stdsrc::etuRaw);
+#endif
+        return false;
+    };
+#endif
+
+#ifdef _WIN32
+    SEA_EXPORT const char* resolve_pointer(const char* szModulePath, uint64_t addr)
+    {
+        static std::string res;
+        res.clear();
+        static HANDLE hCurProc = GetCurrentProcess();
+        DWORD dwOptions = SymSetOptions((SymGetOptions() | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_INCLUDE_32BIT_MODULES | SYMOPT_ALLOW_ABSOLUTE_SYMBOLS) & ~SYMOPT_DEFERRED_LOADS);
+        static BOOL bInitialize = SymInitialize(hCurProc, NULL, TRUE);
+        if (!bInitialize) return nullptr;
+        static std::map<std::string, uint64_t> modules;
+        uint64_t module = 0;
+        if (modules.count(szModulePath))
+        {
+            module = modules[szModulePath];
+        }
+        else
+        {
+            module = SymLoadModule64(hCurProc, NULL, szModulePath, NULL, 0x800000, 0);
+            modules[szModulePath] = module;
+        }
+        if (!module) return nullptr;
+        IMAGEHLP_LINE64 line = { sizeof(IMAGEHLP_LINE64) };
+        DWORD dwDisplacement = 0;
+        SymGetLineFromAddr64(hCurProc, module + addr, &dwDisplacement, &line);
+        if (line.FileName)
+        {
+            res += std::string(line.FileName) + "(" + std::to_string(line.LineNumber) + ")\n";
+        }
+
+        char buff[sizeof(SYMBOL_INFO) + 1024] = {};
+        SYMBOL_INFO * symbol = (SYMBOL_INFO*)buff;
+        symbol->MaxNameLen = 255;
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        SymFromAddr(hCurProc, module + addr, nullptr, symbol);
+        res += symbol->Name;
+        return res.c_str();
+    }
+#endif
+}
+
+#if defined(STANDARD_SOURCES) && defined(_DEBUG)
+
+bool receive(uint64_t, uint64_t time, uint16_t count, const stdsrc::uchar_t** names, const stdsrc::uchar_t** values, double progress)
+{
+    return true;
+}
+
+uint64_t get_receiver(const stdsrc::uchar_t* provider, const stdsrc::uchar_t* opcode, const stdsrc::uchar_t* taskName)
+{
+    return (uint64_t)&receive;
+}
+
+#endif

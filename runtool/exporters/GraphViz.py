@@ -59,7 +59,7 @@ class GraphViz(GraphCombiner):
         self.file.close()
 
     @staticmethod
-    def join_traces(traces, output):
+    def join_traces(traces, output, args):
         with open(output + ".gv", 'wb') as outfile:
             outfile.write("digraph G{\n")
             index = 0

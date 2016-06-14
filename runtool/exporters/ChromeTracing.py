@@ -1,13 +1,38 @@
 import os
+import sys
 import json
 import subprocess
-from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst, get_importers
+from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst, get_importers, PseudoProgress
 
 MAX_GT_SIZE = 50 * 1024 * 1024
-GT_FLOAT_TIME = False
+GT_FLOAT_TIME = True
 
 
 class GoogleTrace(TaskCombiner):
+    class ContextSwitch:
+        def __init__(self, file):
+            self.file = file
+            self.ftrace = None
+
+        def write(self, time, cpu, prev_tid, prev_state, next_tid, prev_prio=0, next_prio=0, prev_name=None, next_name=None):
+            if not prev_name:
+                prev_name = '%d' % prev_tid
+            if not next_name:
+                next_name = '%d' % next_tid
+            if not self.ftrace:
+                self.ftrace = open(self.file, 'w')
+                self.ftrace.write("# tracer: nop\n")
+                args = (prev_name, prev_tid, cpu, time / 1000000000., time / 1000000000.)
+                ftrace = "%s-%d [%03d] .... %.6f: tracing_mark_write: trace_event_clock_sync: parent_ts=%.6f\n" % args
+                self.ftrace.write(ftrace)
+            args = (
+                prev_name, prev_tid, cpu, time / 1000000000.,
+                prev_name, prev_tid, prev_prio, prev_state,
+                next_name, next_tid, next_prio
+            )
+            ftrace = "%s-%d [%03d] .... %.6f: sched_switch: prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s ==> next_comm=%s next_pid=%d next_prio=%d\n" % args
+            self.ftrace.write(ftrace)
+
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, args, tree)
         self.size_keeper = None
@@ -21,8 +46,12 @@ class GoogleTrace(TaskCombiner):
             for trace in self.args.trace:
                 if trace.endswith(".etl"):
                     self.handle_etw_trace(trace)
-                else:
+                elif trace.endswith(".ftrace"):
                     self.handle_ftrace(trace)
+                elif trace.endswith(".dtrace"):
+                    self.handle_dtrace(trace)
+                else:
+                    print "Error: unsupported extension:", trace
         self.start_new_trace()
 
     def start_new_trace(self):
@@ -65,7 +94,6 @@ class GoogleTrace(TaskCombiner):
         self.targets.append(self.args.output + '.cut.ftrace')
         with open(self.targets[-1], 'w') as file:
             for line in GoogleTrace.read_ftrace_lines(trace, time_sync):
-                # XXX if line.startswith('#') or 0 < len(time_sync) < 10: #we don't need anything outside proc execution but comments
                 file.write(line)
         sync = self.apply_time_sync(time_sync)
 
@@ -92,10 +120,22 @@ class GoogleTrace(TaskCombiner):
         (self.args.input, self.args.output, self.args.trace) = save
 
         self.targets += res
+        return res
 
+    def handle_dtrace(self, trace):
+        save = (self.args.input, self.args.output, self.args.trace)
+        (self.args.input, self.args.output, self.args.trace) = (trace, trace, None)
+        res = get_importers()['dtrace'](self.args)
+        (self.args.input, self.args.output, self.args.trace) = save
+        self.targets += res
         return res
 
     def apply_time_sync(self, time_sync):
+        self.source_scale_start, self.target_scale_start, self.ratio = GoogleTrace.calc_time_sync(time_sync)
+        return self.source_scale_start, self.target_scale_start, self.ratio
+
+    @staticmethod
+    def calc_time_sync(time_sync):
         if len(time_sync) < 2:  # too few markers to sync
             return None
         Target = 0
@@ -127,15 +167,15 @@ class GoogleTrace(TaskCombiner):
 
         # From these runs obvious that in all cases the closest points (I) of global timeline are:
         # Quarter to end of Source and Quarter after begin of Target
-        self.source_scale_start = time_sync[index - 1][Source] + int(diff[Source] * 0.75)  # to keep the precision
-        self.target_scale_start = (time_sync[index - 1][Target] + (diff[Target] * 0.25)) * 1000000. #multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
+        source_scale_start = time_sync[index - 1][Source] + int(diff[Source] * 0.75)  # to keep the precision
+        target_scale_start = (time_sync[index - 1][Target] + (diff[Target] * 0.25)) * 1000000. #multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
 
         print "Timelines correlation precision is +- %f us" % (diff[Target] / 2. * 1000000.)
 
         # taking farest time points to calculate frequencies
         diff = (time_sync[-1][Target] - time_sync[0][Target], time_sync[-1][Source] - time_sync[0][Source])
-        self.ratio = 1000000. * diff[Target] / diff[Source]  # when you multiply Source value with this ratio you get Target units, multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
-        return [self.source_scale_start, self.target_scale_start, self.ratio]
+        ratio = 1000000. * diff[Target] / diff[Source]  # when you multiply Source value with this ratio you get Target units, multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
+        return source_scale_start, target_scale_start, ratio
 
     def global_metadata(self, data):
         if data['str'] == "__process__":  # this is the very first record in the trace
@@ -169,7 +209,7 @@ class GoogleTrace(TaskCombiner):
         self.file.write(template % ("s", items[0]['pid'], items[0]['tid'], self.convert_time(items[0]['time']), data['parent'], data['str'], data['domain']))
         self.file.write(template % ("f", items[1]['pid'], items[1]['tid'], self.convert_time(items[1]['time']), data['parent'], data['str'], data['domain']))
 
-    def format_value(self, arg): #this function must add quotes if value is string, and not number/float, do this recursively for dictionary
+    def format_value(self, arg):  # this function must add quotes if value is string, and not number/float, do this recursively for dictionary
         if type(arg) == type({}):
             return "{" + ", ".join(['"%s":%s' % (key, self.format_value(value)) for key, value in arg.iteritems()]) + "}"
         try:
@@ -203,7 +243,7 @@ class GoogleTrace(TaskCombiner):
 
         if not res:
             return
-        if type in ['task', 'counter'] and begin.has_key('data') and begin.has_key('str'): #FIXME: move closer to the place where stack is demanded
+        if type in ['task', 'counter'] and begin.has_key('data') and begin.has_key('str'):  # FIXME: move closer to the place where stack is demanded
             self.handle_stack(begin, resolve_stack(self.args, self.tree, begin['data']), begin['str'])
         if self.args.debug and begin['type'] != 7:
             res = "".join(res)
@@ -223,7 +263,7 @@ class GoogleTrace(TaskCombiner):
         if not stack:
             return
         parent = None
-        for frame in reversed(stack):  # going from parents to childs
+        for frame in reversed(stack):  # going from parents to children
             if parent is None:
                 frame_id = '%d' % frame['ptr']
             else:
@@ -287,8 +327,6 @@ class GoogleTrace(TaskCombiner):
                 name += begin['str'] + ":"
             if begin.has_key('pointer'):
                 name += "func<" + to_hex(begin['pointer']) + ">:"
-            if begin.has_key('id') and type != "overlapped":
-                name += "(" + to_hex(begin['id']) + ")"
             else:
                 name = name.rstrip(":")
 
@@ -357,35 +395,57 @@ class GoogleTrace(TaskCombiner):
         self.file.close()
 
     @staticmethod
-    def join_traces(traces, output):
+    def join_traces(traces, output, args):
+        ftrace = []  # ftrace files have to be joint by time: chrome reads them in unpredictable order and complains about time
+        for file in traces:
+            if file.endswith('.ftrace') and 'merged.ftrace' != os.path.basename(file):
+                ftrace.append(file)
+        if len(ftrace) > 1:  # just concatenate all files in order of creation
+            ftrace.sort()  # name defines sorting
+            merged = os.path.join(os.path.dirname(ftrace[0]), 'merged.ftrace')
+            with open(merged, 'w') as output_file:
+                for file_name in ftrace:
+                    with open(file_name) as input_file:
+                        for line in input_file:
+                            output_file.write(line)
+            traces = [file for file in traces if not file.endswith('.ftrace')]
+            traces.append(merged)
+
+        if 'INTEL_SEA_CATAPULT' in os.environ:
+            sys.path.append(os.environ['INTEL_SEA_CATAPULT'])
+            from tracing_build import trace2html
+            import codecs
+            with codecs.open(output + '.html', 'w', 'utf-8') as new_file:
+                def WriteHTMLForTracesToFile(trace_filenames, output_file, config_name=None):
+                    trace_data_list = []
+                    for filename in trace_filenames:
+                        with open(filename, 'r') as f:
+                            trace_data = f.read()
+                            try:
+                                trace_data = json.loads(trace_data)
+                            except ValueError:
+                                pass
+                            trace_data_list.append(trace_data)
+                    title = os.path.basename(output).split('_')[0] + ": Intel(R) Single Event API"
+                    trace2html.WriteHTMLForTraceDataToFile(trace_data_list, title, output_file, config_name)
+                with PseudoProgress("Catapulting...") as progress:
+                    WriteHTMLForTracesToFile(traces, new_file)
+            return output + '.html'
+        else:
+            return GoogleTrace.zip_traces(traces, output)
+
+    @staticmethod
+    def zip_traces(traces, output):
         import zipfile
         with zipfile.ZipFile(output + ".zip", 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as zip:
             count = 0
             with Progress(len(traces), 50, "Merging traces") as progress:
-                ftrace = []  # ftrace files have to be joint by time: chrome reads them in unpredictable order and complains about time
                 for file in traces:
-                    if file.endswith('.ftrace'):
-                        if 'merged.ftrace' != os.path.basename(file):
-                            ftrace.append(file)
-                    else:
-                        progress.tick(count)
-                        zip.write(file, os.path.basename(file))
-                        count += 1
-                if len(ftrace) > 0:  # just concatenate all files in order of creation
-                    if len(ftrace) == 1:
-                        zip.write(ftrace[0], os.path.basename(ftrace[0]))
-                    else:
-                        ftrace.sort()  # name defines sorting
-                        merged = os.path.join(os.path.dirname(ftrace[0]), 'merged.ftrace')
-                        with open(merged, 'w') as output_file:
-                            for file_name in ftrace:
-                                with open(file_name) as input_file:
-                                    for line in input_file.readlines():
-                                        output_file.write(line)
-                                progress.tick(count)
-                                count += 1
-                        zip.write(merged, os.path.basename(merged))
+                    progress.tick(count)
+                    zip.write(file, os.path.basename(file))
+                    count += 1
         return output + ".zip"
+
 
 EXPORTER_DESCRIPTORS = [{
     'format': 'gt',

@@ -1,6 +1,9 @@
 import os
+import sys
 import struct
-from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, ProgressConst, TaskTypes, format_bytes
+from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, ProgressConst, TaskTypes, format_bytes, build_tid_map, resolve_pointer
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+import sea
 
 class ETWXML:
     def __init__(self, callback, providers):
@@ -98,6 +101,46 @@ class ETWXML:
         return unhandled_providers
 
 
+class STDSRCReader:
+
+    class Receiver:
+        def __init__(self, reader, provider, opcode, taskName):
+            self.reader, self.provider, self.opcode, self.taskName = reader, provider.strip(), opcode.strip(), taskName.strip()
+
+        def parse_system(self, time, args):
+            return {
+                'time': time,
+                'Task': self.taskName, 'Opcode': self.opcode, 'provider': self.provider,
+                'pid': args['hdr:ProcessId'], 'tid': args['hdr:ThreadId'], 'cpu': args['hdr:ProcessorNumber']
+            }
+
+        def receive(self, time, args):
+            system = self.parse_system(time, args)
+            system['EventName'] = system['Task']
+            data = dict((key, val) for (key, val) in args.iteritems() if key and not key.startswith('hdr:'))
+            self.reader.on_event(system, data, system)
+
+    def __init__(self, args, on_event, providers):
+        self.on_event = on_event
+        self.providers = providers
+        self.progress = 0.
+        sea.prepare_environ(args)
+
+    def set_progress(self, progress):
+        self.progress = progress
+
+    def tell(self):
+        return self.progress * 1000
+
+    def get_receiver(self, provider, opcode, taskName):
+        if provider not in self.providers:
+            return 0
+        return STDSRCReader.Receiver(self, provider, opcode, taskName)
+
+    def parse(self, file):
+        itt = sea.ITT("python")
+        return itt.parse_standard_source(file, self)
+
 DMA_PACKET_TYPE = ["CLIENT_RENDER", "CLIENT_PAGING", "SYSTEM_PAGING", "SYSTEM_PREEMTION"]
 QUEUE_PACKET_TYPE = ["RENDER", "DEFERRED", "SYSTEM", "MMIOFLIP", "WAIT", "SIGNAL", "DEVICE", "SOFTWARE", "PAGING"]
 QUANTUM_STATUS = ["READY", "RUNNING", "EXPIRED", "PROCESSED_EXPIRE"]
@@ -108,22 +151,97 @@ SYNC_REASON = ['CREATE', 'DESTROY', 'OPEN', 'CLOSE', 'REPORT']
 OPCODES = ['Info', 'Start', 'Stop', 'DCStart', 'DCEnd', 'Extension']
 
 
-class ETWXMLHandler:
+def parse_int(text):
+    if text.startswith('0x'):
+        return int(text, 16)
+    else:
+        return int(text)
+
+
+def volume_to_drive(path, drives={}):
+    if not drives:
+        import ctypes
+        from ctypes.wintypes import create_unicode_buffer
+        buffer = create_unicode_buffer(1024)
+        for letter in range(ord('a'), ord('z') + 1):
+            drive = unicode(chr(letter) + ':').upper()
+            if not ctypes.windll.kernel32.QueryDosDeviceW(drive, buffer, 1024):
+                continue
+            drives[buffer.value] = drive
+        drives[r'\SystemRoot'] = os.path.expandvars('%systemroot%')
+    for (volume, drive) in drives.iteritems():
+        path = path.replace(volume, drive)
+    assert ('systemroot' not in path.lower())
+    return path
+
+
+class GPUQueue:
     def __init__(self, args, callbacks):
         self.args = args
         self.callbacks = callbacks
+        self.packets = {}
+
+    def auto_break_gui_packets(self, call_data, tid, begin):
+        id = call_data['id']
+        if begin:
+            call_data['realtime'] = call_data['time']  # as we gonna change 'time'
+            call_data['lost'] = 0
+            self.packets.setdefault(tid, {})[id] = call_data
+        else:
+            if tid in self.packets and id in self.packets[tid]:
+                packets = self.packets[tid]
+                real_time = packets[id]['realtime']
+                to_remove = []
+                del packets[id]  # the task has ended, removing it from the pipeline
+                time_shift = 0
+                for begin_data in sorted(packets.itervalues(), key=lambda data: data['realtime']):  # finish all and start again to form melting task queue
+                    time_shift += 1  # making sure the order of tasks on timeline, probably has to be done in Chrome code rather
+                    end_data = begin_data.copy()  # the end of previous part of task is also here
+                    end_data['time'] = call_data['time'] - time_shift  # new begin for every task is here
+                    end_data['type'] = call_data['type']
+                    self.callbacks.on_event('task_end_overlapped', end_data)  # finish it
+                    if begin_data['realtime'] < real_time:
+                        begin_data['lost'] += 1
+                    if begin_data['lost'] > 10:  # we seem lost the end ETW call
+                        to_remove.append(begin_data['id'])  # main candidate is the event that started earlier but nor finished when finished the one started later
+                    else:
+                        begin_data['time'] = call_data['time'] + time_shift  # new begin for every task is here
+                        self.callbacks.on_event('task_begin_overlapped', begin_data)  # and start again
+                for id in to_remove:  # FIXME: but it's better somehow to detect never ending tasks and not show them at all or mark somehow
+                    del packets[id]  # the task end was probably lost
+
+
+
+class ETWXMLHandler(GPUQueue):
+    def __init__(self, args, callbacks):
+        GPUQueue.__init__(self, args, callbacks)
         self.count = 0
         self.process_names = {}
+        self.thread_names = {}
         self.thread_pids = {}
         self.ftrace = open(args.input + '.ftrace', 'w') if "gt" in args.format else None
         self.first_ftrace_record = True
-        self.gui_packets = {}
         self.files = {}
         self.irps = {}
         self.context_to_node = {}
+        self.tid_map = build_tid_map(self.args, self.args.user_input)
+        self.prev_switch = None
+        self.tids = set()
+        self.images = {}
+
+        self.static = {'queue': {}, 'frames': {}, 'paging': {}, 'dmabuff': {}, 'tex2d': {}, 'resident': {}, 'fence': {}}
+        """ FIXME: move to this:
+        self.queue = {}
+        self.frames = {}
+        self.paging = {}
+        self.dmabuff = {}
+        self.tex2d = {}
+        self.resident = {}
+        self.fence = {}
+        """
 
     def convert_time(self, time):
-        return 1000000000 * (int(time, 16) if '0x' in str(time) else int(time)) / self.PerfFreq
+        return 1000000000 * (parse_int(time) if isinstance(time, basestring) else time) / self.PerfFreq
 
     def MapReasonToState(self, state, wait_reason):
         if wait_reason in [5, 12]:  # Suspended, WrSuspended
@@ -198,7 +316,7 @@ class ETWXMLHandler:
             if self.process_names.has_key(pid):
                 name = self.process_names[pid]['name']
             else:
-                name = "PID:%d" % int(pid, 16)
+                name = "PID:%d" % parse_int(pid)
         else:
             name = "TID:%d" % tid
         return name
@@ -214,17 +332,17 @@ class ETWXMLHandler:
             if info['Opcode'] == 'Header':
                 self.PerfFreq = int(data['PerfFreq'])
                 for callback in self.callbacks.callbacks:
-                    callback("metadata_add", {'domain':'GPU', 'str':'__process__', 'pid':-1, 'tid':-1, 'data':'GPU Engines', 'time': self.convert_time(system['time']), 'delta': -2})
+                    callback("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': -1, 'tid': -1, 'data': 'GPU Engines', 'time': self.convert_time(system['time']), 'delta': -2})
         elif info['EventName'] == 'DiskIo':
             if info['Opcode'] in ['FileDelete', 'FileRundown']:
                 if self.files.has_key(data['FileObject']):
                     file = self.files[data['FileObject']]
                     if file.has_key('pid'):
-                        call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':11, 'id': int(data['FileObject'], 16)}
+                        call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':11, 'id': parse_int(data['FileObject'])}
                         self.callbacks.on_event("object_delete", call_data)
                     del self.files[data['FileObject']]
             elif info['Opcode'] in ['Read', 'Write', 'HardFault', 'FlushBuffers', 'WriteInit', 'ReadInit', 'FlushInit']:
-                tid = int(data['IssuingThreadId']) if data.has_key('IssuingThreadId') else int(data['TThreadId'], 16) if data.has_key('TThreadId') else None
+                tid = int(data['IssuingThreadId']) if data.has_key('IssuingThreadId') else parse_int(data['TThreadId']) if data.has_key('TThreadId') else None
                 if tid == None:
                     return
                 if not data.has_key('FileObject'):
@@ -234,8 +352,8 @@ class ETWXMLHandler:
                         return
                 if self.files.has_key(data['FileObject']) and self.thread_pids.has_key(tid):
                     file = self.files[data['FileObject']]
-                    pid = int(self.thread_pids[tid], 16)
-                    call_data = {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':10, 'id': int(data['FileObject'], 16)}
+                    pid = parse_int(self.thread_pids[tid])
+                    call_data = {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type': 10, 'id': parse_int(data['FileObject'])}
                     file['tid'] = tid
                     file['pid'] = pid
                     if file['creation'] != None:  # write creation on first operation where tid is known
@@ -260,12 +378,12 @@ class ETWXMLHandler:
                 file_name = self.handle_file_name(data['OpenPath'])
                 if '.sea/' not in file_name:  # ignore own files - they are toooo many in the view
                     self.files[data['FileObject']] = {'name': file_name, 'creation': None}
-                    call_data = {'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file_name, 'type':9, 'id': int(data['FileObject'], 16)}
+                    call_data = {'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file_name, 'type':9, 'id': parse_int(data['FileObject'])}
                     self.callbacks.on_event("object_new", call_data)
             elif info['Opcode'] in ['Close', 'FileDelete', 'Delete']:
                 if self.files.has_key(data['FileObject']):
                     file = self.files[data['FileObject']]
-                    call_data = {'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':11, 'id': int(data['FileObject'], 16)}
+                    call_data = {'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':11, 'id': parse_int(data['FileObject'])}
                     self.callbacks.on_event("object_delete", call_data)
                     del self.files[data['FileObject']]
             elif info['Opcode'] not in ['OperationEnd', 'Cleanup', 'QueryInfo']:
@@ -273,7 +391,7 @@ class ETWXMLHandler:
                     file = self.files[data['FileObject']]
                     tid = int(system['tid'])
                     pid = int(system['pid'])
-                    call_data = {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':10, 'id': int(data['FileObject'], 16)}
+                    call_data = {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type': 10, 'id': parse_int(data['FileObject'])}
                     file['tid'] = tid
                     file['last_access'] = call_data['time']
                     file['pid'] = pid
@@ -289,7 +407,10 @@ class ETWXMLHandler:
                     self.process_names[data['ProcessId']] = {'name': data['ImageFileName'].split('.')[0], 'cmd': data['CommandLine']}
                 elif event == 'Thread':
                     pid = data['ProcessId'] if '0x0' != data['ProcessId'] else hex(int(system['pid']))
-                    self.thread_pids[int(data['TThreadId'], 16)] = pid
+                    self.thread_pids[parse_int(data['TThreadId'])] = pid
+                elif event == 'Image':
+                    tree = self.images.setdefault(parse_int(data['ProcessId']), default_tree())
+                    tree['modules'][parse_int(data['ImageBase'])] = [volume_to_drive(data['FileName']), parse_int(data['ImageSize'])]
             elif info['Opcode'] == 'CSwitch':
                 if self.ftrace is None and not self.first_ftrace_record:
                     return
@@ -297,11 +418,21 @@ class ETWXMLHandler:
                 if not self.callbacks.check_time_in_limits(time):
                     return
                 # mandatory: prevState, nextComm, nextPid, nextPrio
-                prev_tid = int(data['OldThreadId'], 16)
+                prev_tid = parse_int(data['OldThreadId'])
+                self.tids.add(prev_tid)
+                next_tid = parse_int(data['NewThreadId'])
+                self.tids.add(next_tid)
+                if self.args.strip_aliens:
+                    if prev_tid not in self.tid_map:
+                        prev_tid = 0
+                    if next_tid not in self.tid_map:
+                        next_tid = 0
+                    if prev_tid == next_tid or (prev_tid, next_tid) == self.prev_switch:
+                        return
+                    self.prev_switch = (prev_tid, next_tid)
                 prev_name = self.get_process_name_by_tid(prev_tid)
-                next_tid = int(data['NewThreadId'], 16)
 
-                if self.first_ftrace_record:
+                if self.first_ftrace_record:  # FIXME: use GoogleTrace.ContextSwitch
                     self.ftrace = open(self.args.input + '.ftrace', 'w') if "gt" in self.args.format else None
                     self.first_ftrace_record = False
                     if not self.ftrace:
@@ -317,31 +448,32 @@ class ETWXMLHandler:
                 )
                 ftrace = "%s-%d [%03d] .... %.6f: sched_switch: prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s ==> next_comm=%s next_pid=%d next_prio=%d\n" % args
                 self.ftrace.write(ftrace)
+            elif info['Opcode'] == 'Load':
+                tree = self.images.setdefault(parse_int(data['ProcessId']), default_tree())
+                tree['modules'][parse_int(data['ImageBase'])] = [volume_to_drive(data['FileName']), parse_int(data['ImageSize'])]
+            elif info['Opcode'] == 'Stack':
+                pid = parse_int(data['StackProcess'])
+                if pid in self.images:
+                    stack = [0] * (len(data) - 3)
+                    for key in data.iterkeys():
+                        num = key[5:]
+                        if key.startswith('Stack') and num.isdigit():
+                            stack[int(num) - 1] = parse_int(data[key]) if data[key] else 0
+                    self.on_stack(data['EventTimeStamp'], pid, parse_int(data['StackThread']), stack)
 
-    def auto_break_gui_packets(self, call_data, tid, begin):
-        id = call_data['id']
-        if begin:
-            call_data['realtime'] = call_data['time']  # as we gonna change 'time'
-            self.gui_packets.setdefault(tid, {})[id] = call_data
-        else:
-            if self.gui_packets.has_key(tid) and self.gui_packets[tid].has_key(id):
-                packets = self.gui_packets[tid]
-                real_time = packets[id]['realtime']
-                to_remove = []
-                del packets[id]  # the task has ended, removing it from the pipeline
-                for begin_data in packets.itervalues():  # finish all and start again to form melting task queue
-                    begin_data['time'] = call_data['time']  # new begin for every task is here
-                    end_data = begin_data.copy()  # the end of previous part of task is also here
-                    end_data['type'] = call_data['type']
-                    self.callbacks.on_event('task_end_overlapped', end_data)  # finish it
-                    if len(packets) > 10 and begin_data['realtime'] < real_time:  # packet line is too long we seem lost the end ETW call
-                        to_remove.append(begin_data['id'])  # main candidate is the event that started earlier but nor finished when finished the one started later
-                    else:
-                        self.callbacks.on_event('task_begin_overlapped', begin_data)  # and start again
-                for id in to_remove:  # FIXME: but it's better somehow to detect never ending tasks and not show them at all or mark somehow
-                    del packets[id]  # the task end was probably lost
+    def on_stack(self, time, pid, tid, stack):
+        new_stack = []
+        for addr in stack:
+            res = {'ptr': addr}
+            if resolve_pointer(self.args, self.images[pid], addr, res):
+                new_stack.append(res)
+        if not new_stack:
+            return
+        for callback in self.callbacks.callbacks:
+            callback.handle_stack({'tid': tid, 'time': self.convert_time(parse_int(time))}, new_stack, 'sampling')
 
-    def on_event(self, system, data, info, static={'queue': {}, 'frames': {}, 'paging': {}, 'dmabuff': {}, 'tex2d': {}, 'resident': {}, 'fence': {}}):
+    def on_event(self, system, data, info):
+        static = self.static  # FIXME: move to self. notation everywhere
         if self.count % (ProgressConst / 4) == 0:
             self.progress.tick(self.file.tell())
         self.count += 1
@@ -349,15 +481,14 @@ class ETWXMLHandler:
             return
         if not isinstance(data, dict):
             return self.on_binary(system, data, info)
-        opcode = info['Opcode'] if info.has_key('Opcode') else ""
-        if system['provider'] == '{9e814aad-3204-11d2-9a82-006008a86939}':  # MSNT_SystemTrace
+        opcode = info['Opcode'] if ('Opcode' in info) else ""
+        if system['provider'] in ['MSNT_SystemTrace', '{9e814aad-3204-11d2-9a82-006008a86939}']:  # MSNT_SystemTrace
             return self.MSNT_SystemTrace(system, data, info)
 
         call_data = {
             'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': system['provider'],
-            'time': self.convert_time(data['SyncQPCTime'] if data.has_key('SyncQPCTime') else system['time']),
-            'str': info['Task'] if info.has_key('Task') and info['Task'] else 'Unknown',
-            'args': data,
+            'time': self.convert_time(data['SyncQPCTime'] if ('SyncQPCTime' in data) else system['time']),
+            'str': info['Task'] if ('Task' in info) and info['Task'] else 'Unknown',
         }
 
         if call_data['str'] == 'SelectContext':  # Microsoft-Windows-DxgKrnl
@@ -366,7 +497,7 @@ class ETWXMLHandler:
             self.context_to_node[context] = node
             return
 
-        if data.has_key('QuantumStatus'):
+        if 'QuantumStatus' in data:
             quantum_status = int(data['QuantumStatus'])
             if quantum_status < len(QUANTUM_STATUS):
                 data['QuantumStatusStr'] = QUANTUM_STATUS[quantum_status]
@@ -394,9 +525,12 @@ class ETWXMLHandler:
             call_data['str'] = DMA_PACKET_TYPE[PacketType] if PacketType < len(DMA_PACKET_TYPE) else str(PacketType)
             id = int(data['uliSubmissionId'] if data.has_key('uliSubmissionId') else data['uliCompletionId'])
             call_data['id'] = id
+            call_data['str'] += ":%d" % id
             if 'Start' in opcode:
                 if static['queue'].has_key(int(data['ulQueueSubmitSequence'])):
-                    relation = (call_data.copy(), static['queue'][int(data['ulQueueSubmitSequence'])], call_data)
+                    relation = (call_data.copy(), static['queue'][int(data['ulQueueSubmitSequence'])].copy(), call_data)
+                    if 'realtime' in relation[1]:
+                        relation[1]['time'] = relation[1]['realtime']
                     relation[0]['parent'] = id
                 self.auto_break_gui_packets(call_data, 2 ** 64 + tid, True)
             else:
@@ -406,6 +540,8 @@ class ETWXMLHandler:
             if 'Info' in opcode:
                 return
             call_data['tid'] = -call_data['tid']
+            if call_data['tid'] not in self.thread_names:
+                self.thread_names[call_data['tid']] = ("CPU Queue", call_data['pid'])
             id = int(data['SubmitSequence'])
             if not data.has_key('PacketType'):  # workaround, PacketType is not set for Waits
                 if data.has_key('FenceValue'):
@@ -415,7 +551,15 @@ class ETWXMLHandler:
             else:
                 PacketType = long(data['PacketType'])
                 call_data['str'] = QUEUE_PACKET_TYPE[PacketType] if PacketType < len(QUEUE_PACKET_TYPE) else str(PacketType)
+            if 'bPresent' in data and data['bPresent'] in ['1', 'true']:
+                call_data['str'] = "PRESENT_" + call_data['str']
+            if 'bPreempted' in data and data['bPreempted'] in ['1', 'true']:
+                call_data['str'] += ":PREEMPTED"
+            if 'bTimeouted' in data and data['bTimeouted'] in ['1', 'true']:
+                call_data['str'] += ":TIMEOUTED"
+
             call_data['id'] = id
+            call_data['str'] += ":%d" % id
             if 'Start' in opcode:
                 if static['queue'].has_key(id):  # forcefully closing the previous one
                     closing = call_data.copy()
@@ -437,14 +581,14 @@ class ETWXMLHandler:
                 self.auto_break_gui_packets(call_data, call_data['tid'], False)
 
         elif call_data['str'] == 'SCHEDULE_FRAMEINFO':  # Microsoft-Windows-Dwm-Core
-            presented = int(data['qpcPresented'], 16)
+            presented = parse_int(data['qpcPresented'])
             if presented:
-                begin = int(data['qpcBegin'], 16)
+                begin = parse_int(data['qpcBegin'])
                 call_data['time'] = self.convert_time(begin)
                 call_data['type'] = 7  # to make it frame
                 call_data['pid'] = -1  # to make it GUI
                 del call_data['tid']  # to be global for GUI
-                end_data = {'time': self.convert_time(int(data['qpcFrame'], 16))}
+                end_data = {'time': self.convert_time(parse_int(data['qpcFrame']))}
                 self.callbacks.complete_task('frame', call_data, end_data)
             return
 
@@ -465,20 +609,22 @@ class ETWXMLHandler:
                     return
                 data.update(saved)
                 static['fence'][data['PagingFenceValue']] = call_data
-            call_data['id'] = int(data['pSyncObject'], 16)
+            call_data['id'] = parse_int(data['pSyncObject'])
 
         elif call_data['str'] == 'PagingQueuePacket':  # Microsoft-Windows-DxgKrnl
             if 'Info' in opcode:
                 return
             call_data['tid'] = -call_data['tid']
-            id = int(data['PagingQueuePacket'], 16)
+            if call_data['tid'] not in self.thread_names:
+                self.thread_names[call_data['tid']] = ("CPU Queue", call_data['pid'])
+            id = parse_int(data['PagingQueuePacket'])
             call_data['id'] = id
             if data.has_key('PagingQueueType'):
                 VidMmOpType = int(data['VidMmOpType'])
                 PagingQueueType = int(data['PagingQueueType'])
                 call_data['str'] = (PAGING_QUEUE_TYPE[PagingQueueType] if PagingQueueType < len(PAGING_QUEUE_TYPE) else str(PagingQueueType)) + ":" + (VIDMM_OPERATION[VidMmOpType] if VidMmOpType in VIDMM_OPERATION else str(VidMmOpType))
                 static['paging'][id] = call_data
-            elif static['paging'].has_key(id):
+            elif static['paging'].has_key(id):  # doesn't have type on end
                 start = static['paging'][id]
                 call_data['str'] = start['str']
                 call_data['pid'] = start['pid']
@@ -486,16 +632,19 @@ class ETWXMLHandler:
                 del static['paging'][id]
 
         elif call_data['str'] == 'PagingPreparation':  # Microsoft-Windows-DxgKrnl
-            if 'Info' in opcode: return
+            if 'Info' in opcode:
+                return
             pDmaBuffer = data['pDmaBuffer']
-            call_data['id'] = int(pDmaBuffer, 16)
+            call_data['id'] = parse_int(pDmaBuffer)
             if 'Stop' in opcode and static['dmabuff'].has_key(pDmaBuffer):
                 call_data['args'].update(static['dmabuff'][pDmaBuffer])
                 del static['dmabuff'][pDmaBuffer]
         elif call_data['str'] == 'AddDmaBuffer':  # Microsoft-Windows-DxgKrnl
             static['dmabuff'][data['pDmaBuffer']] = data  # parse arguments for PagingPreparation from AddDmaBuffer
             return
-
+        elif call_data['str'] == 'VSyncDPC':  # Microsoft-Windows-DxgKrnl
+            call_data['domain'] = 'gpu'
+            call_data['str'] = 'vblank'
         elif call_data['str'] == 'Present':  # Microsoft-Windows-DxgKrnl
             if 'Start' in opcode:
                 call_data["type"] = 0
@@ -557,7 +706,7 @@ class ETWXMLHandler:
     def finish(self):
         for id, file in self.files.iteritems():
             if file.has_key('last_access'):  # rest aren't rendered anyways
-                call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': file['last_access'], 'str': file['name'], 'type':11, 'id': int(id, 16)}
+                call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': file['last_access'], 'str': file['name'], 'type':11, 'id': parse_int(id)}
                 self.callbacks.on_event("object_delete", call_data)
 
     def on_binary(self, system, data, info):
@@ -615,25 +764,35 @@ class ETWXMLHandler:
             return self.on_event(system, {'SubmitSequence': submitSequence, 'PacketType': packetType}, new_info)
 
     def parse(self):
-        with open(self.args.input) as file:
-            self.file = file
-            size = os.path.getsize(self.args.input)
-            with Progress(size, 50, 'Parsing ETW XML: %s (%s)' % (os.path.basename(self.args.input), format_bytes(size))) as progress:
+        providers = [
+            'Microsoft-Windows-DXGI',
+            # 'Microsoft-Windows-Direct3D11',
+            # 'Microsoft-Windows-D3D10Level9',
+            # 'Microsoft-Windows-Win32k',
+            'Microsoft-Windows-DxgKrnl',
+            'Microsoft-Windows-Dwm-Core',
+            '{9e814aad-3204-11d2-9a82-006008a86939}',  # MSNT_SystemTrace
+            'MSNT_SystemTrace',
+            # 'Microsoft-Windows-Shell-Core'
+            None  # Win7 events
+        ]
+        if self.args.input.endswith('.xml'):
+            with open(self.args.input) as file:
+                self.file = file
+                size = os.path.getsize(self.args.input)
+                with Progress(size, 50, 'Parsing ETW XML: %s (%s)' % (os.path.basename(self.args.input), format_bytes(size))) as progress:
+                    self.progress = progress
+                    etwxml = ETWXML(self.on_event, providers)
+                    unhandled_providers = etwxml.parse(file)
+                    self.finish()
+                print "Unhandled providers:", str(unhandled_providers)
+        elif self.args.input.endswith('.etl'):
+            with Progress(1000, 50, 'Parsing ETW XML: %s (%s)' % (os.path.basename(self.args.input), format_bytes(os.path.getsize(self.args.input)))) as progress:
                 self.progress = progress
-                etwxml = ETWXML(self.on_event, [
-                    'Microsoft-Windows-DXGI',
-                    # 'Microsoft-Windows-Direct3D11',
-                    # 'Microsoft-Windows-D3D10Level9',
-                    # 'Microsoft-Windows-Win32k',
-                    'Microsoft-Windows-DxgKrnl',
-                    'Microsoft-Windows-Dwm-Core',
-                    '{9e814aad-3204-11d2-9a82-006008a86939}',  # MSNT_SystemTrace
-                    # 'Microsoft-Windows-Shell-Core'
-                    None  # Win7 events
-                ])
-                unhandled_providers = etwxml.parse(file)
+                reader = STDSRCReader(self.args, self.on_event, providers)
+                self.file = reader
+                reader.parse(self.args.input)
                 self.finish()
-            print "Unhandled providers:", str(unhandled_providers)
         if self.ftrace is not None:
             self.ftrace.close()
             for pid, data in self.process_names.iteritems():
@@ -641,7 +800,12 @@ class ETWXMLHandler:
                     proc_name = data['name']
                     if len(data['cmd']) > len(proc_name):
                         proc_name = data['cmd'].replace('\\"', '').replace('"', '')
-                    callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': int(pid, 16), 'tid': -1, 'data': proc_name})
+                    callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': parse_int(pid), 'tid': -1, 'data': proc_name})
+        for tid, (name, pid) in self.thread_names.iteritems():
+            for callback in self.callbacks.callbacks:
+                thread_name = name.replace('\\"', '').replace('"', '')
+                callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (%d)' % (thread_name, tid)})
+
 
 
 def transform_etw_xml(args):
@@ -659,8 +823,15 @@ def transform_etw_xml(args):
         res += [handler.ftrace.name]
     return res
 
-IMPORTER_DESCRIPTORS = [{
+IMPORTER_DESCRIPTORS = [
+{
     'format': 'xml',
     'available': True,
     'importer': transform_etw_xml
-}]
+},
+{
+    'format': 'etl',
+    'available': sys.platform == 'win32',
+    'importer': transform_etw_xml
+}
+]

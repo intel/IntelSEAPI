@@ -118,7 +118,7 @@ class QTProfiler(TaskCombiner):
     def write_footer(self, file):
         file.write('</profilerDataModel><noteData>\n')
         for note in self.notes:
-            args = "\n".join([key + " = " + str(val).replace("{","").replace("}","") for key, val in note[3].iteritems()])
+            args = "\n".join([str(key) + " = " + str(val).replace("{","").replace("}","") for key, val in note[3].iteritems()])
             file.write('<note startTime="%d" duration="%d" eventIndex="%d">%s</note>\n' % (note[0], note[1], note[2], cgi.escape(args)))
         file.write('</noteData><v8profile totalTime="0"/></trace>\n')
 
@@ -134,7 +134,7 @@ class QTProfiler(TaskCombiner):
             self.write_footer(file)
 
     @staticmethod
-    def join_traces(traces, output):  # TODO: implement progress
+    def join_traces(traces, output, args):  # TODO: implement progress
         import xml.dom.minidom as minidom
         output += ".qtd"
         with open(output, "w") as file:  # FIXME: doesn't work on huge traces, consider using "iterparse" approach

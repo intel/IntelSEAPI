@@ -128,7 +128,7 @@ inline T* WriteToBuff(CRecorder& recorder, const T& value)
 }
 namespace sea {
 
-    extern uint64_t g_nRingBuffer;
+    extern int64_t g_nRingBuffer;
 
     extern std::shared_ptr<std::string> g_spCutName;
 
@@ -159,7 +159,7 @@ namespace sea {
         if (it != pThreadRecord->files.end())
         {
             pRecorder = &it->second;
-            uint64_t diff = record.rf.nanoseconds - pRecorder->GetCreationTime();
+            int64_t diff = record.rf.nanoseconds - pRecorder->GetCreationTime(); //timestamp can be in the past, it's ok
             //just checking pointer of g_spCutName.get() is thread safe without any locks: we don't access internals. And if it's the same we work with the old path.
             //but if it's changed we will lock and access the value below
             if (pRecorder->SameCut(g_spCutName.get()) && (!g_nRingBuffer || (diff < g_nRingBuffer)))

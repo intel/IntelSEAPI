@@ -16,13 +16,16 @@
 # ********************************************************************************************************************************************************************************************************************************************************************************************
 
 import os
-import sys
 import imp
+import sea
+import sys
+import time
 import shutil
 import struct
 import tempfile
 import binascii
 from glob import glob
+from datetime import timedelta
 from subprocess import Popen, PIPE
 
 ProgressConst = 20000
@@ -121,7 +124,7 @@ def parse_args(args):
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-c", "--cuts", nargs='*', help='Set "all" to merge all cuts in one trace')
     parser.add_argument("-s", "--sync")
-    parser.add_argument("-m", "--multiproc", action="store_true", help='Allows to capture follow-child mode and handle several processes writing trace')
+    parser.add_argument("-m", "--multiproc", default=True, action="store_false", help='Allows to capture follow-child mode and handle several processes writing trace')
     parser.add_argument("-r", "--ring", type=int, help='Makes trace to cycle inside ring buffer of given length in seconds')
     parser.add_argument("--time_shift", type=int, default=0)
     parser.add_argument("-l", "--limit", help='define')
@@ -133,16 +136,19 @@ def parse_args(args):
     parser.add_argument("--sampling")
     parser.add_argument("--distinct", action="store_true")
     parser.add_argument("--memory", choices=["total", "detailed"], default="total")
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--debug", action="store_true", help='Internal: validation')
+    parser.add_argument("--profile", action="store_true", help='Internal: profile runtool execution')
     parser.add_argument("--collector", choices=list(get_collectors().iterkeys()) + ['default'])
+    parser.add_argument("--strip_aliens", action="store_true", help='Filters out all but target processes')
+    parser.add_argument("--remove_args", action="store_true", help='Deflates trace by removing arguments')
+    parser.add_argument("--rem", help="Comment out: Allows to put everything you don't need")
 
     if "!" in args:
         separator = args.index("!")
         parsed_args = parser.parse_args(args[:separator])
         victim = args[separator + 1:]
         victim[-1] = victim[-1].strip()  # removal of trailing '\r' - when launched from .sh
-        return (parsed_args, victim)
+        return parsed_args, victim
     else:  # nothing to launch, transformation mode
         if args:
             args[-1] = args[-1].strip()  # removal of trailing '\r' - when launched from .sh
@@ -167,7 +173,7 @@ def main():
                 os.makedirs(args.output)
             launch(args, victim)
         else:
-            ext = os.path.splitext(args.input)[1]
+            ext = os.path.splitext(args.input)[1] if not os.path.isdir(args.input) else None
             if not ext:
                 transform_all(args)
             else:
@@ -344,14 +350,17 @@ def launch(args, victim):
     if args.collector:
         tracer = get_collectors()[args.collector](args)
 
+    proc = Popen(victim, env=os.environ, shell=False, cwd=args.dir)
+    setattr(args, 'target', proc.pid)
     if not tracer:
         if 'gt' in args.format and args.output:
             if 'linux' in sys.platform:
                 tracer = get_collectors()['ftrace'](args)
             elif 'win32' == sys.platform:
                 tracer = get_collectors()['etw'](args)
+            elif 'darwin' in sys.platform:
+                tracer = get_collectors()['dtrace'](args)
 
-    proc = Popen(victim, env=os.environ, shell=False, cwd=args.dir)
     proc.wait()
     if tracer:
         args.trace = tracer.stop()
@@ -369,6 +378,8 @@ def transform_all(args):
         saved_output = args.output
         setattr(args, 'user_input', args.output)
         for folder in glob(os.path.join(args.output, 'pid-*')):
+            if not os.path.isdir(folder):
+                continue
             args.input = folder
             args.output = saved_output + '.' + os.path.basename(folder)
             multi_out += transform(args)
@@ -387,7 +398,7 @@ def transform_all(args):
 def join_gt_output(args, output):
     google_traces = [item for item in output if os.path.splitext(item)[1] in ['.json', '.ftrace']]
     if google_traces:
-        res = get_exporters()['gt'].join_traces(google_traces, args.output)
+        res = get_exporters()['gt'].join_traces(google_traces, args.output, args)
         output = list(set(output) - set(google_traces)) + [res]
     return output
 
@@ -408,6 +419,28 @@ def default_tree():
     return {"strings": {}, "domains": {}, "threads": {}, "groups": {}, "modules": {}, "ring_buffer": False, "cuts": set()}
 
 
+def build_tid_map(args, path):
+    tid_map = {}
+
+    def parse_process(src):
+        if not os.path.isdir(src):
+            return
+        pid = src.rsplit('-', 1)[1]
+        if not pid.isdigit():
+            return
+        pid = int(pid)
+        for folder in glob(os.path.join(src, '*', '*.sea')):
+            tid = int(os.path.basename(folder).split('!')[0].split('-')[0].split('.')[0])
+            tid_map[tid] = pid
+
+    if args.multiproc:
+        for folder in glob(os.path.join(path, '*-*')):
+            parse_process(folder)
+    else:
+        parse_process(path)
+    return tid_map
+
+
 def sea_reader(folder):  # reads the structure of .sea format folder into dictionary
     if not os.path.exists(folder):
         print """Error: folder "%s" doesn't exist""" % folder
@@ -418,20 +451,20 @@ def sea_reader(folder):  # reads the structure of .sea format folder into dictio
     toplevel = os.walk(folder).next()
     for filename in toplevel[2]:
         with open("/".join([folder, filename]), "r") as file:
-            if filename.endswith(".str"): #each string_handle_create writes separate file, name is the handle, content is the value
+            if filename.endswith(".str"):  # each string_handle_create writes separate file, name is the handle, content is the value
                 tree["strings"][int(filename.replace(".str", ""))] = file.readline()
             elif filename.endswith(".tid"):  # named thread makes record: name is the handle and content is the value
                 tree["threads"][filename.replace(".tid", "")] = file.readline()
-            elif filename.endswith(".pid"): #named groups (pseudo pids) makes record: group is the handle and content is the value
+            elif filename.endswith(".pid"):  # named groups (pseudo pids) makes record: group is the handle and content is the value
                 tree["groups"][filename.replace(".pid", "")] = file.readline()
             elif filename.endswith(".mdl"):  # registered modules - for symbol resolving
                 parts = file.readline().split()
                 tree["modules"][int(filename.replace(".mdl", ""))] = [' '.join(parts[0:-1]), parts[-1]]
             elif filename == "process.dct":  # process info
                 tree["process"] = eval(file.read())
-    for domain in toplevel[1]:#data from every domain gets recorded into separate folder which is named after the domain name
+    for domain in toplevel[1]:  # data from every domain gets recorded into separate folder which is named after the domain name
         tree["domains"][domain] = {"files": []}
-        for file in os.walk("/".join([folder, domain])).next()[2]: #each thread of this domain has separate file with data
+        for file in os.walk("/".join([folder, domain])).next()[2]:  # each thread of this domain has separate file with data
             if not file.endswith(".sea"):
                 print "Warning: weird file found:", file
                 continue
@@ -469,7 +502,8 @@ class Progress:
     def tick(self, current):
         if g_progress_interceptor:
             g_progress_interceptor(self.message, current, self.total)
-        self.show_progress(int(self.steps * current / self.total))
+        if self.total:
+            self.show_progress(int(self.steps * current / self.total))
 
     def show_progress(self, show_steps):
         if self.shown_steps < show_steps:
@@ -488,6 +522,31 @@ class Progress:
     def set_interceptor(interceptor):
         global g_progress_interceptor
         g_progress_interceptor = interceptor
+
+
+class PseudoProgress(Progress):
+
+    def profiler(self, frame, event, arg):
+        if 'return' not in event:
+            return
+        cur_time = time.time()
+        if cur_time - self.time > 0.2:
+            self.time = cur_time
+            self.tick(cur_time)
+
+    def __init__(self, message=""):
+        self.time = None
+        Progress.__init__(self, 0, 0, message)
+        self.old_profiler = sys.getprofile()
+
+    def __enter__(self):
+        self.time = time.time()
+        sys.setprofile(self.profiler)
+        return self
+
+    def __exit__(self, type, value, traceback):
+        sys.setprofile(self.old_profiler)
+        return Progress.__exit__(self, type, value, traceback)
 
 
 def read_chunk_header(file):
@@ -546,6 +605,10 @@ class Callbacks:
         for fmt in args.format:
             self.callbacks.append(get_exporters()[fmt](args, tree))
         self.parse_limits()
+        self.allowed_pids = set()
+        if hasattr(self.args, 'user_input') and os.path.isdir(self.args.user_input):
+            tid_map = build_tid_map(self.args, self.args.user_input)
+            self.allowed_pids = set(tid_map.itervalues())
 
     def is_empty(self):
         return 0 == len(self.callbacks)
@@ -559,12 +622,19 @@ class Callbacks:
         return False
 
     def on_event(self, type, data):
-        if self.check_time_in_limits(data['time']):
+        if self.check_pid_allowed(data['pid']) and self.check_time_in_limits(data['time']):
+            if self.args.remove_args and 'args' in data:
+                del data['args']
             # copy here as handler can change the data for own good - this shall not affect other handlers
             [callback(type, data.copy()) for callback in self.callbacks]
 
     def complete_task(self, type, begin, end):
-        if self.check_time_in_limits(begin['time']) or self.check_time_in_limits(end['time']):
+        if self.check_pid_allowed(begin['pid']) and (self.check_time_in_limits(begin['time']) or self.check_time_in_limits(end['time'])):
+            if self.args.remove_args:
+                if 'args' in begin:
+                    del begin['args']
+                if 'args' in end:
+                    del end['args']
             # copy here as handler can change the data for own good - this shall not affect other handlers
             [callback.complete_task(type, begin.copy(), end.copy()) for callback in self.callbacks]
 
@@ -573,6 +643,11 @@ class Callbacks:
         for callback in self.callbacks:
             res += callback.get_targets()
         return res
+
+    def check_pid_allowed(self, pid):
+        if not self.args.strip_aliens or pid < 0 or pid in self.allowed_pids:
+            return True
+        return False
 
     def check_time_in_limits(self, time):
         left, right = self.limits
@@ -633,7 +708,7 @@ class FileWrapper:
             return None
         call["time"] = tuple[0]
 
-        assert (tuple[1] < len(TaskTypes));  # sanity check
+        assert (tuple[1] < len(TaskTypes))  # sanity check
         call["type"] = tuple[1]
 
         flags = tuple[2]
@@ -690,7 +765,7 @@ def transform2(args, tree, skip_fn=None):
                 parts = split_filename(path)
                 wrappers.setdefault(parts['dir'] + '/' + parts['name'], []).append(FileWrapper(path, args, tree, domain, tid))
 
-        for unordered in wrappers.itervalues(): #chain wrappers by time
+        for unordered in wrappers.itervalues():  # chain wrappers by time
             ordered = sorted(unordered, key=lambda wrapper: wrapper.get_record()['time'])
             prev = None
             for wrapper in ordered:
@@ -730,7 +805,7 @@ def transform2(args, tree, skip_fn=None):
                     if not record or rec['time'] < record['time']:
                         record = rec
                         earliest = file
-                if not record:  ##all finished
+                if not record:  # all finished
                     break
                 earliest.next()
 
@@ -741,9 +816,9 @@ def transform2(args, tree, skip_fn=None):
                 callbacks.on_event(TaskTypes[record['type']], record)
                 count += 1
         for callback in callbacks.callbacks:
-            callback("metadata_add", {'domain':'IntelSEAPI', 'str':'__process__', 'pid':tree["pid"], 'tid':-1, 'delta': -1})
+            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': tree["pid"], 'tid': -1, 'delta': -1})
             for pid, name in tree['groups'].iteritems():
-                callback("metadata_add", {'domain':'IntelSEAPI', 'str':'__process__', 'pid':int(pid), 'tid':-1, 'delta': -1, 'data': name})
+                callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': int(pid), 'tid': -1, 'delta': -1, 'data': name})
 
     return callbacks.get_result()
 
@@ -754,40 +829,60 @@ def get_module_by_ptr(tree, ptr):
     item = keys[0]
     for key in keys[1:]:
         if key > ptr:
-            break;
+            break
         item = key
     module = tree['modules'][item]
     if item < ptr < item + int(module[1]):
-        return (item, module[0])
+        return item, module[0]
     else:
-        return (None, None)
+        return None, None
+
+
+def resolve_cmd(args, path, load_addr, ptr, cache={}):
+    if sys.platform == 'win32':
+        """ XXX
+        if not cache:
+            sea.prepare_environ(args)
+            cache['stack'] = sea.ITT('stack')
+        result = cache['stack'].resolve_pointer(path, ptr - load_addr)
+        return result if result else ''
+        print path, ptr - load_addr, result
+        """
+        script_dir = os.path.abspath(args.bindir) if args.bindir else os.path.dirname(os.path.realpath(__file__))
+        executable = os.path.sep.join([script_dir, 'TestIntelSEAPI32.exe'])
+        cmd = '"%s" "%s":%d' % (executable, path, ptr - load_addr)
+    elif sys.platform == 'darwin':
+        cmd = 'atos -o "%s" -l %s %s' % (path, to_hex(load_addr), to_hex(ptr))
+    elif 'linux' in sys.platform:
+        cmd = 'addr2line %s -e "%s" -i -p -f -C' % (to_hex(ptr), path)
+    else:
+        assert (not "Unsupported platform!")
+
+    env = dict(os.environ)
+    if "INTEL_SEA_VERBOSE" in env:
+        del env["INTEL_SEA_VERBOSE"]
+
+    proc = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE, env=env)
+    (symbol, err) = proc.communicate()
+    if err:
+        print err
+        return ''
+    """ XXX
+    if symbol and not result:
+        print symbol, result
+        assert symbol == result
+    """
+    return symbol
 
 
 def resolve_pointer(args, tree, ptr, call, cache={}):
     if not cache.has_key(ptr):
         (load_addr, path) = get_module_by_ptr(tree, ptr)
-        if path == None or not os.path.exists(path):
+        if path is None or not os.path.exists(path):
             return False
-        if sys.platform == 'win32':
-            script_dir = os.path.abspath(args.bindir) if args.bindir else os.path.dirname(os.path.realpath(__file__))
-            executable = os.path.sep.join([script_dir, 'TestIntelSEAPI32.exe'])
-            cmd = '"%s" "%s":%d' % (executable, path, ptr - load_addr)
-        elif sys.platform == 'darwin':
-            cmd = 'atos -o "%s" -l %s %s' % (path, to_hex(load_addr), to_hex(ptr))
-        elif 'linux' in sys.platform:
-            cmd = 'addr2line %s -e "%s" -i -p -f -C' % (to_hex(ptr), path)
-        else:
-            assert (not "Unsupported platform!")
-
-        env = dict(os.environ)
-        if env.has_key("INTEL_SEA_VERBOSE"):
-            del env["INTEL_SEA_VERBOSE"]
-        proc = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE, env=env)
-
-        (symbol, err) = proc.communicate()
-
+        symbol = resolve_cmd(args, path, load_addr, ptr)
         cache[ptr] = {'module': path, 'symbol': symbol}
-        assert (not err)
+
     lines = cache[ptr]['symbol'].splitlines()
     if not lines:
         return False
@@ -1022,14 +1117,14 @@ class TaskCombiner:
                     data['args'] = thread['args'][data['id']]
                     del thread['args'][data['id']]
                 self.time_bounds[1] = max(self.time_bounds[1], end['time'])
-                self.complete_task("task", data, end)
+                self.complete_task('task', data, end)
             else:
                 self.time_bounds[1] = max(self.time_bounds[1], data['time'])
                 tasks = get_tasks(None if fn == "task_end" else data['id'])
                 index = get_last_index(tasks, data['type'] - 1)
-                if index != None:
+                if index is not None:
                     item = tasks.pop(index)
-                    self.complete_task("task", item, data)
+                    self.complete_task('task', item, data)
                 else:
                     assert (self.tree["ring_buffer"] or self.tree['cuts'])
                     if data.has_key('str'):  # nothing to show without name
@@ -1039,7 +1134,7 @@ class TaskCombiner:
         elif fn == "frame_end":
             frames = get_tasks(data['id'] if data.has_key('id') else None)
             index = get_last_index(frames, 7)
-            if index != None:
+            if index is not None:
                 item = frames.pop(index)
                 self.complete_task("frame", item, data)
             else:
@@ -1147,6 +1242,7 @@ def get_name(begin):
     else:
         return "<unknown>"
 
+
 class GraphCombiner(TaskCombiner):
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, args, tree)
@@ -1204,5 +1300,39 @@ class GraphCombiner(TaskCombiner):
         self.relations[key] = relation
 
 
+class Collector:
+    output = None
+
+    def __init__(self, args):
+        self.args = args
+
+    @classmethod
+    def set_output(cls, output):
+        cls.output = output
+
+    @classmethod
+    def log(cls, msg):
+        if cls.output:
+            cls.output.write(msg + '\n')
+        else:
+            print msg
+
+    @classmethod
+    def execute(cls, cmd, **kwargs):
+        start_time = time.time()
+        (out, err) = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE, **kwargs).communicate()
+        cls.log("\n%s:\n%s\n%s\nTime: %s" % (cmd, out, err, str(timedelta(seconds=(time.time() - start_time)))))
+        return out, err
+
+    def start(self):
+        raise NotImplementedError('Collector.start is not implemented!')
+
+    def stop(self, wait=True):
+        raise NotImplementedError('Collector.stop is not implemented!')
+
 if __name__ == "__main__":
+    start_time = time.time()
     main()
+    elapsed = time.time() - start_time
+    print "Time Elapsed:", str(timedelta(seconds=elapsed)).split('.')[0]
+
