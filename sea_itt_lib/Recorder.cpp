@@ -342,6 +342,39 @@ void CMemMap::Unmap()
 #endif
 }
 
+bool CMemMap::Resize(size_t size)
+{
+    Unmap();
+#ifdef _WIN32
+    //resize
+    LARGE_INTEGER liSize = {};
+    liSize.QuadPart = size;
+    return SetFilePointerEx(m_hFile, liSize, nullptr, FILE_BEGIN) && ::SetEndOfFile(m_hFile);
+#else
+    return 0 == ftruncate(m_fdin, size);
+#endif
+}
+
+CMemMap::~CMemMap()
+{
+    Unmap();
+#ifdef _WIN32
+    if (m_hMapping)
+    {
+        CloseHandle(m_hMapping);
+    }
+    if (m_hFile)
+    {
+        CloseHandle(m_hFile);
+    }
+#else
+    if (m_fdin)
+    {
+        close(m_fdin);
+    }
+#endif
+}
+
 using namespace sea;
 const bool g_bWithStacks = !!(GetFeatureSet() & sfStack);
 

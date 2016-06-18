@@ -61,6 +61,7 @@ supported_events = [
     "i915_gem_request_wait_end",
     "i915_gem_ring_wait_begin",
     "i915_gem_ring_wait_end",
+    "i915_mvp_read_req",
     "i915_reg_rw",
     "i915_flip_request",
     "i915_flip_complete",
@@ -149,6 +150,9 @@ class FTrace(Collector):
 
         for event in self.event_list:  # enabling only supported
             self.echo("1", event)
+
+        for path in glob.glob('/sys/kernel/debug/dri/*/i915_mvp_enable'):  # special case for Intel GPU events
+            self.echo("1", path)
         self.echo("1", "/sys/kernel/debug/tracing/tracing_on")
 
     def copy_from_target(self, what, where):
@@ -162,6 +166,8 @@ class FTrace(Collector):
         if not self.file:
             return []
         self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
+        for path in glob.glob('/sys/kernel/debug/dri/*/i915_mvp_enable'):  # special case for Intel GPU events
+            self.echo("0", path)
         file_name = os.path.join(self.args.output, "tmp.ftrace")
         self.copy_from_target("/sys/kernel/debug/tracing/trace", file_name)
         self.log("append %s > %s" % (file_name, self.file))

@@ -224,13 +224,13 @@ class ETWTrace(Collector):
                     file.write('"Microsoft-Windows-DXGI" (Events)\n')
                     count += 1
             if count:
-                cmd = 'logman start GPA_SEA -ct perf'
+                cmd = 'logman start GPA_SEA -ct perf -bs 1024 -nb 120 480'
                 cmd += ' -pf "%s" -o "%s" %s -ets' % (logman_pf, self.files[0], (('-max %d -f bincirc' % (self.args.ring * 10)) if self.args.ring else ''))
             else:
                 del self.files[0]
         else:
             if self.xperf:
-                cmd = '"%s" -start GPA_SEA -on DX -f "%s" -ClockType PerfCounter' % (self.xperf, self.files[0])
+                cmd = '"%s" -start GPA_SEA -on DX -f "%s" -ClockType PerfCounter -BufferSize 1024 -MinBuffers 120 -MaxBuffers 480' % (self.xperf, self.files[0])
                 if self.args.ring:
                     cmd += ' -MaxFile %d -FileMode Circular' % (self.args.ring * 10)  # turning seconds into megabytes...
         if cmd:
@@ -255,7 +255,7 @@ class ETWTrace(Collector):
             if is_domain_enabled('Kernel::PageFaults', False):
                 kernel_logger += ['ALL_FAULTS', 'HARD_FAULTS']
             if kernel_logger:
-                cmd = '"%s" -on %s %s -f "%s" -ClockType PerfCounter' % (self.xperf, '+'.join(kernel_logger), complimentary, self.files[-1])
+                cmd = '"%s" -on %s %s -f "%s" -ClockType PerfCounter -BufferSize 1024 -MinBuffers 120 -MaxBuffers 480' % (self.xperf, '+'.join(kernel_logger), complimentary, self.files[-1])
                 if self.args.ring:
                     cmd += ' -MaxFile %d -FileMode Circular' % (self.args.ring * 10)  # turning seconds into megabytes...
                 (out, err) = self.execute(cmd)
@@ -279,7 +279,7 @@ class ETWTrace(Collector):
             if is_domain_enabled('Kernel::PageFaults', False):
                 kernel_logger += ['pf', 'hf']
             if kernel_logger:
-                cmd = 'logman start "NT Kernel Logger" -p "Windows Kernel Trace" (%s) -ct perf' % ','.join(kernel_logger)
+                cmd = 'logman start "NT Kernel Logger" -p "Windows Kernel Trace" (%s) -ct perf -bs 1024 -nb 120 480' % ','.join(kernel_logger)
                 cmd += ' -o "%s" %s -ets' % (self.files[-1], (('-max %d -f bincirc' % (self.args.ring * 5)) if self.args.ring else ''))
                 (out, err) = self.execute(cmd)
                 if err or 'Error:' in out:

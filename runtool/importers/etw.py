@@ -489,6 +489,7 @@ class ETWXMLHandler(GPUQueue):
             'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': system['provider'],
             'time': self.convert_time(data['SyncQPCTime'] if ('SyncQPCTime' in data) else system['time']),
             'str': info['Task'] if ('Task' in info) and info['Task'] else 'Unknown',
+            'args': data,
         }
 
         if call_data['str'] == 'SelectContext':  # Microsoft-Windows-DxgKrnl

@@ -54,6 +54,7 @@ class DTraceCollector(Collector):
         self.pid = None
         self.files = []
         os.environ['SUDO_ASKPASS'] = self.create_ask_pass()
+        del os.environ['DYLD_INSERT_LIBRARIES']
         self.execute('sudo -A pkill dtrace', env=os.environ)
         self.start()
 

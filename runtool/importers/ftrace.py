@@ -13,7 +13,7 @@ class FTrace:
         decoders = get_decoders()
         if 'ftrace' in decoders:
             for decoder in decoders['ftrace']:
-                self.decoders.append(decoder(callbacks))
+                self.decoders.append(decoder(args, callbacks))
 
     def handle_record(self, proc, tid, cpu, flags, timestamp, name, args):
         pid = self.tid_map[tid] if tid in self.tid_map else None
@@ -25,6 +25,9 @@ class FTrace:
                     name, args = tuple(parts)
             decoder.handle_record(proc, pid, tid, cpu, flags, timestamp, name, args)
 
+    def finalize(self):
+        for decoder in self.decoders:
+            decoder.finalize()
 
 def transform_ftrace(args):
     tree = default_tree()
@@ -56,6 +59,7 @@ def transform_ftrace(args):
                     handler.handle_record(proc, int(tid), cpu, flags, timestamp, name.strip(), args.strip())
                     if not count % 1000:
                         progress.tick(file.tell())
+                handler.finalize()
 
     return callbacks.get_result()
 
