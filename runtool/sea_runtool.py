@@ -289,7 +289,7 @@ def launch_remote(args, victim):
         sys.exit(-1)
     args.input = files[0]
     if args.trace:
-        args.trace = [glob(os.path.join(local_tmp, '*', 'nop.ftrace'))[0]]
+        args.trace = [glob(os.path.join(local_tmp, '*', 'nop*.ftrace'))[0]]
     output = transform(args)
     output = join_gt_output(args, output)
     shutil.rmtree(local_tmp)
@@ -369,10 +369,16 @@ def launch(args, victim):
         return []
 
     args.input = "%s-%d" % (args.output, proc.pid)
-    transform_all(args)
+    return transform_all(args)
 
 
 def transform_all(args):
+    if not args.trace:  # no itt trace
+        args.trace = []
+        for ext in ['etl', 'ftrace', 'dtrace']:
+            for file in glob(os.path.join(args.input, '*.' + ext)):
+                if not any(sub in file for sub in ['.etl.', '.dtrace.']):
+                    args.trace.append(file)
     if args.multiproc:
         multi_out = []
         saved_output = args.output
@@ -560,7 +566,7 @@ def transform(args):
     if args.verbose:
         print "Transform:", str(args)
     tree = sea_reader(args.input)  # parse the structure
-    if args.cuts and args.cuts == ['all']:
+    if args.cuts and args.cuts == ['all'] or not args.cuts:
         return transform2(args, tree)
     else:
         result = []
