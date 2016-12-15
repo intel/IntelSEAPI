@@ -50,7 +50,7 @@
     #define SEA_EXPORT __declspec(dllexport)
     #define _sprintf sprintf_s
 #else
-    #define SEA_EXPORT
+    #define SEA_EXPORT __attribute__ ((visibility ("default")))
     #define _sprintf sprintf
 #endif
 

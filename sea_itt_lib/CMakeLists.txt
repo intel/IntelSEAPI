@@ -19,6 +19,9 @@ cmake_minimum_required(VERSION 2.8)
 
 SET(CUR_DIR "${PROJECT_SOURCE_DIR}/sea_itt_lib")
 
+set(INCLUDE_DIRS . ..)
+
+
 if (WIN32)
 
     add_custom_command(OUTPUT "${PROJECT_BINARY_DIR}/IntelSEAPI.rc" "${PROJECT_BINARY_DIR}/IntelSEAPI.h"
@@ -62,14 +65,13 @@ else()
     set(EXTRA_SOURCE)
 endif()
 
-set(INCLUDE_DIRS . ..)
 
 
 if(JDK)
-    if (WIN32)
-        set(JDK_PREFIX ${JDK}/bin/)
-    else()
+    if (${CMAKE_HOST_SYSTEM_NAME} MATCHES "Linux")
         set(JDK_PREFIX)
+    else()
+        set(JDK_PREFIX ${JDK}/bin/)
     endif()
 
     add_custom_command(
@@ -89,12 +91,12 @@ if(JDK)
         ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java
     )
 
-    if (${CMAKE_HOST_SYSTEM_NAME} MATCHES "Windows")
+    if (WIN32)
         set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/win32)
-    elseif(${CMAKE_HOST_SYSTEM_NAME} MATCHES "Darwin")
+    elseif(APPLE)
         set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/darwin)
-    elseif(${CMAKE_HOST_SYSTEM_NAME} MATCHES "Linux")
-        set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/linux)
+    elseif(NOT ANDROID)
+        set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK} ${JDK}/include ${JDK}/include/linux)
     endif()
 
 endif()
@@ -144,9 +146,11 @@ if (WIN32)
 elseif (APPLE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++11 -g -fPIC -framework Cocoa")
 elseif (ANDROID)
+    TARGET_LINK_LIBRARIES(sea_itt_lib log)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -fPIC -pthread")
 else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -fPIC -pthread")
+    TARGET_LINK_LIBRARIES(sea_itt_lib dl)
 endif()
 
 target_include_directories(sea_itt_lib PUBLIC

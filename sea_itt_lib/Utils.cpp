@@ -36,6 +36,18 @@
     #include <mach-o/dyld.h>
 #endif
 
+#if defined(ARM32)
+    #define NO_DL_ITERATE_PHDR
+#endif
+
+#if !defined(NO_DL_ITERATE_PHDR) && (defined(__linux__) || defined(__ANDROID__))
+    #ifndef _GNU_SOURCE
+        #define _GNU_SOURCE
+    #endif
+    #include <link.h>
+#endif
+
+
 #ifdef __ANDROID__
 
 #include <unwind.h>
@@ -145,13 +157,56 @@ size_t GetFileSize(const char *path) {
     return -1;
 }
 
+#ifndef __APPLE__
+
+#if !defined(NO_DL_ITERATE_PHDR)
+int iterate_callback(struct dl_phdr_info *info, size_t size, void *data)
+{
+    Dl_info* pInfo = (Dl_info*)data;
+    VerbosePrint("iterate_callback: %lx, %s\n", (long int)info->dlpi_addr, info->dlpi_name);
+    if ((void*)info->dlpi_addr == pInfo->dli_fbase)
+        pInfo->dli_fname = strdup(info->dlpi_name);
+    return 0;
+}
+#endif
+
+bool proc_self_map(Dl_info& info)
+{
+    char base[100] = {};
+    sprintf(base, "%lx", (long int)info.dli_fbase);
+    VerbosePrint("Base: %s\n", base);
+    std::ifstream input("/proc/self/maps");
+    std::string line;
+    while (std::getline(input, line))
+    {
+        VerbosePrint("/proc/self/maps: %s\n", line.c_str());
+        if (0 == line.find(base))
+        {
+            size_t pos = line.rfind(' ');
+            info.dli_fname = strdup(line.substr(pos + 1).c_str());
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
 sea::SModuleInfo Fn2Mdl(void* fn)
 {
-    //FIXME: Linux: dl_iterate_phdr(), OSX: http://stackoverflow.com/questions/28846503/getting-sizeofimage-and-entrypoint-of-dylib-module
     Dl_info dl_info = {};
     dladdr(fn, &dl_info);
-    if (!dl_info.dli_fname)
+    VerbosePrint("Fn2Mdl: %p, %s\n", dl_info.dli_fbase, dl_info.dli_fname);
+    if (!dl_info.dli_fname || !strstr(dl_info.dli_fname, ".so"))
+    {
+#ifndef __APPLE__
+    #if !defined(NO_DL_ITERATE_PHDR)
+        dl_iterate_phdr(iterate_callback, &dl_info);
+    #endif
+        if (!dl_info.dli_fname || !strstr(dl_info.dli_fname, ".so"))
+            proc_self_map(dl_info);
+#endif
         return SModuleInfo{dl_info.dli_fbase, 0, dl_info.dli_fname};
+    }
 
     if (dl_info.dli_fname[0] == '/')
     { //path is absolute

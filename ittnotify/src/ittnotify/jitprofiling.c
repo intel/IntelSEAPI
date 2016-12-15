@@ -60,7 +60,6 @@
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
 #include <windows.h>
-#pragma optimize("", off)
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 #if ITT_PLATFORM != ITT_PLATFORM_MAC && ITT_PLATFORM != ITT_PLATFORM_FREEBSD
 #include <malloc.h>
@@ -69,7 +68,7 @@
 
 #include "jitprofiling.h"
 
-static const char rcsid[] = "\n@(#) $Revision: 398909 $\n";
+static const char rcsid[] = "\n@(#) $Revision: 471937 $\n";
 
 #define DLL_ENVIRONMENT_VAR             "VS_PROFILER"
 
@@ -96,10 +95,10 @@ void* m_libHandle = NULL;
 #define ANDROID_JIT_AGENT_PATH  "/data/intel/libittnotify.so"
 
 /* the function pointers */
-typedef unsigned int(*TPInitialize)(void);
+typedef unsigned int(JITAPI *TPInitialize)(void);
 static TPInitialize FUNC_Initialize=NULL;
 
-typedef unsigned int(*TPNotify)(unsigned int, void*);
+typedef unsigned int(JITAPI *TPNotify)(unsigned int, void*);
 static TPNotify FUNC_NotifyEvent=NULL;
 
 static iJIT_IsProfilingActiveFlags executionMode = iJIT_NOTHING_RUNNING;
@@ -120,7 +119,7 @@ static int iJIT_DLL_is_missing = 0;
 ITT_EXTERN_C int JITAPI
 iJIT_NotifyEvent(iJIT_JVM_EVENT event_type, void *EventSpecificData)
 {
-    int ReturnValue;
+    int ReturnValue = 0;
 
     /* initialization part - the collector has not been loaded yet. */
     if (!FUNC_NotifyEvent)

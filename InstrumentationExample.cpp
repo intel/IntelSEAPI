@@ -143,7 +143,7 @@ void workerthread(int data)
         {
             id = __itt_id_make(&bOverlapped + counter++, 0);
             __itt_task_begin_overlapped(g_domain, id, __itt_null, handle_overlapped);
-            __itt_metadata_str_add(g_domain, id, metadata_handle, "file:///Users/aaraud/Downloads/SEA.png", 0);
+            __itt_metadata_str_add(g_domain, id, metadata_handle, "https://ru.wikipedia.org/wiki/PNG#/media/File:PNG_transparency_demonstration_1.png", 0);
         }
         __itt_task_end(g_domain);
         if (bOverlapped)

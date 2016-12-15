@@ -91,7 +91,7 @@ def GetJDKPath():
             return None
         if sys.platform == 'darwin':
             path = subprocess.check_output("/usr/libexec/java_home").split('\n')[0]
-            return (path if os.path.exists(path) else None)
+            return path if os.path.exists(path) else None
         else:
             matches = []
             for root, dirnames, filenames in os.walk('/usr/lib/jvm'):
@@ -158,7 +158,7 @@ def get_vs_versions():
         if '.' not in key:
             continue
         version = key.split('.')[0]
-        if int(version) >= 12 and 'VC' in val:
+        if int(version) >= 12:
             versions.append(version)
     if not versions:
         print "No Visual Studio version found"
@@ -173,6 +173,7 @@ def main():
     parser.add_argument("-d", "--debug", action="store_true")
     parser.add_argument("--force_bits", choices=["32", "64"])
     parser.add_argument("-a", "--android", action="store_true")
+    parser.add_argument("--arm", action="store_true")
     parser.add_argument("-c", "--clean", action="store_true")
     if sys.platform == 'win32' and vs_versions:
         parser.add_argument("--vs", choices=vs_versions, default=vs_versions[0])
@@ -208,6 +209,10 @@ def main():
         os.chdir(work_folder)
 
         if args.android:
+            if args.arm:
+                abi = 'armeabi' if bits == '32' else 'arm64-v8a'
+            else:
+                abi = 'x86' if bits == '32' else 'x86_64'
             if os.environ.has_key('ANDROID_NDK'):
                 run_shell('cmake "%s" -G"%s" %s' % (work_dir, ("Ninja" if sys.platform == 'win32' else "Unix Makefiles"), " ".join([
                     ("-DFORCE_32=ON" if bits == '32' else ""),
@@ -215,7 +220,7 @@ def main():
                     ("-DCMAKE_TOOLCHAIN_FILE=./android.toolchain.cmake"),
                     ("-DANDROID_NDK=%s" % (os.environ['ANDROID_NDK'])),
                     ("-DCMAKE_BUILD_TYPE=%s" % ("Debug" if args.debug else "Release")),
-                    ('-DANDROID_ABI="%s"' % ('x86' if bits == '32' else 'x86_64')),
+                    ('-DANDROID_ABI="%s"' % abi),
                     (('-DJDK="%s"' % jdk_path) if jdk_path else "")
                 ])))
                 run_shell('cmake --build .')

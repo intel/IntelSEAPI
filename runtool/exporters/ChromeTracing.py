@@ -4,9 +4,8 @@ import json
 import strings
 import tempfile
 import subprocess
-import multiprocessing
-from datetime import datetime, timedelta
-from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst, get_importers, PseudoProgress
+from datetime import datetime
+from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst, get_importers
 
 MAX_GT_SIZE = 50 * 1024 * 1024
 GT_FLOAT_TIME = True
@@ -139,46 +138,50 @@ class GoogleTrace(TaskCombiner):
         return self.source_scale_start, self.target_scale_start, self.ratio
 
     @staticmethod
-    def calc_time_sync(time_sync):
+    def calc_time_sync(time_sync, series=True):
         if len(time_sync) < 2:  # too few markers to sync
             return None
-        Target = 0
-        Source = 1
-        # looking for closest time points to calculate start points
-        diffs = []
-        for i in range(1, len(time_sync)):
-            diff = (time_sync[i][Target] - time_sync[i - 1][Target], time_sync[i][Source] - time_sync[i - 1][Source])
-            diffs.append((diff, i))
-        diffs.sort()
-        (diff, index) = diffs[0]  # it's the width between two closest measurements
+        Target = 0  # ftrace (it's Target because we better convert ITT time to ftrace for Chrome to understand)
+        Source = 1  # ITT time, nanoseconds
+        if series:
+            # looking for closest time points to calculate start points
+            diffs = []
+            for i in range(1, len(time_sync)):
+                diff = (time_sync[i][Target] - time_sync[i - 1][Target], time_sync[i][Source] - time_sync[i - 1][Source])
+                diffs.append((diff, i))
+            diffs.sort()
+            (diff, index) = diffs[0]  # it's the width between two closest measurements
 
-        # source measurement is the fisrt, target is second
-        # Target time is always after the source, due to workflow
-        # one measurement is begin -> begin and another is end -> end
-        # if nothing interferes begin -> begin measurement should take same time as end -> end
+            # source measurement is the fisrt, target is second
+            # Target time is always after the source, due to workflow
+            # one measurement is begin -> begin and another is end -> end
+            # if nothing interferes begin -> begin measurement should take same time as end -> end
 
-        # run 1: most ballanced case - everything is even
-        # S   /b  |  |  I  /e
-        # T          /b  I  |  |  /e
+            # run 1: most ballanced case - everything is even
+            # S   /b  |  |  I  /e
+            # T          /b  I  |  |  /e
 
-        # run 2: takes more time after Target measurement
-        # S   /b  |  |  I  /e
-        # T      /b  I  |  |  /e
+            # run 2: takes more time after Target measurement
+            # S   /b  |  |  I  /e
+            # T      /b  I  |  |  /e
 
-        # run 3: takes more time before Target measurement
-        # S   /b  |  |  I  /e
-        # T              /b  I  |  |  /e
+            # run 3: takes more time before Target measurement
+            # S   /b  |  |  I  /e
+            # T              /b  I  |  |  /e
 
-        # From these runs obvious that in all cases the closest points (I) of global timeline are:
-        # Quarter to end of Source and Quarter after begin of Target
-        source_scale_start = time_sync[index - 1][Source] + int(diff[Source] * 0.75)  # to keep the precision
-        target_scale_start = (time_sync[index - 1][Target] + (diff[Target] * 0.25)) * 1000000. #multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
+            # From these runs obvious that in all cases the closest points (I) of global timeline are:
+            # Quarter to end of Source and Quarter after begin of Target
+            source_scale_start = time_sync[index - 1][Source] + int(diff[Source] * 0.75)  # to keep the precision
+            target_scale_start = (time_sync[index - 1][Target] + (diff[Target] * 0.25)) * 1000000.  # multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
 
-        print "Timelines correlation precision is +- %f us" % (diff[Target] / 2. * 1000000.)
+            print "Timelines correlation precision is +- %f us" % (diff[Target] / 2. * 1000000.)
+        else:
+            source_scale_start = time_sync[0][Source]
+            target_scale_start = time_sync[0][Target] * 1000000.  # multiplying by 1000000. to have time in microseconds (ftrace/target time was in seconds)
 
         # taking farest time points to calculate frequencies
         diff = (time_sync[-1][Target] - time_sync[0][Target], time_sync[-1][Source] - time_sync[0][Source])
-        ratio = 1000000. * diff[Target] / diff[Source]  # when you multiply Source value with this ratio you get Target units, multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
+        ratio = 1000000. * diff[Target] / diff[Source]  # when you multiply Source value with this ratio you get Target units. Multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
         return source_scale_start, target_scale_start, ratio
 
     def global_metadata(self, data):
@@ -199,6 +202,10 @@ class GoogleTrace(TaskCombiner):
             self.file.write(
                 '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\"))
             )
+            if data.has_key('delta'):
+                self.file.write(
+                    '{"name": "thread_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":%d}},\n' % (data['pid'], data['tid'], data['delta'])
+                )
 
     def relation(self, data, head, tail):
         if not head or not tail:
@@ -467,7 +474,8 @@ class GoogleTrace(TaskCombiner):
                         except ValueError:
                             pass
                         trace_data_list.append(trace_data)
-                title = os.path.basename(output).split('_')[0] + ": Intel(R) Single Event API"
+                project_title = getattr(__builtins__, 'sea_project_title', 'Intel(R) Single Event API')
+                title = os.path.basename(output).split('_')[0] + ": " + project_title
                 trace2html.WriteHTMLForTraceDataToFile(trace_data_list, title, output_file, config_name)
 
             WriteHTMLForTracesToFile(traces, new_file)

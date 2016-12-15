@@ -29,6 +29,10 @@
 #include <chrono>
 #include <map>
 
+#if defined(__arm__) && !defined(__aarch64__)
+    #define ARM32
+#endif
+
 #ifdef _WIN32
     #include <windows.h>
 #else
@@ -127,6 +131,12 @@ static std::string get_environ_value(const std::string& name)
         }
         inline uint64_t GetTimeFreq()
         {
+            /*
+                TODO:
+                struct timespec res = {};
+                clock_getres(CLOCK_MONOTONIC_RAW, &res);
+                uint64_t freq = 1000000000ULL * (uint64_t)res.tv_sec + (uint64_t)res.tv_nsec;
+            */
             static uint64_t freq = SHiResClock::period::num / SHiResClock::period::den;
             return freq;
         }

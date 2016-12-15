@@ -47,13 +47,19 @@ class I915(GPUQueue):
             for callback in self.callbacks.callbacks:
                 callback.relation(*relation)
 
+    def get_id(self, args):
+        if not isinstance(args, dict):
+            args = self.parse_args(args)
+        return args['uniq'] if 'uniq' in args else args['seqno']
+
     def join_task(self, pid, tid, timestamp, name, args):
         args = self.parse_args(args)
-        id = args['uniq'] if 'uniq' in args else args['seqno']
+        id = self.get_id(args)
         if id not in self.state:
             return None
         prev = self.state[id]
-        assert (prev['pid'] == pid and prev['tid'] == tid)
+        if prev['pid'] != pid or prev['tid'] != tid:
+            return None
         call_data = {'tid': tid, 'pid': (pid if pid is not None else tid), 'domain': 'i915', 'time': prev['timestamp'], 'str': name, 'type': 0, 'args': args, 'id': id}
         end_data = call_data.copy()
         end_data['time'] = timestamp
@@ -78,7 +84,6 @@ class I915(GPUQueue):
                     del self.wait_relations[id]
             else:
                 assert(not "Unhandled")
-
         elif name.startswith('libdrm'):
             args = self.parse_args(args)
             fn = args['name']
@@ -177,6 +182,7 @@ class I915(GPUQueue):
                 'tid': tid, 'pid': (pid if pid is not None else tid), 'domain': 'i915', 'time': timestamp, 'str': args['obj'], 'type': 9, 'args': {'snapshot': args}, 'id': int(args['obj'], 16)
             })
             """
+            pass
         elif 'i915_gem_object_destroy' == name:
             pass
         elif 'i915_reg_rw' == name:  # write reg=0x120a8, len=4, val=(0xfffffeff, 0x0)
@@ -185,6 +191,8 @@ class I915(GPUQueue):
             self.start_task(args, locals())
         elif 'i915_scheduler_queue' == name:  # ring=1, uniq=246509, seqno=0
             call_data = self.join_task(pid, tid, timestamp, 'gem_ring_queue->scheduler_queue', args)  # first event in 'uniq' life time
+            if not call_data:
+                return
             id = call_data['id']
             self.relations[id] = call_data
             self.wait_relations[id] = call_data
@@ -223,15 +231,17 @@ class I915(GPUQueue):
         elif 'i915_scheduler_landing' == name:  # ring=4, uniq=246869, seqno=308717, status=3
             self.start_task(args, locals())
         elif 'i915_gem_request_complete' == name:  # dev=0, ring=4, uniq=246869, seqno=308717
-            call_data = self.join_task(pid, tid, timestamp, 'scheduler_landing->gem_request_complete', args)
-            if not call_data:
-                return
-            id = call_data['id']
-            if id in self.gpu_relations:
-                self.add_relation(call_data, self.gpu_relations[id])
-                del self.gpu_relations[id]
-            else:
-                self.gpu_relations[id] = call_data
+            prev_name = self.state.get(self.get_id(args), {'name': None})['name']
+            if prev_name == 'i915_scheduler_landing':
+                call_data = self.join_task(pid, tid, timestamp, 'scheduler_landing->gem_request_complete', args)
+                if not call_data:
+                    return
+                id = call_data['id']
+                if id in self.gpu_relations:
+                    self.add_relation(call_data, self.gpu_relations[id])
+                    del self.gpu_relations[id]
+                else:
+                    self.gpu_relations[id] = call_data
         elif 'i915_page_table_entry_alloc' == name:  # vm=ffff880444268000, pde=502 (0xfedfb000-0xfedfffff)
             pass
         elif 'i915_context_free' == name:  # dev=0, ctx=ffff880401fde000, ctx_vm=ffff88044426c000
@@ -240,11 +250,19 @@ class I915(GPUQueue):
             pass
         elif 'i915_ppgtt_release' == name:  # dev=0, vm=ffff88044426c000
             pass
+        elif 'i915_flip_request' == name:  # plane=1, obj=ffff88002ea16600
+            pass
+        elif 'i915_flip_complete' == name:  # plane=1, obj=ffff88002ea16600
+            pass
         elif 'i915' in name:
             pass
+        elif 'drm_vblank' in name:
+            self.callbacks.vsync(timestamp)
         elif 'intel_gpu_freq_change' in name:
             pass
         elif 'switch_mm' in name:
+            pass
+        else:
             pass
 
     def finalize(self):

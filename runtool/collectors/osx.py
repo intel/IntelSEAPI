@@ -36,16 +36,31 @@ dtrace_metal = r"""
 pid$target:Metal::entry
 {
     printf(
-        "%x\te\t%x\t%x\t%s\n", machtimestamp, pid, tid, probefunc
+        "%x\te\t%x\t%x\tmtl\t%s\n", machtimestamp, pid, tid, probefunc
     );
 }
 
 pid$target:Metal::return
 {
     printf(
-        "%x\tr\t%x\t%x\t%s\n", machtimestamp, pid, tid, probefunc
+        "%x\tr\t%x\t%x\tmtl\t%s\n", machtimestamp, pid, tid, probefunc
     );
 }
+
+pid$target:OpenGL:CGLFlushDrawable:entry
+{
+    printf(
+        "%x\te\t%x\t%x\togl\t%s\n", machtimestamp, pid, tid, probefunc
+    );
+}
+
+pid$target:OpenGL:CGLFlushDrawable:return
+{
+    printf(
+        "%x\tr\t%x\t%x\togl\t%s\n", machtimestamp, pid, tid, probefunc
+    );
+}
+
 """
 
 class DTraceCollector(Collector):
@@ -88,7 +103,7 @@ class DTraceCollector(Collector):
                 probes += probe
             if 'process_token_' in name:
                 probe = '%s::%s:%s{' % (parts[1], parts[3], parts[-1])
-                probe += r'printf("%x\t' + parts[-1][0] + r'\t%x\t%x\t' + name.replace('process_token_', '')
+                probe += r'printf("%x\t' + parts[-1][0] + r'\t%x\t%x\tigfx\t' + name.replace('process_token_', '')
                 probe += r'\n", machtimestamp, pid, tid'
                 probe += ');}\n'
                 probes += probe

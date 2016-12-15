@@ -64,7 +64,9 @@ int GlobalInit()
     jit_val += "=" + mdlinfo.path;
 
     setenv(_strdup(value.c_str()));
+    VerbosePrint("IntelSEAPI: setting %s\n", value.c_str());
     setenv(_strdup(jit_val.c_str()));
+    VerbosePrint("IntelSEAPI: setting %s\n", jit_val.c_str());
     return 1;
 }
 
@@ -183,10 +185,13 @@ extern "C" {
             FIX_STRING(pStr);
             sea::ReportString(const_cast<__itt_string_handle *>(pStr));
         }
+        if (pGlob->version_build > 20120000) //counter_list was not yet invented that time
+        {
         for (__itt_counter_info_t* pCounter = pGlob->counter_list; pCounter; pCounter = pCounter->next)
         {
             FIX_COUNTER(pCounter);
             VerbosePrint("Fixed counter: %s | %s\n", pCounter->domainA, pCounter->nameA);
+        }
         }
         sea::ReportModule(pGlob);
         static bool bInitialized = false;

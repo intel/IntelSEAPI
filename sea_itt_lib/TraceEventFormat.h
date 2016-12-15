@@ -79,6 +79,20 @@ public:
     {
 #ifdef _WIN32
         return SHiResClock::now64(); //in nanoseconds
+#elif defined(__ANDROID__)
+        static struct timespec res = {};
+        if (!res.tv_nsec && !res.tv_sec)
+        {
+            clock_getres(CLOCK_MONOTONIC_RAW, &res);
+            if (!res.tv_nsec && !res.tv_sec)
+            {
+                VerbosePrint("Can't get CLOCK_MONOTONIC_RAW\n");
+                return 0;
+            }
+        }
+        struct timespec ts = {};
+        clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+        return uint64_t((1000000000. * ts.tv_sec + ts.tv_nsec) / (1000000000. * res.tv_sec + res.tv_nsec));
 #else
         using namespace std::chrono;
         return (uint64_t)duration_cast<nanoseconds>(SHiResClock::now().time_since_epoch()).count();
@@ -157,15 +171,10 @@ public:
         switch(ph)
         {
             case Begin:
+            case End:
                 ss << phase << "|" << rf.tid << "|" << name;
                 ss << "|"; if (args) ss << args.Str(); // (arg1=val1;arg2=val2;...) << category
                 ss << "|"; if (categories) ss << categories;
-                break;
-            case End:
-                ss << phase; //can have arguments in third place
-                ss << "||";
-                if (args) ss << args.Str();
-                ss << "||"; if (categories) ss << categories;
                 break;
             case Counter:
                 for (const auto& pair: args.GetMap())
@@ -188,7 +197,11 @@ public:
         }
         ss << std::endl;
         std::string text = ss.str();
-        write(pFile, text.c_str(), text.size());
+        int res = write(pFile, text.c_str(), text.size());
+        if (res < text.size())
+        {
+            VerbosePrint("Failed to write: %s", text.c_str());
+        }
     }
 protected:
     static int GetTraceFile()

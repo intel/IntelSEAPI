@@ -1,5 +1,9 @@
 import os
-from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_decoders, build_tid_map
+import sys
+
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+import strings
+from sea_runtool import default_tree, Callbacks, Progress, get_decoders, build_tid_map, format_bytes
 
 
 class FTrace:
@@ -15,14 +19,15 @@ class FTrace:
             for decoder in decoders['ftrace']:
                 self.decoders.append(decoder(args, callbacks))
 
-    def handle_record(self, proc, tid, cpu, flags, timestamp, name, args):
-        pid = self.tid_map[tid] if tid in self.tid_map else None
+    def handle_record(self, proc, pid, tid, cpu, flags, timestamp, name, args):
+        if pid is None:
+            pid = self.tid_map[tid] if tid in self.tid_map else None
         timestamp = int(timestamp * 1000000000)  # seconds to nanoseconds
+        if name in ['tracing_mark_write', '0']:
+            parts = args.split(':', 1)
+            if len(parts) == 2:
+                name, args = tuple(parts)
         for decoder in self.decoders:
-            if name == 'tracing_mark_write' or name == '0':
-                parts = args.split(':', 1)
-                if len(parts) == 2:
-                    name, args = tuple(parts)
             decoder.handle_record(proc, pid, tid, cpu, flags, timestamp, name, args)
 
     def finalize(self):
@@ -30,7 +35,7 @@ class FTrace:
             decoder.finalize()
 
 
-def transform_ftrace(args):
+def transform_ftrace(args, preprocess=None):
     tree = default_tree(args)
     tree['ring_buffer'] = True
     args.no_left_overs = True
@@ -45,27 +50,85 @@ def transform_ftrace(args):
                     count += 1
                     if line.startswith('#'):
                         continue
-                    regular = line[:48].rstrip(' :')
-                    payload = line[48:]
-                    parts = regular.split()
-                    if len(parts) != 4:
-                        right = parts[-3:]
-                        left = parts[:-3]
-                        parts = [' '.join(left)] + right
-                    (proc, tid) = parts[0].rsplit('-', 1)
-                    cpu = int(parts[1][1:4])
-                    flags = parts[2]
-                    timestamp = float(parts[3])
-                    (name, args) = payload.split(':', 1)
-                    handler.handle_record(proc, int(tid), cpu, flags, timestamp, name.strip(), args.strip())
+                    res = FTraceImporter.parse(line)
+                    if preprocess:
+                        res = preprocess(res)
+                        if not res:
+                            continue
+                    handler.handle_record(res['name'], res['tgid'], res['pid'], res['cpu'], res['flags'], res['time'], res['event'], res['args'])
                     if not count % 1000:
                         progress.tick(file.tell())
                 handler.finalize()
 
     return callbacks.get_result()
 
+
+class FTraceImporter:
+    def __call__(self, *args):
+        return transform_ftrace(*args)
+
+    @staticmethod
+    def parse(line, statics={}):
+        if not statics:
+            import re
+            expressions = [
+                r'(?P<name>.*)-',           # process Name
+                r'(?P<pid>\d+)\s+'          # pid
+                r'(?P<tgid>.*\s+)?',        # tgid, if present
+                r'\[(?P<cpu>.*)\]\s+',      # cpu
+                r'((?P<flags>.*)\s+)?',     # flags, if present
+                r'(?P<time>\d+\.\d+):\s+',  # time
+                r'(?P<event>[^:]+):\s+',    # event name
+                r'(?P<args>.*)',            # event arguments
+            ]
+            statics['regexp'] = re.compile(''.join(expressions), re.IGNORECASE | re.DOTALL)
+        res = statics['regexp'].search(line.strip())
+        if not res:
+            return {}
+        parsed = res.groupdict().copy()
+        parsed.update({
+            'pid': int(parsed['pid']),
+            'tgid': int(parsed['tgid']) if parsed['tgid'] and parsed['tgid'].isdigit() else None,
+            'cpu': int(parsed['cpu']),
+            'time': float(parsed['time']),
+        })
+        if parsed['event'].strip() == '0':
+            parsed['event'] = 'tracing_mark_write'
+        return parsed
+
+    @staticmethod
+    def preprocess(input, output, fltr=None):
+        header = []
+        header_complete = False
+        with open(input) as input_file, open(output, 'wb+') as output_file:
+            size = os.path.getsize(input)
+            count = 0
+            with Progress(size, 50, strings.converting % (os.path.basename(input), format_bytes(size))) as progress:
+                for line in input_file:
+                    if fltr:
+                        line = fltr(line)
+                        if not line:
+                            continue
+                    if line.startswith('#'):
+                        if not header_complete:
+                            header.append(line)
+                        else:
+                            if line.startswith('##### CPU'):  # cleanup
+                                output_file.seek(0)
+                                output_file.writelines(header)
+                                fltr(None)  # notify about cleanup
+                    else:
+                        if not header_complete:
+                            output_file.writelines(header)
+                            header_complete = True
+                        output_file.write(line)
+                    if not count % 1000:
+                        progress.tick(input_file.tell())
+                    count += 1
+
+
 IMPORTER_DESCRIPTORS = [{
     'format': 'ftrace',
     'available': True,
-    'importer': transform_ftrace
+    'importer': FTraceImporter()
 }]

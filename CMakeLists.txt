@@ -22,7 +22,11 @@ project(IntelSEAPI)
 OPTION(JDK "Enable Java build")
 OPTION(FORCE_32 "Force a 32bit compile on 64bit" OFF)
 
-IF(FORCE_32 AND UNIX)
+if (ANDROID_ARCH_NAME MATCHES "arm\\.*")
+    set(ARM 1)
+endif()
+
+IF(FORCE_32 AND UNIX AND NOT ARM)
     SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -m32")
     SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -m32")
 ENDIF()

@@ -64,6 +64,8 @@ class GraphViz(GraphCombiner):
             outfile.write("digraph G{\n")
             index = 0
             for file in traces:
+                if not file.endswith('.gv'):
+                    continue
                 index += 1
                 with open(file, 'rb') as infile:
                     lines = infile.readlines()

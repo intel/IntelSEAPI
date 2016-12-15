@@ -77,7 +77,7 @@
 
 #include "disable_warnings.h"
 
-static const char api_version[] = API_VERSION "\0\n@(#) $Revision: 440146 $\n";
+static const char api_version[] = API_VERSION "\0\n@(#) $Revision: 481659 $\n";
 
 #define _N_(n) ITT_JOIN(INTEL_ITTNOTIFY_PREFIX,n)
 
@@ -135,6 +135,8 @@ static const char* ittnotify_lib_name = "libittnotify.dylib";
 #endif /* LIB_VAR_NAME */
 
 #define ITT_MUTEX_INIT_AND_LOCK(p) {                                 \
+    if (PTHREAD_SYMBOLS)                                             \
+    {                                                                \
         if (!p.mutex_initialized)                                    \
         {                                                            \
             if (__itt_interlocked_increment(&p.atomic_counter) == 1) \
@@ -147,6 +149,7 @@ static const char* ittnotify_lib_name = "libittnotify.dylib";
                     __itt_thread_yield();                            \
         }                                                            \
         __itt_mutex_lock(&p.mutex);                                  \
+    }                                                                \
 }
 
 const int _N_(err) = 0;
@@ -345,7 +348,7 @@ static __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_createW),_init))(
     {
         NEW_DOMAIN_W(&_N_(_ittapi_global),h,h_tail,name);
     }
-    __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+    if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
     return h;
 }
 
@@ -373,7 +376,7 @@ static __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_create),_init))(c
 #else
         if (ITTNOTIFY_NAME(domain_create) && ITTNOTIFY_NAME(domain_create) != ITT_VERSIONIZE(ITT_JOIN(_N_(domain_create),_init)))
         {
-            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
             return ITTNOTIFY_NAME(domain_create)(name);
         }
 #endif
@@ -386,7 +389,7 @@ static __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_create),_init))(c
     {
         NEW_DOMAIN_A(&_N_(_ittapi_global),h,h_tail,name);
     }
-    __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+    if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
     return h;
 }
 
@@ -445,7 +448,7 @@ static __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_cre
 #else
         if (ITTNOTIFY_NAME(string_handle_create) && ITTNOTIFY_NAME(string_handle_create) != ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_create),_init)))
         {
-            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
             return ITTNOTIFY_NAME(string_handle_create)(name);
         }
 #endif
@@ -458,7 +461,7 @@ static __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_cre
     {
         NEW_STRING_HANDLE_A(&_N_(_ittapi_global),h,h_tail,name);
     }
-    __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+    if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
     return h;
 }
 
@@ -521,7 +524,7 @@ static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create),_init))(
 #else
         if (ITTNOTIFY_NAME(counter_create) && ITTNOTIFY_NAME(counter_create) != ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create),_init)))
         {
-            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
             return ITTNOTIFY_NAME(counter_create)(name, domain);
         }
 #endif
@@ -535,7 +538,7 @@ static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create),_init))(
     {
        NEW_COUNTER_A(&_N_(_ittapi_global),h,h_tail,name,domain,type);
     }
-    __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+    if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
     return (__itt_counter)h;
 }
 
@@ -596,7 +599,7 @@ static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typed),_i
 #else
         if (ITTNOTIFY_NAME(counter_create_typed) && ITTNOTIFY_NAME(counter_create_typed) != ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typed),_init)))
         {
-            __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+            if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
             return ITTNOTIFY_NAME(counter_create_typed)(name, domain, type);
         }
 #endif
@@ -610,7 +613,7 @@ static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typed),_i
     {
        NEW_COUNTER_A(&_N_(_ittapi_global),h,h_tail,name,domain,type);
     }
-    __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+    if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
     return (__itt_counter)h;
 }
 
@@ -968,9 +971,8 @@ static const char* __itt_get_lib_name(void)
     return lib_name;
 }
 
-#ifndef min
-#define min(a,b) (a) < (b) ? (a) : (b)
-#endif /* min */
+/* Avoid clashes with std::min, reported by tbb team */
+#define __itt_min(a,b) (a) < (b) ? (a) : (b)
 
 static __itt_group_id __itt_get_groups(void)
 {
@@ -986,7 +988,7 @@ static __itt_group_id __itt_get_groups(void)
         const char* chunk;
         while ((group_str = __itt_fsplit(group_str, ",; ", &chunk, &len)) != NULL)
         {
-            int min_len = min(len, (int)(sizeof(gr) - 1));
+            int min_len = __itt_min(len, (int)(sizeof(gr) - 1));
             __itt_fstrcpyn(gr, sizeof(gr) - 1, chunk,  min_len);
             gr[min_len] = 0;
 
@@ -1018,6 +1020,8 @@ static __itt_group_id __itt_get_groups(void)
 
     return res;
 }
+
+#undef __itt_min
 
 static int __itt_lib_version(lib_t lib)
 {
@@ -1061,12 +1065,12 @@ ITT_EXTERN_C void _N_(fini_ittlib)(void)
 
     if (_N_(_ittapi_global).api_initialized)
     {
-        __itt_mutex_lock(&_N_(_ittapi_global).mutex);
+        ITT_MUTEX_INIT_AND_LOCK(_N_(_ittapi_global));
         if (_N_(_ittapi_global).api_initialized)
         {
             if (current_thread == 0)
             {
-                current_thread = __itt_thread_id();
+                if (PTHREAD_SYMBOLS) current_thread = __itt_thread_id();
                 if (_N_(_ittapi_global).lib != NULL)
                 {
                     __itt_api_fini_ptr = (__itt_api_fini_t*)(size_t)__itt_get_proc(_N_(_ittapi_global).lib, "__itt_api_fini");
@@ -1087,7 +1091,7 @@ ITT_EXTERN_C void _N_(fini_ittlib)(void)
                 current_thread = 0;
             }
         }
-        __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+        if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
     }
 }
 
@@ -1110,13 +1114,13 @@ ITT_EXTERN_C int _N_(init_ittlib)(const char* lib_name, __itt_group_id init_grou
         {
             if (current_thread == 0)
             {
-                current_thread = __itt_thread_id();
+                if (PTHREAD_SYMBOLS) current_thread = __itt_thread_id();
                 if (lib_name == NULL)
                 {
                     lib_name = __itt_get_lib_name();
                 }
                 groups = __itt_get_groups();
-                if (groups != __itt_group_none || lib_name != NULL)
+                if (DL_SYMBOLS && (groups != __itt_group_none || lib_name != NULL))
                 {
                     _N_(_ittapi_global).lib = __itt_load_lib((lib_name == NULL) ? ittnotify_lib_name : lib_name);
 
@@ -1203,7 +1207,7 @@ ITT_EXTERN_C int _N_(init_ittlib)(const char* lib_name, __itt_group_id init_grou
         }
 
 #ifndef ITT_SIMPLE_INIT
-        __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
+        if (PTHREAD_SYMBOLS) __itt_mutex_unlock(&_N_(_ittapi_global).mutex);
 #endif /* ITT_SIMPLE_INIT */
     }
 

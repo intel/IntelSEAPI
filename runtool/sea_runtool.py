@@ -17,7 +17,6 @@
 
 import os
 import imp
-import sea
 import sys
 import time
 import shutil
@@ -687,6 +686,7 @@ class Callbacks:
             self.callbacks.append(get_exporters()[fmt](args, tree))
         self.parse_limits()
         self.allowed_pids = set()
+        self.processes = {}
         if hasattr(self.args, 'user_input') and os.path.isdir(self.args.user_input):
             tid_map = build_tid_map(self.args, self.args.user_input)
             self.allowed_pids = set(tid_map.itervalues())
@@ -718,6 +718,11 @@ class Callbacks:
                     del end['args']
             # copy here as handler can change the data for own good - this shall not affect other handlers
             [callback.complete_task(type, begin.copy(), end.copy()) for callback in self.callbacks]
+
+    def relation(self, data, head, tail):
+        if self.check_time_in_limits(data['time']):
+            for callback in self.callbacks:
+                callback.relation(data, head, tail)
 
     def get_result(self):
         res = []
@@ -751,6 +756,255 @@ class Callbacks:
 
     def get_limits(self):
         return self.limits
+
+    class Process:
+        def __init__(self, callbacks, pid, name):
+            self.callbacks = callbacks
+            self.pid = int(pid)
+            self.threads = {}
+            if name:
+                self.set_name(name)
+
+        def set_name(self, name):
+            self.callbacks.set_process_name(self.pid, name)
+
+        class Thread:
+            def __init__(self, process, tid, name):
+                self.process = process
+                self.tid = int(tid)
+                self.task_stack = []
+                if name:
+                    self.set_name(name)
+
+            def set_name(self, name):
+                self.process.callbacks.set_thread_name(self.process.pid, self.tid, name)
+
+            class EventBase:
+                def __init__(self, thread, name, domain):
+                    self.thread = thread
+                    self.name = name
+                    self.domain = domain
+
+            class Counter(EventBase):
+                def __init__(self, *args):
+                    Callbacks.Process.Thread.EventBase.__init__(self, *args)
+
+                def set_value(self, time_stamp, value):
+                    data = {
+                        'pid': self.thread.process.pid, 'tid': self.thread.tid,
+                        'domain': self.domain, 'str': self.name,
+                        'time': time_stamp, 'delta': value, 'type': 6
+                    }
+                    self.thread.process.callbacks.on_event('counter', data)
+
+            def counter(self, name, domain='sea'):
+                return Callbacks.Process.Thread.Counter(self, name, domain)
+
+            class Marker(EventBase):
+                def __init__(self, thread, scope, name, domain):
+                    Callbacks.Process.Thread.EventBase.__init__(self, thread, name, domain)
+                    self.scope = scope
+
+                def set(self, time_stamp):
+                    data = {
+                        'pid': self.thread.process.pid, 'tid': self.thread.tid,
+                        'domain': self.domain, 'str': self.name,
+                        'time': time_stamp, 'type': 5, 'data': self.scope
+                    }
+                    self.thread.process.callbacks.on_event('marker', data)
+
+            def marker(self, scope, name, domain='sea'):  # scope is one of 'task', 'global', 'process', 'thread'
+                scopes = {'task': 'task', 'global': 'global', 'process': 'track_group', 'thread': 'track'}
+                return Callbacks.Process.Thread.Marker(self, scopes[scope], name, domain)
+
+            class TaskBase(EventBase):
+                def __init__(self, type_id, type_name, *args):
+                    Callbacks.Process.Thread.EventBase.__init__(self, *args)
+                    self.data = None
+                    self.args = {}
+                    # These must be set in descendants!
+                    self.event_type = type_id  # first of types
+                    self.event_name = type_name
+
+                def __begin(self, time_stamp, task_id):
+                    data = {
+                        'pid': self.thread.process.pid, 'tid': self.thread.tid,
+                        'domain': self.domain, 'str': self.name,
+                        'time': time_stamp, 'str': self.name, 'type': self.event_type
+                    }
+                    if task_id is not None:
+                        data.update({'id': task_id})
+                    return data
+
+                def begin(self, time_stamp, task_id=None):
+                    self.data = self.__begin(time_stamp, task_id)
+
+                def add_args(self, args):  # dictionary is expected
+                    self.args.update(args)
+
+                def get_data(self):
+                    return self.data
+
+                def end(self, time_stamp):
+                    assert self.data  # expected to be initialized in self.begin call
+                    end_data = self.data.copy()
+                    end_data.update({'time': time_stamp, 'type': self.event_type + 1})
+                    if self.args:
+                        self.data.update({'args': self.args})
+                    self.thread.process.callbacks.complete_task(self.event_name, self.data, end_data)
+                    self.data = None
+                    self.args = {}
+
+                def complete(self, start_time, duration, task_id=None, args={}):
+                    begin_data = self.__begin(start_time, task_id)
+                    end_data = begin_data.copy()
+                    end_data['time'] = start_time + duration
+                    end_data['type'] = self.event_type + 1
+                    if args:
+                        self.data.update({'args': args})
+                    self.thread.process.callbacks.complete_task(self.event_name, begin_data, end_data)
+                    return begin_data
+
+            class Task(TaskBase):
+                def __init__(self, thread, name, domain, overlapped):
+                    suffix = '_overlapped' if overlapped else ''
+                    Callbacks.Process.Thread.TaskBase.__init__(
+                        self,
+                        2 if overlapped else 0,
+                        'task',
+                        thread,
+                        name, domain
+                    )
+                    self.relation = None
+                    self.related_begin = None
+
+                def end(self, time_stamp):
+                    begin_data = self.data.copy()  # expected to be initialized in self.begin call
+                    Callbacks.Process.Thread.TaskBase.end(self, time_stamp)
+                    self.__check_relation(begin_data)
+
+                def __check_relation(self, begin):
+                    if not self.relation:
+                        return
+                    if self.related_begin:  # it's the later task, let's emit the relation
+                        relation = (begin.copy(), self.related_begin.copy(), begin)
+                        if 'realtime' in relation[1]:
+                            relation[1]['time'] = relation[1]['realtime']
+                        relation[0]['parent'] = begin['id']
+                        self.thread.process.callbacks.relation(*relation)
+                        self.related_begin = None
+                    else:  # we store our begin in the related task and it will emit the relation on its end
+                        self.relation.related_begin = begin
+                    self.relation = None
+
+                def complete(self, start_time, duration, task_id=None, args={}):
+                    begin_data = Callbacks.Process.Thread.TaskBase.complete(self, start_time, duration, task_id, args)
+                    self.__check_relation(begin_data)
+
+                def relate(self, task):  # relation is being written when last of two related tasks was fully emitted
+                    self.relation = task
+                    task.relate(self)
+
+            def task(self, name, domain='sea', overlapped=False):
+                return Callbacks.Process.Thread.Task(self, name, domain, overlapped)
+
+            class Frame(TaskBase):
+                def __init__(self, *args):
+                    Callbacks.Process.Thread.TaskBase.__init__(
+                        self, 7,
+                        'frame',
+                        *args
+                    )
+
+            def frame(self, name, domain='sea'):
+                return Callbacks.Process.Thread.Frame(self, name, domain)
+
+            class Object(EventBase):
+                def __init__(self, id, *args):
+                    Callbacks.Process.Thread.EventBase.__init__(self, *args)
+                    self.id = id
+
+                def create(self, time_stamp):
+                    data = {
+                        'pid': self.thread.process.pid, 'tid': self.thread.tid,
+                        'domain': self.domain, 'str': self.name,
+                        'time': time_stamp, 'type': 9, 'id': self.id
+                    }
+                    self.thread.process.callbacks.on_event("object_new", data)
+
+                def snapshot(self, time_stamp, args):
+                    data = {
+                        'pid': self.thread.process.pid, 'tid': self.thread.tid,
+                        'domain': self.domain, 'str': self.name,
+                        'time': time_stamp, 'type': 10, 'id': self.id,
+                        'args': {'snapshot': args}
+                    }
+                    self.thread.process.callbacks.on_event("object_snapshot", data)
+
+                @staticmethod  # use to prepare argument for 'snapshot' call, only png in base64 string is supported by chrome
+                def create_screenshot_arg(png_base64):
+                    return {'screenshot': png_base64}
+
+                def destroy(self, time_stamp):
+                    data = {
+                        'pid': self.thread.process.pid, 'tid': self.thread.tid,
+                        'domain': self.domain, 'str': self.name,
+                        'time': time_stamp, 'type': 11, 'id': self.id
+                    }
+                    self.thread.process.callbacks.on_event("object_delete", data)
+
+            def object(self, id, name, domain='sea'):
+                return Callbacks.Process.Thread.Object(self, id, name, domain)
+
+        def thread(self, tid, name=None):
+            if tid not in self.threads:
+                self.threads[tid] = Callbacks.Process.Thread(self, tid, name)
+            return self.threads[tid]
+
+    def process(self, pid, name=None):
+        if pid not in self.processes:
+            self.processes[pid] = Callbacks.Process(self, pid, name)
+        return self.processes[pid]
+
+    def vsync(self, time_stamp, statics={}):
+        if not statics:
+            statics['marker'] = self.process(-1).thread(-1).marker('thread', 'vblank', 'gpu')
+        statics['marker'].set(time_stamp)
+
+    def context_switch(self, time_stamp, cpu, prev_tid, next_tid, prev_name='', next_name='', prev_state='S', prev_prio=0, next_prio=0, statics={}):
+        if not statics:
+            statics['cs'] = None
+            for callback in self.callbacks:
+                if type(callback) is 'GoogleTrace':
+                    statics['cs'] = callback.ContextSwitch(callback.get_results()[0])
+        if not statics['cs']:
+            return
+        statics['cs'].write(
+            time=time_stamp, cpu=int(cpu, 16),
+            prev_tid=int(prev_tid, 16), prev_state=prev_state, next_tid=int(next_tid, 16),
+            prev_prio=int(prev_prio, 16), next_prio=int(next_prio, 16),
+            prev_name=prev_name.replace(' ', '_'), next_name=next_name.replace(' ', '_')
+        )
+
+    def set_process_name(self, pid, name):
+        for callback in self.callbacks:
+            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': pid, 'tid': -1, 'delta': pid, 'data': name})
+
+    def set_thread_name(self, pid, tid, name):
+        for callback in self.callbacks:
+            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (tid %d)' % (name, tid), 'delta': abs(tid)})
+
+# example:
+#
+# the_thread = callbacks.process(-1).thread(-1)
+# counter = the_thread.counter(domain='mydomain', name='countername')
+# for i in range(5):
+#   counter.set_value(time_stamp=%timestamp%, value=i)
+# task = the_thread.task('MY_TASK')  # same with frames
+# for i in range(7):
+#   task.begin(%timestamp%)
+#   task.add_args({'a':1, 'b':'2'})
+#   task.end(%timestamp%)
 
 
 class FileWrapper:
@@ -923,6 +1177,7 @@ def resolve_cmd(args, path, load_addr, ptr, cache={}):
     if sys.platform == 'win32':
         """ FIXME: make sure SEA lib' resolve_pointer works and uncomment
         if not cache:
+            import sea
             sea.prepare_environ(args)
             cache['stack'] = sea.ITT('stack')
         result = cache['stack'].resolve_pointer(path, ptr - load_addr)
@@ -1132,6 +1387,9 @@ class TaskCombiner:
 
     def relation(self, data, head, tail):
         pass
+
+    def handle_stack(self, task, stack, name='stack'):
+        return
 
     def handle_leftovers(self):
         if self.args.no_left_overs:

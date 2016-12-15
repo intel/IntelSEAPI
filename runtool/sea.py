@@ -62,9 +62,19 @@ class Track:
 
 
 def prepare_environ(args):  # FIXME: avoid using global os.environ!
-    if 'INTEL_LIBITTNOTIFY32' not in os.environ or 'SEAPI' not in os.environ['INTEL_LIBITTNOTIFY32']:
+    bitness = '32' if '32' in platform.architecture()[0] else '64'
+    env_name = 'INTEL_LIBITTNOTIFY' + bitness
+    if env_name not in os.environ or 'SEAPI' not in os.environ[env_name]:
         bin_dir = os.path.abspath(args.bindir) if args and args.bindir else os.path.dirname(os.path.realpath(__file__))
-        os.environ['INTEL_LIBITTNOTIFY32'] = os.path.join(bin_dir, 'IntelSEAPI32.dll')
+
+        if sys.platform == 'win32':
+            dl_name = 'IntelSEAPI%s.dll' % bitness
+        elif sys.platform == 'darwin':
+            dl_name = 'libIntelSEAPI.dylib'
+        else:
+            dl_name = 'libIntelSEAPI%s.so' % bitness
+
+        os.environ[env_name] = os.path.join(bin_dir, dl_name)
     if 'INTEL_SEA_SAVE_TO' in os.environ:
         del os.environ['INTEL_SEA_SAVE_TO']
     return os.environ
@@ -88,7 +98,8 @@ class ITT:
         if env_name not in os.environ:
             print "Warning:", env_name, "is not set..."
             return
-        self.lib = cdll.LoadLibrary(os.environ[env_name])
+        if os.path.exists(os.environ[env_name]):
+            self.lib = cdll.LoadLibrary(os.environ[env_name])
         if not self.lib:
             print "Warning: Failed to load", os.environ[env_name], "..."
             return
@@ -239,9 +250,9 @@ class ITT:
         receivers = []
 
         def receive(receiver, time, count, names, values, progress):  # typedef bool (*receive_t)(void* receiver, uint64_t time, uint16_t count, const wchar_t** names, const wchar_t** values, double progress);
-            receiver = receivers[receiver - 1]  # receiver = cast(receiver, POINTER(py_object)).contents.value
+            receiver = receivers[receiver - 1]  # Should be: receiver = cast(receiver, POINTER(py_object)).contents.value, but it doesn't work so we use index of the array
             args = {}
-            for i in range(0, count):
+            for i in xrange(0, count):
                 args[names[i]] = values[i]
             reader.set_progress(progress)
             receiver.receive(time, args)
@@ -252,9 +263,17 @@ class ITT:
             if not receiver:
                 return 0
             receivers.append(receiver)
-            return len(receivers)  # cast(pointer(py_object(receiver)), c_void_p).value
+            return len(receivers)  # Should be: cast(pointer(py_object(receiver)), c_void_p).value, but it doesn't work, so we return index of the array
         
         return self.lib.parse_standard_source(path, self.get_receiver_t(get_receiver), self.receive_t(receive))
+
+    def can_parse_standard_source(self):
+        return self.lib.parse_standard_source
+
+    def get_gpa_version(self):
+        if not self.lib:
+            return ""
+        return self.lib.get_gpa_version()
 
     def export_exe_icon_as_gif(self, exe_path, gif_path):
         if sys.platform == 'win32':

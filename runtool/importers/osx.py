@@ -14,7 +14,9 @@ class DTrace(GPUQueue):
         self.cpu_packets = {}
         self.gpu_packets = {}
         self.thread_names = {}
+        self.gpu_transition = {}
         self.gpu_frame = {'catch': [0, 0], 'task': None}
+        self.prepares = {}
         for callback in self.callbacks.callbacks:
             callback("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': -1, 'tid': -1, 'data': 'GPU Engines', 'time': 0, 'delta': -2})
 
@@ -37,58 +39,83 @@ class DTrace(GPUQueue):
                 prev_name=prev_name.replace(' ', '_'), next_name=next_name.replace(' ', '_')
             )
         elif cmd.startswith('dtHook'):
-            if cmd == 'dtHookCompleteExecute':
-                self.ignore_gpu = False
             if not self.ignore_gpu:
                 pid, tid = args[0:2]
                 self.gpu_call(time, cmd[6:], int(pid, 16), int(tid, 16), args[2:])
+            elif cmd == 'dtHookCompleteExecute':
+                self.ignore_gpu = False
         elif cmd in ['e', 'r']:
             pid, tid = args[0:2]
-            self.task(time, int(pid, 16), int(tid, 16), cmd == 'e', args[2], args[3:])
+            self.task(time, int(pid, 16), int(tid, 16), cmd == 'e', args[2], args[3], args[4:])
         else:
             print "unsupported cmd:", cmd, args
 
-    def task(self, time, pid, tid, starts, name, args):
+    def task(self, time, pid, tid, starts, domain, name, args):
+        if name in ['IGAccelGLContext::BlitFramebuffer', 'CGLFlushDrawable']:
+            self.gpu_frame['catch'][0 if starts else 1] = time
+            if name == 'CGLFlushDrawable':
+                return
         data = {
-            'domain': 'AppleIntelGraphics', 'type': 0 if starts else 1,
+            'domain': domain, 'type': 0 if starts else 1,
             'time': time, 'tid': tid, 'pid': pid, 'str': name,
             'args': dict((idx, val) for idx, val in enumerate(args))
         }
         self.callbacks.on_event('task_begin' if starts else 'task_end', data)
-        if name == 'IGAccelGLContext::BlitFramebuffer':
-            self.gpu_frame['catch'][0 if starts else 1] = time
+
+    def submit_prepare(self, time, id, pid, tid, args):
+        if id not in self.prepares:
+            return
+        end_data = self.prepares[id].copy()
+        end_data.update({'time': time})
+        self.callbacks.complete_task('frame', self.prepares[id], end_data)
+
+    def report_relation(self, id, begin_data):
+        if id in self.cpu_packets:
+            relation = (begin_data.copy(), self.cpu_packets[id].copy(), begin_data)
+            if 'realtime' in relation[1]:
+                relation[1]['time'] = relation[1]['realtime']
+            relation[0]['parent'] = begin_data['id']
+            if self.callbacks.check_time_in_limits(relation[0]['time']):
+                for callback in self.callbacks.callbacks:
+                    callback.relation(*relation)
+                if self.gpu_frame['catch'][0] <= relation[1]['time'] <= self.gpu_frame['catch'][1]:
+                    self.gpu_frame['task'] = id
+            return True
 
     def gpu_call(self, time, cmd, pid, tid, args):
-        if 'PrepareQueueKMD' == cmd:
-            pass
+        if 'PrepareQueueKMD' == cmd:  # first argument seems to be 'context', see SwCtxDestroy
+            id = args[-2] if len(args) == 3 else args[-1]
+            self.prepares[id] = {
+                'domain': 'AppleIntelGraphics', 'type': 7,
+                'time': time, 'tid': tid, 'pid': pid, 'str': 'PrepareQueueKMD', 'id': int(id, 16),
+                'args': dict((idx, val) for idx, val in enumerate(args))
+            }
         elif 'SwCtxCreation' == cmd:
             pass
         elif 'SubmitExecList' == cmd:
             pass
         elif 'SubmitQueueKMD' == cmd:
-            id = args[1]
+            id = args[-3] if len(args) == 7 else args[-4]
+            self.submit_prepare(time, id, pid, tid, args)
             if id in self.gpu_packets:
                 return
             self.gpu_packets[id] = begin_data = {
                 'domain': 'AppleIntelGraphics', 'type': 2,
-                'time': time, 'tid': int(args[3], 16), 'pid': -1, 'str': args[4], 'id': int(id, 16),
+                'time': time, 'tid': int(args[3], 16), 'pid': -1, 'str': id, 'id': int(id, 16),
                 'args': dict((idx, val) for idx, val in enumerate(args))
             }
-            if id in self.cpu_packets:
-                relation = (begin_data.copy(), self.cpu_packets[id].copy(), begin_data)
-                if 'realtime' in relation[1]:
-                    relation[1]['time'] = relation[1]['realtime']
-                relation[0]['parent'] = begin_data['id']
-                if self.callbacks.check_time_in_limits(relation[0]['time']):
-                    for callback in self.callbacks.callbacks:
-                        callback.relation(*relation)
-                    if self.gpu_frame['catch'][0] <= relation[1]['time'] <= self.gpu_frame['catch'][1]:
-                        self.gpu_frame['task'] = id
+            self.report_relation(id, begin_data)
 
             self.auto_break_gui_packets(begin_data, 2 ** 64 + begin_data['tid'], True)
             self.callbacks.on_event("task_begin_overlapped", begin_data)
         elif 'SubmitToRing' == cmd:
-            id = args[1]
+            id = args[-3] if len(args) == 4 else args[-2]
+            if id.endswith('00000000'):
+                id = id[:-8]
+                if args[0][0] == 'f' and args[-1] != id and id in self.gpu_packets:  # change of id when sending to GPU
+                    self.gpu_transition[args[-1]] = id
+            if int(id, 16) == 0:
+                id = args[-1]
             if id in self.cpu_packets:
                 return
             self.cpu_packets[id] = begin_data = {
@@ -115,24 +142,30 @@ class DTrace(GPUQueue):
         elif 'CompleteExecList' == cmd:
             pass
         elif 'CompleteExecute' == cmd:
-            id = args[1]
+            id = args[-1]
+            gpu_task_id = id
+            if gpu_task_id not in self.gpu_packets and gpu_task_id in self.gpu_transition:
+                gpu_task_id = self.gpu_transition[id]
+                del self.gpu_transition[id]
+                if gpu_task_id in self.gpu_packets:
+                    self.report_relation(id, self.gpu_packets[gpu_task_id])
             if id in self.cpu_packets:
                 end_data = self.cpu_packets[id]
                 end_data.update({'time': time, 'type': 3})
                 self.auto_break_gui_packets(end_data, end_data['tid'], False)
                 self.callbacks.on_event("task_end_overlapped", end_data)
                 del self.cpu_packets[id]
-            if id in self.gpu_packets:
-                end_data = self.gpu_packets[id]
+            if gpu_task_id in self.gpu_packets:
+                end_data = self.gpu_packets[gpu_task_id]
                 end_data.update({'time': time, 'type': 3})
                 self.auto_break_gui_packets(end_data, 2 ** 64 + end_data['tid'], False)
                 self.callbacks.on_event("task_end_overlapped", end_data)
                 if id == self.gpu_frame['task']:
                     self.on_gpu_frame(time, end_data['pid'], end_data['tid'])
-                del self.gpu_packets[id]
-
+                del self.gpu_packets[gpu_task_id]
         elif 'RemoveQueueKMD' == cmd:
-            id = args[1]
+            pass
+        elif 'SwCtxDestroy' == cmd:
             pass
         elif 'WriteStamp' == cmd:
             pass

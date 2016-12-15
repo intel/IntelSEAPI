@@ -195,36 +195,36 @@ The same ID may not be reused for different instances, unless a previous
 #endif /* UNICODE || _UNICODE */
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 
-#ifndef CDECL
+#ifndef ITTAPI_CDECL
 #  if ITT_PLATFORM==ITT_PLATFORM_WIN
-#    define CDECL __cdecl
+#    define ITTAPI_CDECL __cdecl
 #  else /* ITT_PLATFORM==ITT_PLATFORM_WIN */
-#    if defined _M_IX86 || defined __i386__ 
-#      define CDECL __attribute__ ((cdecl))
+#    if defined _M_IX86 || defined __i386__
+#      define ITTAPI_CDECL __attribute__ ((cdecl))
 #    else  /* _M_IX86 || __i386__ */
-#      define CDECL /* actual only on x86 platform */
+#      define ITTAPI_CDECL /* actual only on x86 platform */
 #    endif /* _M_IX86 || __i386__ */
 #  endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
-#endif /* CDECL */
+#endif /* ITTAPI_CDECL */
 
 #ifndef STDCALL
 #  if ITT_PLATFORM==ITT_PLATFORM_WIN
 #    define STDCALL __stdcall
 #  else /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 #    if defined _M_IX86 || defined __i386__
-#      define STDCALL __attribute__ ((stdcall)) 
+#      define STDCALL __attribute__ ((stdcall))
 #    else  /* _M_IX86 || __i386__ */
 #      define STDCALL /* supported only on x86 platform */
 #    endif /* _M_IX86 || __i386__ */
 #  endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 #endif /* STDCALL */
 
-#define ITTAPI    CDECL
-#define LIBITTAPI CDECL
+#define ITTAPI    ITTAPI_CDECL
+#define LIBITTAPI ITTAPI_CDECL
 
 /* TODO: Temporary for compatibility! */
-#define ITTAPI_CALL    CDECL
-#define LIBITTAPI_CALL CDECL
+#define ITTAPI_CALL    ITTAPI_CDECL
+#define LIBITTAPI_CALL ITTAPI_CDECL
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
 /* use __forceinline (VC++ specific) */

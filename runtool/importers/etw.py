@@ -3,7 +3,7 @@ import sys
 import glob
 import base64
 import struct
-from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, ProgressConst, TaskTypes, format_bytes, build_tid_map, resolve_pointer, parse_jit
+from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, ProgressConst, TaskTypes, format_bytes, build_tid_map, resolve_pointer, parse_jit, get_decoders
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 import sea
 import strings
@@ -134,7 +134,8 @@ class STDSRCReader:
                 try:
                     data = base64.b64decode(text).decode('UTF-16').strip(chr(0))
                 except:
-                    print "Failed to decode:", text
+                    if sys.gettrace():
+                        print "Failed to decode:", text
             self.reader.on_event(system, data, system)
 
     def __init__(self, args, on_event, providers):
@@ -261,7 +262,14 @@ class ETWXMLHandler(GPUQueue):
         args.input = old_input
         self.pool = {}
         self.virtual_mem = {}
-        self.steamvr = {}
+        self.decoders = {}
+
+        decoders = get_decoders()
+        if 'etw' in decoders:
+            for decoder in decoders['etw']:
+                obj = decoder(self, args, callbacks)
+                for provider in decoder.get_providers():
+                    self.decoders.setdefault(provider.upper() if provider else None, []).append(obj)
 
         self.static = {'queue': {}, 'frames': {}, 'paging': {}, 'dmabuff': {}, 'tex2d': {}, 'resident': {}, 'fence': {}}
         """ FIXME: move to this:
@@ -361,126 +369,6 @@ class ETWXMLHandler(GPUQueue):
         file_name = file_name.split('/')
         file_name.reverse()
         return file_name[0] + " " + "/".join(file_name[1:])
-
-    def SteamVR(self, system, data, info):
-        parts = data.split('] ')
-        object = None
-        if len(parts) > 1:
-            object = parts[0].strip('[')
-            data = parts[1]
-        id = None
-        if ':' in data:
-            parts = data.split(':')
-            id = parts[1].strip()
-            data = parts[0].strip()
-        hint = None
-        if '(' in data:
-            parts = data.split('(')
-            hint, rest = parts[1].split(')')
-            data = parts[0] + rest
-        type = None
-
-        if data.startswith('Begin'):
-            type = 'begin'
-            data = data.replace('Begin ', '')
-        if data.startswith('End'):
-            type = 'end'
-            data = data.replace('End ', '')
-        if data.endswith('Begin'):
-            type = 'begin'
-            data = data.replace(' Begin', '')
-        if data.endswith('End'):
-            type = 'end'
-            data = data.replace(' End', '')
-        if data.endswith('- begin'):
-            type = 'begin'
-            data = data.replace(' - begin', '')
-        if data.endswith('- end'):
-            type = 'end'
-            data = data.replace(' - end', '')
-        if data.startswith('Before'):
-            type = 'begin'
-            data = data.replace('Before ', '')
-        if data.startswith('After'):
-            type = 'end'
-            data = data.replace('After ', '')
-
-        def on_steam_event(object, type, data, id, hint):
-            call_data = {
-                'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'SteamVR',
-                'time': self.convert_time(system['time']),
-                'args': {'obj': object}
-            }
-
-            def finish_task(events, call_data, data, id):
-                if id not in events:
-                    return
-                end_data = call_data.copy()
-                call_data.update({'str': data, 'type': 0})
-                call_data['time'] = self.convert_time(events[id])
-                end_data['type'] = 1
-                self.callbacks.complete_task('task', call_data, end_data)
-                del events[id]
-
-            if type is not None:
-                events = self.steamvr.setdefault(call_data['tid'], {}).setdefault(data, {})
-                if type == 'begin':
-                    events[id] = system['time']
-                else:
-                    finish_task(events, call_data, data, id)
-            else:
-                if data == 'TimeSinceLastVSync':
-                    call_data['type'] = 6
-                    call_data['str'] = 'TimeSinceLastVSync'
-                    call_data['delta'] = float(id)
-                    del call_data['args']
-                    self.callbacks.complete_task('counter', call_data, call_data)
-                elif 'Predicting' in data or 'frameTimeout' in data:
-                    parts = hint.split()
-                    value = float(parts[0])
-                    units = parts[1]
-                    call_data['type'] = 6
-                    call_data['str'] = '%s(%s)' % (data, units)
-                    call_data['delta'] = value
-                    del call_data['args']
-                    self.callbacks.complete_task('counter', call_data, call_data)
-                elif data == 'Clear BackBuffer':
-                    events = self.steamvr.setdefault(call_data['tid'], {}).setdefault('Clear BackBuffer', {})
-                    events[None] = system['time']
-                    return
-                else:
-                    if 'Mark Timing Event' in data:
-                        if 'Post-clear' in id:
-                            events = self.steamvr.setdefault(call_data['tid'], {}).setdefault('Clear BackBuffer', {})
-                            finish_task(events, call_data, 'Clear BackBuffer', None)
-                            return
-                        elif 'Begin' in id:
-                            events = self.steamvr.setdefault(call_data['tid'], {}).setdefault('Warp', {})
-                            events[None] = system['time']
-                            return
-                        elif 'End' in id:
-                            events = self.steamvr.setdefault(call_data['tid'], {}).setdefault('Warp', {})
-                            finish_task(events, call_data, 'Warp:R', None)
-                            return
-                    elif 'Warp' in data:
-                        events = self.steamvr.setdefault(call_data['tid'], {}).setdefault('Warp', {})
-                        if events:
-                            assert id == 'L'
-                            finish_task(events, call_data, 'Warp:L', None)
-                        else:
-                            events[None] = system['time']
-                        return
-                    elif any(phrase in data for phrase in ['Timed out', 'Detected dropped frames']):
-                        call_data['args']['Error'] = data
-                        call_data.update({'type': 10, 'args': {'snapshot': call_data['args'].copy()}, 'id': 0, 'str': 'SteamVR Error'})
-                        self.callbacks.on_event("object_snapshot", call_data)
-                        return
-                    call_data.update({'str': data, 'type': 5, 'data': 'track'})  # track_group
-                    if 'Got new frame' in data:
-                        call_data['data'] = 'task'
-                    call_data['args']['id'] = id
-                    self.callbacks.on_event("marker", call_data)
-        on_steam_event(object, type, data, id, hint.strip() if hint else None)
 
     def MSNT_SystemTrace(self, system, data, info):
         if info['EventName'] == 'EventTrace':
@@ -682,10 +570,14 @@ class ETWXMLHandler(GPUQueue):
         if not isinstance(data, dict):
             return self.on_binary(system, data, info)
         opcode = info['Opcode'].strip() if ('Opcode' in info) else ""
-        if system['provider'] in ['MSNT_SystemTrace', '{9e814aad-3204-11d2-9a82-006008a86939}']:  # MSNT_SystemTrace
+        provider = system['provider'].upper() if system['provider'] else None
+        if provider in ['MSNT_SYSTEMTRACE', '{9E814AAD-3204-11D2-9A82-006008A86939}']:  # MSNT_SystemTrace
             return self.MSNT_SystemTrace(system, data, info)
-        if system['provider'] == '{8C8F13B1-60EB-4B6A-A433-DE86104115AC}':  # SteamVR
-            return self.SteamVR(system, data, info)
+
+        if provider in self.decoders:
+            for decoder in self.decoders[provider]:
+                decoder.handle_record(system, data, info)
+            return
 
         call_data = {
             'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': system['provider'],
@@ -951,6 +843,9 @@ class ETWXMLHandler(GPUQueue):
             if file.has_key('last_access'):  # rest aren't rendered anyways
                 call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': file['last_access'], 'str': file['name'], 'type': 11, 'id': parse_int(id)}
                 self.callbacks.on_event("object_delete", call_data)
+        decoder_set = set([decoder for decoders in self.decoders.itervalues() for decoder in decoders])
+        for decoder in decoder_set:  # since one decoder can handle different providers
+            decoder.finalize()
 
     def on_binary(self, system, data, info):
         opcode = int(system['Opcode'])
@@ -1005,9 +900,12 @@ class ETWXMLHandler(GPUQueue):
             new_info = {'Task': 'QueuePacket', 'Opcode': OPCODES[opcode]}
             system['provider'] = 'Microsoft-Windows-DxgKrnl'
             return self.on_event(system, {'SubmitSequence': submitSequence, 'PacketType': packetType}, new_info)
-        elif system['provider'] == '{8C8F13B1-60EB-4B6A-A433-DE86104115AC}':  # SteamVR
-            return self.SteamVR(system, data, info)
-
+        else:
+            provider = system['provider'].upper() if system['provider'] else None
+            if provider in self.decoders:
+                for decoder in self.decoders[provider]:
+                    decoder.handle_record(system, data, info)
+                return
 
     def parse(self):
         providers = [
@@ -1018,11 +916,13 @@ class ETWXMLHandler(GPUQueue):
             'MICROSOFT-WINDOWS-DXGKRNL',
             'MICROSOFT-WINDOWS-DWM-CORE',
             '{9E814AAD-3204-11D2-9A82-006008A86939}',  # MSNT_SystemTrace
-            '{8C8F13B1-60EB-4B6A-A433-DE86104115AC}',  # SteamVR
+
             'MSNT_SYSTEMTRACE',
             # 'MICROSOFT-WINDOWS-SHELL-CORE'
             None  # Win7 events
         ]
+        for provider in self.decoders.iterkeys():
+            providers.append(provider)
         if self.args.input.endswith('.xml'):
             with open(self.args.input) as file:
                 self.file = file

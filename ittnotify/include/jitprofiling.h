@@ -634,19 +634,19 @@ typedef struct _iJIT_Method_Update
 extern "C" {
 #endif /* __cplusplus */
 
-#ifndef CDECL
+#ifndef JITAPI_CDECL
 #  if defined WIN32 || defined _WIN32
-#    define CDECL __cdecl
+#    define JITAPI_CDECL __cdecl
 #  else /* defined WIN32 || defined _WIN32 */
 #    if defined _M_IX86 || defined __i386__
-#      define CDECL __attribute__ ((cdecl)) 
+#      define JITAPI_CDECL __attribute__ ((cdecl))
 #    else  /* _M_IX86 || __i386__ */
-#      define CDECL /* actual only on x86_64 platform */
+#      define JITAPI_CDECL /* actual only on x86_64 platform */
 #    endif /* _M_IX86 || __i386__ */
 #  endif /* defined WIN32 || defined _WIN32 */
-#endif /* CDECL */
+#endif /* JITAPI_CDECL */
 
-#define JITAPI CDECL
+#define JITAPI JITAPI_CDECL
 /** @endcond */
 
 /**

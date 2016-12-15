@@ -31,6 +31,8 @@
 #ifdef _WIN32
     #include <io.h>
     #include <direct.h>
+#else
+    #include <pthread.h>
 #endif
 
 namespace sea {
@@ -228,8 +230,12 @@ std::string GetSavePath()
 
 bool IsVerboseMode()
 {
+#if defined(_DEBUG) && defined(__ANDROID__)
+    return true;
+#else
     static bool bVerboseMode = !get_environ_value("INTEL_SEA_VERBOSE").empty();
     return bVerboseMode;
+#endif
 }
 
 std::string g_savepath = GetSavePath();
@@ -294,11 +300,11 @@ void UNICODE_AGNOSTIC(thread_set_name)(const char* name)
         g_handlers[i]->SetThreadName(GetRegularFields(), name);
     }
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && !defined(ARM32)
     pthread_setname_np(pthread_self(), name);
 #elif defined(__APPLE__)
     pthread_setname_np(name);
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
     pthread_setname_np(pthread_self(), name);
 #endif
 }

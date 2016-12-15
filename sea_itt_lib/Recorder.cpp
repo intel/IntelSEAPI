@@ -82,6 +82,8 @@ size_t CRecorder::CheckCapacity(size_t size)
             return 0;
     }
 #else
+    if (!m_memmap) 
+        return 0;
     size_t nWroteBytes = (char*)m_pCurPos - (char*)m_memmap->GetPtr();
     if (nWroteBytes + size > m_memmap->GetSize())
     {

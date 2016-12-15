@@ -6,7 +6,7 @@ import traceback
 
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 import sea
-import strings
+
 from sea_runtool import Collector, Progress, format_bytes
 
 
@@ -168,6 +168,7 @@ class FTrace(Collector):
     def stop(self, wait=True):
         if not self.file:
             return []
+        time_sync()
         self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
         for path in glob.glob('/sys/kernel/debug/dri/*/i915_mvp_enable'):  # special case for Intel GPU events
             self.echo("0", path)
@@ -178,31 +179,6 @@ class FTrace(Collector):
             shutil.copyfileobj(file_from, file_to)
         os.remove(file_name)
         return [self.file]
-
-    @classmethod
-    def cut_incomplete_ring(cls, input, output):
-        header = []
-        header_complete = False
-        with open(input) as input_file, open(output, 'wb+') as output_file:
-            size = os.path.getsize(input)
-            count = 0
-            with Progress(size, 50, strings.converting % (os.path.basename(input), format_bytes(size))) as progress:
-                for line in input_file:
-                    if line.startswith('#'):
-                        if not header_complete:
-                            header.append(line)
-                        else:
-                            if line.startswith('##### CPU'):  # cleanup
-                                output_file.seek(0)
-                                output_file.writelines(header)
-                    else:
-                        if not header_complete:
-                            output_file.writelines(header)
-                            header_complete = True
-                        output_file.write(line)
-                    if not count % 1000:
-                        progress.tick(input_file.tell())
-                    count += 1
 
 
 COLLECTOR_DESCRIPTORS = [{
