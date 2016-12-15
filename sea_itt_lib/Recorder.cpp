@@ -48,25 +48,51 @@ CRecorder::CRecorder()
 
 size_t ChunkSize = 1*1020*1024;
 
-void CRecorder::Init(const std::string& path, uint64_t time, void* pCut)
+bool CRecorder::Init(const std::string& path, uint64_t time, void* pCut)
 {
+    Close(true);
+    m_path = path;
+#ifdef IN_MEMORY_RING
+    m_pCurPos = m_pAlloc = VirtualAlloc(nullptr, m_nBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
     m_memmap.reset(new CMemMap(path, ChunkSize));
     m_pCurPos = m_memmap->GetPtr();
+#endif
     m_nWroteTotal = 0;
     m_time = time;
     ++m_counter;
     m_pCut = pCut;
+    return !!m_pCurPos;
 }
 
 size_t CRecorder::CheckCapacity(size_t size)
 {
+#ifdef IN_MEMORY_RING
+    size_t nWroteBytes = (char*)m_pCurPos - (char*)m_pAlloc;
+    if (nWroteBytes + size > m_nBufferSize)
+    {
+        if (m_pBackBuffer)
+            VirtualFree(m_pBackBuffer, 0, MEM_RELEASE);
+        m_nBufferSize *= 2; //We grow the buffer each time to accommodate needs
+        m_pBackBuffer = m_pAlloc; //back buffer will always be half of m_nBufferSize
+        m_nBackSize = nWroteBytes;
+        m_pCurPos = m_pAlloc = VirtualAlloc(nullptr, m_nBufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        sea::GetThreadRecord()->nMemMoveCounter += 1;
+        if (!m_pCurPos)
+            return 0;
+    }
+#else
     size_t nWroteBytes = (char*)m_pCurPos - (char*)m_memmap->GetPtr();
     if (nWroteBytes + size > m_memmap->GetSize())
     {
         m_pCurPos = m_memmap->Remap(ChunkSize, m_nWroteTotal);
+#ifdef TURBO_MODE
+        sea::GetThreadRecord()->nMemMoveCounter += 1;
+#endif
         if (!m_pCurPos)
             return 0;
     }
+#endif
     return (std::max<size_t>)(m_nWroteTotal, 1);
 }
 
@@ -79,16 +105,38 @@ void* CRecorder::Allocate(size_t size)
     return pCurPos;
 }
 
-void CRecorder::Close()
+void CRecorder::Close(bool bSave)
 {
+#ifdef TURBO_MODE
+    sea::GetThreadRecord()->nMemMoveCounter += 1;
+#endif
+#ifdef IN_MEMORY_RING
+    if (bSave)
+    {
+        int fd = open(m_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, sea::FilePermissions);
+        int res = 0;
+        if (m_pBackBuffer)
+            res = write(fd, m_pBackBuffer, uint32_t(m_nBackSize));
+        if (m_pAlloc)
+            res = write(fd, m_pAlloc, uint32_t((char*)m_pCurPos - (char*)m_pAlloc));
+        close(fd);
+    }
+    if (m_pBackBuffer)
+        VirtualFree(m_pBackBuffer, 0, MEM_RELEASE);
+    if (m_pAlloc)
+        VirtualFree(m_pAlloc, 0, MEM_RELEASE);
+    m_pBackBuffer = m_pAlloc = nullptr;
+#else // IN_MEMORY_RING
     if (m_memmap)
         m_memmap->Resize(m_nWroteTotal);
     m_memmap.reset();
+#endif // IN_MEMORY_RING
+    m_pCurPos = nullptr;
 }
 
 CRecorder::~CRecorder()
 {
-    Close();
+    Close(true);
 }
 
 static_assert(sizeof(__itt_id) == 3*8, "sizeof(__itt_id) must be 3*8");
@@ -126,6 +174,7 @@ inline T* WriteToBuff(CRecorder& recorder, const T& value)
         *ptr = value;
     return ptr;
 }
+
 namespace sea {
 
     extern int64_t g_nRingBuffer;
@@ -149,7 +198,7 @@ namespace sea {
             pThreadRecord->files.clear();
         }
         //with very high probability the same thread will write into the same domain
-        if (pThreadRecord->pLastRecorder && pThreadRecord->pLastDomain == record.domain.nameA && (100 > pThreadRecord->nSpeedupCounter++))
+        if (pThreadRecord->pLastRecorder && (pThreadRecord->pLastDomain == record.domain.nameA) && (100 > pThreadRecord->nSpeedupCounter++))
             return reinterpret_cast<CRecorder*>(pThreadRecord->pLastRecorder);
         pThreadRecord->nSpeedupCounter = 0; //we can't avoid checking ring size
         pThreadRecord->pLastDomain = record.domain.nameA;
@@ -162,12 +211,13 @@ namespace sea {
             int64_t diff = record.rf.nanoseconds - pRecorder->GetCreationTime(); //timestamp can be in the past, it's ok
             //just checking pointer of g_spCutName.get() is thread safe without any locks: we don't access internals. And if it's the same we work with the old path.
             //but if it's changed we will lock and access the value below
-            if (pRecorder->SameCut(g_spCutName.get()) && (!g_nRingBuffer || (diff < g_nRingBuffer)))
+            bool bSameCut = pRecorder->SameCut(g_spCutName.get());
+            if (bSameCut && (!g_nRingBuffer || (diff < g_nRingBuffer)))
             {
                 pThreadRecord->pLastRecorder = pRecorder;
                 return pRecorder; //normal flow
             }
-            pRecorder->Close(); //time to create new file
+            pRecorder->Close(!bSameCut); //time to create new file
         }
 
         if (!pRecorder)
@@ -192,7 +242,12 @@ namespace sea {
         );
         try {
             VerbosePrint("Opening: %s\n", path);
-            pRecorder->Init(path, rf.nanoseconds, spCutName.get());
+            if (!pRecorder->Init(path, rf.nanoseconds, spCutName.get()))
+            {
+                VerbosePrint("Failed to init recorder\n");
+                pThreadRecord->files.erase(record.domain.nameA);
+                pRecorder = nullptr;
+            }
         }
         catch (const std::exception& exc)
         {
@@ -205,20 +260,20 @@ namespace sea {
     }
 }
 
-void WriteRecord(ERecordType type, const SRecord& record)
+double* WriteRecord(ERecordType type, const SRecord& record)
 {
     CRecorder* pFile = sea::GetFile(record);
-    if (!pFile) return;
+    if (!pFile) return nullptr;
 
     CRecorder& stream = *pFile;
 
     const size_t MaxSize = sizeof(STinyRecord) + 2*sizeof(__itt_id) + 3*sizeof(uint64_t) + sizeof(double) + sizeof(void*);
     size_t size = stream.CheckCapacity(MaxSize + record.length);
     if (!size)
-        return;
+        return nullptr;
 
     STinyRecord* pRecord = WriteToBuff(stream, STinyRecord{record.rf.nanoseconds, type});
-    if (!pRecord) return;
+    if (!pRecord) return nullptr;
 
     struct ShortId { unsigned long long a, b; };
     if (record.taskid.d1)
@@ -255,9 +310,10 @@ void WriteRecord(ERecordType type, const SRecord& record)
         pRecord->flags |= efHasData;
     }
 
+    double* pDelta = nullptr;
     if (record.pDelta)
     {
-        WriteToBuff(stream, *record.pDelta);
+        pDelta = WriteToBuff(stream, *record.pDelta);
         pRecord->flags |= efHasDelta;
     }
 
@@ -278,6 +334,8 @@ void WriteRecord(ERecordType type, const SRecord& record)
         static size_t autocut = 0;
         sea::SetCutName(std::string("autocut#") + std::to_string(autocut++));
     }
+
+    return pDelta;
 }
 
 CMemMap::CMemMap(const std::string &path, size_t size, size_t offset)
@@ -378,10 +436,9 @@ CMemMap::~CMemMap()
 using namespace sea;
 const bool g_bWithStacks = !!(GetFeatureSet() & sfStack);
 
-//XXX #define TURBO_MODE
 class CSEARecorder: public IHandler
 {
-#ifdef __ANDROID_API__
+#ifdef __ANDROID__
     CTraceEventFormat m_oTraceEventFormat;
 #endif
 
@@ -412,7 +469,6 @@ class CSEARecorder: public IHandler
 
     void TaskBegin(STaskDescriptor& oTask, bool bOverlapped) override
     {
-#ifndef TURBO_MODE
         const char *pData = nullptr;
         size_t length = 0;
         if (g_bWithStacks)
@@ -423,21 +479,23 @@ class CSEARecorder: public IHandler
             length = (GetStack(*pStack) - 2) * sizeof(void*);
             pData = reinterpret_cast<const char *>(&(*pStack)[2]);
         }
-        WriteRecord(bOverlapped ? ERecordType::BeginOverlappedTask : ERecordType::BeginTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, pData, length, oTask.fn});
-#endif
-#ifdef __ANDROID_API__
-        if (!bOverlapped && oTask.pName)
-        {
-            m_oTraceEventFormat.WriteEvent(CTraceEventFormat::Begin, oTask.pName->strA, CTraceEventFormat::CArgs(), &oTask.rf, oTask.pDomain->nameA);
-        }
+#ifdef TURBO_MODE
+        double duration = 0;
+        oTask.pDur = WriteRecord(bOverlapped ? ERecordType::BeginOverlappedTask : ERecordType::BeginTask, SRecord{ oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, &duration, pData, length, oTask.fn });
+        oTask.nMemCounter = GetThreadRecord()->nMemMoveCounter;
+#else
+        WriteRecord(bOverlapped ? ERecordType::BeginOverlappedTask : ERecordType::BeginTask, SRecord{ oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, pData, length, oTask.fn });
 #endif
     }
 
     void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length) override
     {
         WriteRecord(ERecordType::Metadata, SRecord{oTask.rf, *oTask.pDomain, oTask.id, __itt_null, pKey, nullptr, data, length});
+#ifdef TURBO_MODE
+        oTask.pDur = nullptr; //for now we don't support turbo tasks with arguments. But if count of arguments was saved it could work.
+#endif
 
-#ifdef __ANDROID_API__
+#ifdef __ANDROID__
         Cookie<CTraceEventFormat::CArgs>(oTask).Add(pKey->strA, length ? std::string(data, length).c_str() : data);
 #endif
     }
@@ -445,23 +503,27 @@ class CSEARecorder: public IHandler
     void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, double value) override
     {
         WriteRecord(ERecordType::Metadata, SRecord{ oTask.rf, *oTask.pDomain, oTask.id, __itt_null, pKey, &value});
+#ifdef TURBO_MODE
+        oTask.pDur = nullptr; //for now we don't support turbo tasks with arguments. But if count of arguments was saved it could work.
+#endif
+    }
+
+    void AddRelation(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, __itt_id head, __itt_string_handle* relation, __itt_id tail) override
+    {
+        WriteRecord(ERecordType::Relation, SRecord{ rf, *pDomain, head, tail, relation});
     }
 
     void TaskEnd(STaskDescriptor& oTask, const CTraceEventFormat::SRegularFields& rf, bool bOverlapped) override
     {
 #ifdef TURBO_MODE
-        double duration = double(rf.nanoseconds - oTask.rf.nanoseconds);
-        WriteRecord(bOverlapped ? ERecordType::EndOverlappedTask : ERecordType::EndTask, SRecord{oTask.rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, &duration, nullptr, 0, oTask.fn});
+        if (oTask.pDur && (oTask.nMemCounter == GetThreadRecord()->nMemMoveCounter))
+            *oTask.pDur = double(rf.nanoseconds - oTask.rf.nanoseconds);
+        else
+            WriteRecord(bOverlapped ? ERecordType::EndOverlappedTask : ERecordType::EndTask, SRecord{rf, *oTask.pDomain, oTask.id, oTask.parent, oTask.pName, nullptr, nullptr, 0, oTask.fn });
 #else
         WriteRecord(bOverlapped ? ERecordType::EndOverlappedTask : ERecordType::EndTask, SRecord{rf, *oTask.pDomain, oTask.id, __itt_null});
 #endif
 
-#ifdef __ANDROID_API__
-        if (!bOverlapped && oTask.pName)
-        {
-            m_oTraceEventFormat.WriteEvent(CTraceEventFormat::End, oTask.pName->strA, Cookie<CTraceEventFormat::CArgs>(oTask), &oTask.rf, oTask.pDomain->nameA);
-        }
-#endif
     }
 
     void Marker(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope theScope) override
@@ -483,11 +545,6 @@ class CSEARecorder: public IHandler
             pData = reinterpret_cast<const char *>(&(*pStack)[3]);
         }
         WriteRecord(ERecordType::Counter, SRecord{rf, *pDomain, __itt_null, __itt_null, pName, &value, pData, length});
-#ifdef __ANDROID_API__
-        CTraceEventFormat::CArgs args;
-        args.Add(pName->strA, value);
-        m_oTraceEventFormat.WriteEvent(CTraceEventFormat::Counter, pDomain->nameA, args, &rf);
-#endif
     }
 
     void SetThreadName(const CTraceEventFormat::SRegularFields& rf, const char* name) override
@@ -555,6 +612,34 @@ bool ReportModule(void* fn) // must be called from locked code
     int res = write(fd, text.c_str(), (unsigned int)text.size());
     close(fd);
     return res != -1;
+}
+
+int g_jit_fd = 0;
+
+bool InitJit()
+{
+    std::string path = GetDir(g_savepath) + "/data.jit";
+    g_jit_fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, FilePermissions);
+    return -1 != g_jit_fd;
+}
+
+bool WriteJit(const void* buff, size_t size)
+{
+    return -1 != write(g_jit_fd, buff, (unsigned int)size);
+}
+
+int g_mem_fd = 0;
+
+bool InitMemStat()
+{
+    std::string path = GetDir(g_savepath) + "stat.mem";
+    g_mem_fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, FilePermissions);
+    return -1 != g_mem_fd;
+}
+
+bool WriteMemStat(const void* buff, size_t size)
+{
+    return -1 != write(g_mem_fd, buff, (unsigned int)size);
 }
 
 } //namespace sea

@@ -36,6 +36,10 @@
 #include "ittnotify.h"
 #include "src/ittnotify/ittnotify_config.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 #ifdef _WIN32
     #undef message
 #else
@@ -44,10 +48,23 @@
 
 #ifdef _WIN32
     #define SEA_EXPORT __declspec(dllexport)
+    #define _sprintf sprintf_s
 #else
     #define SEA_EXPORT
+    #define _sprintf sprintf
 #endif
 
+namespace sea {
+    bool IsVerboseMode();
+}
+
+#ifdef __ANDROID__
+    #define VerbosePrint(...) {if (sea::IsVerboseMode()) __android_log_print(ANDROID_LOG_VERBOSE, "SEA", __VA_ARGS__);}
+#elif defined(_WIN32)
+    #define VerbosePrint(...) {if (sea::IsVerboseMode()) {std::vector<char> buff(1024); sprintf_s(buff.data(), 1024, __VA_ARGS__); OutputDebugStringA(buff.data()); printf(buff.data());}}
+#else
+    #define VerbosePrint(...) {if (sea::IsVerboseMode()) printf(__VA_ARGS__);}
+#endif
 
 #include "Utils.h"
 #include "TraceEventFormat.h"
@@ -72,6 +89,7 @@ namespace sea {
     void SetFolder(const std::string& path);
     void SetRing(uint64_t nanoseconds);
     const char* GetProcessName(bool bFullPath);
+    void FixCounter(__itt_counter_info_t* pCounter);
     struct SModuleInfo
     {
         void* base;
@@ -82,17 +100,16 @@ namespace sea {
     std::string GetDir(std::string path, const std::string& append = "");
 }
 
-struct ___itt_counter
+struct SDomainName
 {
     __itt_domain *pDomain;
     __itt_string_handle *pName;
-    __itt_metadata_type type;
-    double value;
 };
 
+struct ___itt_counter : public __itt_counter_info_t{};
 
 #include <string>
-#if defined(__ANDROID_API__)
+#if defined(__ANDROID__)
     #define STDSRC_DISABLE
 #else
     #define USE_PROBES
@@ -105,7 +122,7 @@ struct ___itt_counter
 #ifdef _WIN32
     #include "windows.h"
     #include "IntelSEAPI.h"
-#elif defined (__linux__) && !defined(__ANDROID_API__)
+#elif defined (__linux__) && !defined(__ANDROID__)
     #ifndef USE_PROBES
         __thread FILE* stdsrc_trace_info_t::pFile = nullptr;
     #endif
@@ -155,6 +172,8 @@ enum SEAFeature
     sfConcurrencyVisualizer = 0x20,
     sfRemotery = 0x40,
     sfBrofiler = 0x80,
+    sfMemStat = 0x100,
+    sfMemCounters = 0x200,
 };
 
 uint64_t GetFeatureSet();
@@ -179,6 +198,11 @@ struct STaskDescriptor
         void (*Deleter)(void*);
     };
     SCookie cookies[MAX_HANDLERS];
+
+#ifdef TURBO_MODE
+    uint64_t nMemCounter;
+    double *pDur;
+#endif
 
     ~STaskDescriptor()
     {
@@ -267,6 +291,7 @@ public:
     virtual void TaskBegin(STaskDescriptor& oTask, bool bOverlapped) {}
     virtual void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length) {}
     virtual void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, double value) {}
+    virtual void AddRelation(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, __itt_id head, __itt_string_handle* relation, __itt_id tail) {}
     virtual void TaskEnd(STaskDescriptor& oTask, const CTraceEventFormat::SRegularFields& rf, bool bOverlapped) {}
     virtual void Marker(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope scope) {}
     virtual void CreateCounter(const __itt_counter& id) {}
@@ -290,6 +315,9 @@ struct SThreadRecord
     void* pLastRecorder = nullptr;
     const void* pLastDomain = nullptr;
     int nSpeedupCounter = 0;
+#ifdef TURBO_MODE
+    uint64_t nMemMoveCounter = 0; //updated every time memory window moves
+#endif // TURBO_MODE
 };
 
 void TraverseDomains(const std::function<void(___itt_domain&)>& callback);
@@ -308,25 +336,6 @@ struct DomainExtra
 };
 
 SThreadRecord* GetThreadRecord();
-
-inline bool IsVerboseMode()
-{
-    static bool bVerboseMode = !!get_environ_value("INTEL_SEA_VERBOSE").size();
-    return bVerboseMode;
-}
-
-#ifdef _WIN32
-    #define _sprintf sprintf_s
-#else
-    #define _sprintf sprintf
-#endif
-
-
-#ifdef _WIN32
-    #define VerbosePrint(...) {if (sea::IsVerboseMode()) {std::vector<char> buff(1024); sprintf_s(buff.data(), 1024, __VA_ARGS__); OutputDebugStringA(buff.data()); printf(buff.data());}}
-#else
-    #define VerbosePrint(...) {if (sea::IsVerboseMode()) printf(__VA_ARGS__);}
-#endif
 
 #define CHECKRET(cond, res) {if (!(cond)) {VerbosePrint("Error: !(%s) at %s, %s:(%d)\n", #cond, __FUNCTION__, __FILE__, __LINE__); return res;}}
 

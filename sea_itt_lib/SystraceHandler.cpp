@@ -23,23 +23,25 @@ class CSystrace: public IHandler
 
     void TaskBegin(STaskDescriptor& oTask, bool bOverlapped) override
     {
-        if (bOverlapped) //will be sent on End as complete event
+        if (bOverlapped || !oTask.pName) //bOverlapped will be sent on End as complete event
             return;
-        uint64_t id = oTask.id.d1;
+
         m_oTraceEventFormat.WriteEvent(
-            CTraceEventFormat::Begin, MakeName(oTask.parent, oTask.pName->strA, oTask.id),
-            CTraceEventFormat::CArgs(), &oTask.rf,
-            oTask.pDomain->nameA, //gets into categories to filter
-            (oTask.id.d1 ? &id : nullptr)
+            CTraceEventFormat::Begin,
+            oTask.pName->strA,
+            CTraceEventFormat::CArgs(),
+            &oTask.rf,
+            oTask.pDomain->nameA
         );
+
     }
 
-    void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length)
+    void AddArg(STaskDescriptor& oTask, const __itt_string_handle *pKey, const char *data, size_t length) override
     {
         Cookie<CTraceEventFormat::CArgs>(oTask).Add(pKey->strA, length ? std::string(data, length).c_str() : data);
     }
 
-    void TaskEnd(STaskDescriptor& oTask, CTraceEventFormat::SRegularFields& rf, bool bOverlapped)
+    void TaskEnd(STaskDescriptor& oTask, const CTraceEventFormat::SRegularFields& rf, bool bOverlapped) override
     {
         if (bOverlapped)
         {
@@ -51,9 +53,9 @@ class CSystrace: public IHandler
                 &id, &dur
             );
         }
-        else
+        else if (oTask.pName)
         {
-            m_oTraceEventFormat.WriteEvent(CTraceEventFormat::End, "", Cookie<CTraceEventFormat::CArgs>(oTask), &rf);
+            m_oTraceEventFormat.WriteEvent(CTraceEventFormat::End, oTask.pName->strA, Cookie<CTraceEventFormat::CArgs>(oTask), &rf, oTask.pDomain->nameA);
         }
     }
 
@@ -79,11 +81,11 @@ class CSystrace: public IHandler
         );
     }
 
-    void Counter(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, const __itt_string_handle *pName, double value)
+    void Counter(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, const __itt_string_handle *pName, double value) override
     {
         m_oTraceEventFormat.WriteEvent(
-            CTraceEventFormat::Counter, "Counter",
-            CTraceEventFormat::CArgs(pName->strA, value), //not delta but final value has to be here, but we don't tract now
+            CTraceEventFormat::Counter, pDomain->nameA,
+            CTraceEventFormat::CArgs(pName->strA, value),
             &rf,
             pDomain->nameA //gets into categories to filter
         );

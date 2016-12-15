@@ -61,9 +61,9 @@ class Track:
         return False
 
 
-def prepare_environ(args):
+def prepare_environ(args):  # FIXME: avoid using global os.environ!
     if 'INTEL_LIBITTNOTIFY32' not in os.environ or 'SEAPI' not in os.environ['INTEL_LIBITTNOTIFY32']:
-        bin_dir = os.path.abspath(args.bindir) if args and args.bindir else os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+        bin_dir = os.path.abspath(args.bindir) if args and args.bindir else os.path.dirname(os.path.realpath(__file__))
         os.environ['INTEL_LIBITTNOTIFY32'] = os.path.join(bin_dir, 'IntelSEAPI32.dll')
     if 'INTEL_SEA_SAVE_TO' in os.environ:
         del os.environ['INTEL_SEA_SAVE_TO']
@@ -83,6 +83,8 @@ class ITT:
         self.strings = {}
         self.tracks = {}
         self.counters = {}
+        if 'INTEL_SEA_SAVE_TO' not in os.environ:
+            print "Hint: INTEL_SEA_SAVE_TO is not set..."
         if env_name not in os.environ:
             print "Warning:", env_name, "is not set..."
             return
@@ -102,8 +104,11 @@ class ITT:
         # void itt_marker(void* domain, uint64_t id, void* name, int scope)
         self.lib.itt_marker.argtypes = [c_void_p, c_ulonglong, c_void_p, c_int, c_ulonglong]
 
-        # void itt_task_begin(void* domain, uint64_t id, uint64_t parent, void* name)
+        # void itt_task_begin(void* domain, uint64_t id, uint64_t parent, void* name, uint64_t timestamp)
         self.lib.itt_task_begin.argtypes = [c_void_p, c_ulonglong, c_ulonglong, c_void_p, c_ulonglong]
+
+        # void itt_task_begin_overlapped(void* domain, uint64_t id, uint64_t parent, void* name, uint64_t timestamp)
+        self.lib.itt_task_begin_overlapped.argtypes = [c_void_p, c_ulonglong, c_ulonglong, c_void_p, c_ulonglong]
 
         # void itt_metadata_add(void* domain, uint64_t id, void* name, double value)
         self.lib.itt_metadata_add.argtypes = [c_void_p, c_ulonglong, c_void_p, c_double]
@@ -111,8 +116,11 @@ class ITT:
         # void itt_metadata_add_str(void* domain, uint64_t id, void* name, const char* value)
         self.lib.itt_metadata_add_str.argtypes = [c_void_p, c_ulonglong, c_void_p, c_char_p]
 
-        # void itt_task_end(void* domain)
+        # void itt_task_end(void* domain, uint64_t timestamp)
         self.lib.itt_task_end.argtypes = [c_void_p, c_ulonglong]
+
+        # void itt_task_end_overlapped(void* domain, uint64_t timestamp, uint64_t taskid)
+        self.lib.itt_task_end_overlapped.argtypes = [c_void_p, c_ulonglong, c_ulonglong]
 
         # void* itt_counter_create(void* domain, void* name)
         self.lib.itt_counter_create.argtypes = [c_void_p, c_void_p]
@@ -138,6 +146,15 @@ class ITT:
             # const char* resolve_pointer(const char* szModulePath, uint64_t addr)
             self.lib.resolve_pointer.argtypes = [c_char_p, c_ulonglong]
             self.lib.resolve_pointer.restype = c_char_p
+
+            # bool ExportExeIconAsGif(LPCWSTR szExePath, LPCWSTR szGifPath)
+            self.lib.ExportExeIconAsGif.argtypes = [c_wchar_p, c_wchar_p]
+            self.lib.ExportExeIconAsGif.restype = c_bool
+
+            # bool ConvertToGif(LPCWSTR szImagePath, LPCWSTR szGifPath, long width, long height)
+            self.lib.ConvertToGif.argtypes = [c_wchar_p, c_wchar_p, c_long, c_long]
+            self.lib.ConvertToGif.restype = c_bool
+
         elif 'linux' in sys.platform:
             # void itt_write_time_sync_markers()
             self.lib.itt_write_time_sync_markers.argtypes = []
@@ -239,35 +256,76 @@ class ITT:
         
         return self.lib.parse_standard_source(path, self.get_receiver_t(get_receiver), self.receive_t(receive))
 
+    def export_exe_icon_as_gif(self, exe_path, gif_path):
+        if sys.platform == 'win32':
+            if not hasattr(self.lib, 'ExportExeIconAsGif'):
+                return None
+            return self.lib.ExportExeIconAsGif(exe_path, gif_path)
+        elif sys.platform == 'darwin':
+            import glob
+            for file_path in glob.glob(os.path.normpath(os.path.join(exe_path, '../../Resources/*.icns'))):
+                self.convert_image(file_path, gif_path, 16, 16)
+                return True
+            return False
+        else:
+            return False
 
-def trace_execution(fn, *args):
+    def convert_image(self, from_path, to_path, width, height):
+        if sys.platform == 'win32':
+            return self.lib.ConvertToGif(from_path, to_path, width, height)
+        elif sys.platform == 'darwin':
+            return os.system('sips -s format gif -z %d %d "%s" --out "%s"' % (width, height, from_path, to_path))
+        else:
+            os.system('convert %s -resize %dx%d %s' % (from_path, width, height, to_path))
+
+
+def trace_execution(fn, args, save_to=None):
     import inspect
-
+    if save_to:
+        os.environ['INTEL_SEA_SAVE_TO'] = save_to
     itt = ITT("python")
 
     if itt.lib:
-        trace_execution.depth = 0
         file_id = itt.get_string_id('__FILE__')
         line_id = itt.get_string_id('__LINE__')
         module_id = itt.get_string_id('__MODULE__')
+        trace_execution.frames = {}
+        trace_execution.recurrent = False
+        high_part = 2**32
 
-        def profiler(frame, event, arg):
+        def profiler(frame, event, arg):  # https://pymotw.com/2/sys/tracing.html
+            if trace_execution.recurrent:
+                return
+            trace_execution.recurrent = True
+            task_id = id(frame.f_code)
             if 'call' in event:
-                trace_execution.depth += 1
-                name = frame.f_code.co_name
+                if task_id in trace_execution.frames:
+                    trace_execution.frames[task_id] += 1
+                else:
+                    trace_execution.frames[task_id] = 1
+                task_id += trace_execution.frames[task_id] * high_part
+                name = frame.f_code.co_name + ((' (%s)' % arg.__name__) if arg else '')
                 if 'self' in frame.f_locals:
                     cls = frame.f_locals['self'].__class__.__name__
                     name = cls + "." + name
+                # print event, name, task_id, arg
                 mdl = inspect.getmodule(frame)
-                itt.lib.itt_task_begin(itt.domain, trace_execution.depth, 0, itt.get_string_id(name), 0)
-                itt.lib.itt_metadata_add_str(itt.domain, trace_execution.depth, file_id, frame.f_code.co_filename)
-                itt.lib.itt_metadata_add(itt.domain, trace_execution.depth, line_id, frame.f_code.co_firstlineno)
+                itt.lib.itt_task_begin_overlapped(itt.domain, task_id, 0, itt.get_string_id(name), 0)
+                itt.lib.itt_metadata_add_str(itt.domain, task_id, file_id, frame.f_code.co_filename)
+                itt.lib.itt_metadata_add(itt.domain, task_id, line_id, frame.f_code.co_firstlineno)
                 if mdl:
-                    itt.lib.itt_metadata_add_str(itt.domain, trace_execution.depth, module_id, mdl.__name__)
-            if 'return' in event:
-                itt.lib.itt_task_end(itt.domain, 0)
-                trace_execution.depth -= 1
+                    itt.lib.itt_metadata_add_str(itt.domain, task_id, module_id, mdl.__name__)
+            elif 'return' in event:
+                # print event, frame.f_code.co_name, task_id + trace_execution.frames[task_id] * high_part
+                if task_id in trace_execution.frames:
+                    itt.lib.itt_task_end_overlapped(itt.domain, 0, task_id + trace_execution.frames[task_id] * high_part)
+                    if trace_execution.frames[task_id] > 1:
+                        trace_execution.frames[task_id] -= 1
+                    else:
+                        del trace_execution.frames[task_id]
+            trace_execution.recurrent = False
 
+        print trace_execution.frames
         old_profiler = sys.getprofile()
         sys.setprofile(profiler)
         old_threading_profiler = threading.setprofile(profiler)
@@ -303,8 +361,10 @@ def test_itt():
         for ts in range(ts1, ts2, dur):
             itt.task_submit("submitted", ts, dur / 2)
 
-if __name__ == "__main__":
+
+def main():
     itt = ITT("python")
+    return trace_execution(test_itt)
 
     class Reader:
         def set_progress(self, progress):
@@ -321,4 +381,6 @@ if __name__ == "__main__":
             return Receiver(provider, opcode, taskName)
 
     itt.parse_standard_source(r"etw-1.etl", Reader())
-    trace_execution(test_itt)
+
+if __name__ == "__main__":
+    main()

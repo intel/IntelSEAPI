@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <stack>
 
 #ifdef _WIN32
     #include <io.h>
@@ -168,24 +169,67 @@ std::string GetDir(std::string path, const std::string& append)
 {
     if (path.empty()) return path;
     path += append;
-#ifdef _WIN32
-    _mkdir(path.c_str());
-#else
-    mkdir(path.c_str(), FilePermissions);
-#endif
-    char lastSym = path[path.size()-1];
+
+    char lastSym = path[path.size() - 1];
     if (lastSym != '/' && lastSym != '\\')
         path += "/";
+
+    struct stat st = {};
+    std::string dir_name = path.substr(0, path.length() - 1);
+    if (stat(dir_name.c_str(), &st) != 0) //no dir
+    {
+#ifdef _WIN32
+        int res = _mkdir(dir_name.c_str());
+#else
+        int res = mkdir(dir_name.c_str(), FilePermissions);
+#endif
+        if (res == -1)
+        {
+            VerbosePrint("Failed to create dir: %s err=%d", dir_name.c_str(), errno);
+        }
+    }
     return path;
 }
 
 std::string GetSavePath()
 {
+#ifdef __ANDROID__
+    static std::string save_to;
+
+    int MAX_BYTES = 512;
+    char path[MAX_BYTES] = {0};
+    int path_file = open("/data/local/tmp/com.intel.sea.save_to", O_RDONLY);
+    if (path_file == -1)
+    {
+        VerbosePrint("%s: Can't open file /data/local/tmp/com.intel.sea.save_to! %d %d", __FUNCTION__, path_file, errno);
+        save_to = "";
+    }
+    else
+    {
+        read(path_file,  path, MAX_BYTES - 1);
+        close(path_file);
+
+        char* str_end = strchr(path, '\n');
+        save_to = std::string(path, (int)(str_end - path));
+    }
+#else
     static std::string save_to = get_environ_value("INTEL_SEA_SAVE_TO");
+#endif
+    VerbosePrint("Got save path: %s", save_to.c_str());
+    if (save_to.empty())
+    {
+        return save_to;
+    }
     return GetDir(
         save_to,
         ("-" + std::to_string(CTraceEventFormat::GetRegularFields().pid))
     );
+}
+
+bool IsVerboseMode()
+{
+    static bool bVerboseMode = !get_environ_value("INTEL_SEA_VERBOSE").empty();
+    return bVerboseMode;
 }
 
 std::string g_savepath = GetSavePath();
@@ -478,34 +522,44 @@ void counter_inc_delta_v3(const __itt_domain *pDomain, __itt_string_handle *pNam
     Counter(pDomain, pName, double(delta));//FIXME: add value tracking!
 }
 
-void counter_inc_v3(const __itt_domain *pDomain, __itt_string_handle *pName)
+void FixCounter(__itt_counter_info_t* pCounter)
 {
-    ITT_FUNCTION_STAT();
-    counter_inc_delta_v3(pDomain, pName, 1);
-}
-
-void counter_inc_delta(__itt_counter id, unsigned long long delta)
-{
-    ITT_FUNCTION_STAT();
-    id->value += delta;
-    Counter(id->pDomain, id->pName, id->value);
-}
-
-void counter_inc(__itt_counter id)
-{
-    ITT_FUNCTION_STAT();
-    counter_inc_delta(id, 1);
+    pCounter->extra2 = new SDomainName{
+        UNICODE_AGNOSTIC(domain_create)(pCounter->domainA),
+        UNICODE_AGNOSTIC(string_handle_create)(pCounter->nameA)
+    };
+    for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
+    {
+        g_handlers[i]->CreateCounter(reinterpret_cast<__itt_counter>(pCounter));
+    }
 }
 
 __itt_counter ITTAPI UNICODE_AGNOSTIC(counter_create_typed)(const char *name, const char *domain, __itt_metadata_type type)
 {
     ITT_FUNCTION_STAT();
-    __itt_counter id = new ___itt_counter{ UNICODE_AGNOSTIC(domain_create)(domain), UNICODE_AGNOSTIC(string_handle_create)(name), type}; //just an address in memory to make sure it's process wide unique
-    for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
+
+    if (!name || !domain)
+        return nullptr;
+
+    VerbosePrint("%s: name=%s domain=%s type=%d\n", __FUNCTION__, name, domain, (int)type);
+
+    __itt_counter_info_t *h_tail = NULL, *h = NULL;
+
+    CIttLocker locker;
+    __itt_global* pGlobal = GetITTGlobal();
+    for (h_tail = NULL, h = pGlobal->counter_list; h != NULL; h_tail = h, h = h->next)
     {
-        g_handlers[i]->CreateCounter(id);
+        if (h->nameA != NULL && h->type == type && !__itt_fstrcmp(h->nameA, name) && ((h->domainA == NULL && domain == NULL) ||
+            (h->domainA != NULL && domain != NULL && !__itt_fstrcmp(h->domainA, domain))))
+                break;
     }
-    return id;
+    if (!h)
+    {
+        NEW_COUNTER_A(pGlobal, h, h_tail, name, domain, type);
+        FixCounter(h);
+    }
+
+    return (__itt_counter)h;
 }
 
 #ifdef _WIN32
@@ -550,10 +604,14 @@ FConvert g_MetatypeFormatConverter[] = {
 void counter_set_value_ex(__itt_counter id, __itt_clock_domain *clock_domain, unsigned long long timestamp, void *value_ptr)
 {
     ITT_FUNCTION_STAT();
-    if (id->type == __itt_metadata_unknown)
+    if (id->type < __itt_metadata_u64 || id->type > __itt_metadata_double)
+    {
+        VerbosePrint("%s: weird type: %d stack: %s\n", __FUNCTION__, (int)id->type, GetStackString().c_str());
         return;
+    }
     double val = g_MetatypeFormatConverter[id->type](value_ptr);
-    Counter(id->pDomain, id->pName, val, clock_domain, timestamp);
+    SDomainName* pDomainName = reinterpret_cast<SDomainName*>(id->extra2);
+    Counter(pDomainName->pDomain, pDomainName->pName, val, clock_domain, timestamp);
 }
 
 void counter_set_value(__itt_counter id, void *value_ptr)
@@ -1181,7 +1239,11 @@ void relation_add_ex(const __itt_domain *pDomain, __itt_clock_domain* clock_doma
 {
     ITT_FUNCTION_STAT();
     CTraceEventFormat::SRegularFields rf = GetRegularFields(clock_domain, timestamp);
-    WriteRecord(ERecordType::Relation, SRecord{rf, *pDomain, head, tail, g_relations[relation]});
+
+    for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
+    {
+        g_handlers[i]->AddRelation(rf, pDomain, head, g_relations[relation], tail);
+    }
 }
 
 void relation_add_to_current(const __itt_domain *pDomain, __itt_relation relation, __itt_id tail)
@@ -1232,7 +1294,22 @@ class CMemoryTracker
 {
 protected:
     TCritSec m_cs;
-    std::map<const void*, size_t> m_size_map;
+
+    typedef std::pair<const __itt_domain *, const void * /*task name or function pointer*/> TDomainString;
+
+    struct SNode
+    {
+        struct SMemory
+        {
+            int32_t current_amount = 0;
+            int32_t max_amount = 0;
+        };
+        std::map<size_t, SMemory> memory;
+        std::map<TDomainString, SNode> chilren;
+    };
+    SNode m_tree;
+
+    std::map<const void*, std::pair<size_t, SNode*>> m_size_map;
     typedef std::pair<__itt_string_handle*, size_t/*count*/> TBlockData;
     std::map<size_t/*block size*/, TBlockData> m_counter_map;
     bool m_bInitialized = false;
@@ -1242,48 +1319,127 @@ public:
     {}
     void Alloc(SHeapFunction* pHeapFunction, const void* addr, size_t size)
     {
+        static bool bMemCount = !!(GetFeatureSet() & sfMemCounters);
+
         if (!m_bInitialized) return;
+        SNode* pNode = UpdateAllocation(size, +1, nullptr);
         TBlockData block;
         {
             std::lock_guard<TCritSec> lock(m_cs);
-            m_size_map[addr] = size;
-            auto it = m_counter_map.find(size);
-            if (m_counter_map.end() == it)
+            m_size_map[addr] = std::make_pair(size, pNode);
+            if (bMemCount)
             {
-                std::string name = pHeapFunction->name + std::string(":size<") + std::to_string(size) + ">(count)";
-                __itt_string_handle* pName = UNICODE_AGNOSTIC(string_handle_create)(name.c_str());
-                it = m_counter_map.insert(m_counter_map.end(), std::make_pair(size, std::make_pair(pName, size_t(1))));
+                auto it = m_counter_map.find(size);
+                if (m_counter_map.end() == it)
+                {
+                    std::string name = pHeapFunction->name + std::string(":size<") + std::to_string(size) + ">(count)";
+                    __itt_string_handle* pName = UNICODE_AGNOSTIC(string_handle_create)(name.c_str());
+                    it = m_counter_map.insert(m_counter_map.end(), std::make_pair(size, std::make_pair(pName, size_t(1))));
+                }
+                else
+                {
+                    ++it->second.second;
+                }
+                block = it->second;
             }
-            else
-            {
-                ++it->second.second;
-            }
-            block = it->second;
         }
-        Counter(pHeapFunction->pDomain, block.first, double(block.second));
+        if (bMemCount)
+        {
+            Counter(pHeapFunction->pDomain, block.first, double(block.second));
+        }
+    }
+
+    SNode* UpdateAllocation(size_t size, int32_t delta, SNode* pNode)
+    {
+        static bool bMemStat = (GetFeatureSet() & sfMemStat) && InitMemStat();
+        if (!bMemStat)
+            return nullptr;
+        SThreadRecord* pThreadRecord = GetThreadRecord();
+        STaskDescriptor* pTask = pThreadRecord->pTask;
+        std::stack<TDomainString> stack;
+        if (!pNode)
+        {
+            for (; pTask; pTask = pTask->prev)
+            {
+                stack.push(TDomainString(pTask->pDomain, pTask->pName ? pTask->pName : pTask->fn));
+            }
+        }
+        std::lock_guard<TCritSec> lock(m_cs);
+        if (!pNode)
+        {
+            pNode = &m_tree;
+            while (!stack.empty())
+            {
+                pNode = &m_tree.chilren[stack.top()];
+                stack.pop();
+            }
+        }
+        SNode::SMemory & mem = pNode->memory[size];
+        mem.current_amount += delta;
+        if (mem.current_amount > mem.max_amount)
+            mem.max_amount = mem.current_amount;
+        return pNode;
     }
 
     void Free(SHeapFunction* pHeapFunction, const void* addr)
     {
+        static bool bMemCount = !!(GetFeatureSet() & sfMemCounters);
         if (!m_bInitialized) return;
         std::lock_guard<TCritSec> lock(m_cs);
-        size_t size = m_size_map[addr];
+        const auto& pair = m_size_map[addr];
+        size_t size = pair.first;
+        SNode* pNode = pair.second;
         m_size_map.erase(addr);
-        auto it = m_counter_map.find(size);
-        if (m_counter_map.end() == it)
+        if (bMemCount)
         {
-            return; //how come?
+            auto it = m_counter_map.find(size);
+            if (m_counter_map.end() == it)
+                return; //how come?
+            else
+                --it->second.second;
+            Counter(pHeapFunction->pDomain, it->second.first, double(it->second.second));
         }
-        else
+        if (pNode) //if we missed allocation, we don't care about freeing
+            UpdateAllocation(size, -1, pNode);
+    }
+
+    void SaveMemoryStatistics()
+    {
+        if (!(GetFeatureSet() & sfMemStat))
+            return;
+        std::lock_guard<TCritSec> lock(m_cs);
+        WriteNode(m_tree);
+    }
+
+    template<class T>
+    void WriteMem(T value)
+    {
+        WriteMemStat(&value, sizeof(T));
+    }
+
+    void WriteNode(const SNode& node)
+    {
+        WriteMem((uint32_t)node.memory.size());
+        for (const auto& pair : node.memory)
         {
-            --it->second.second;
+            WriteMem((uint32_t)pair.first); //size
+            WriteMem(pair.second.current_amount); //SNode::SMemory
+            WriteMem((uint32_t)pair.second.max_amount); //SNode::SMemory
         }
-        Counter(pHeapFunction->pDomain, it->second.first, double(it->second.second));
+        WriteMem((uint32_t)node.chilren.size());
+        for (const auto& pair: node.chilren)
+        {
+            const TDomainString& domain_string = pair.first;
+            WriteMem((const void*)domain_string.first); //domain
+            WriteMem((const void*)domain_string.second); //string
+            WriteNode(pair.second);
+        }
     }
 
     ~CMemoryTracker()
     {
         m_bInitialized = false;
+        SaveMemoryStatistics();
     }
 } g_oMemoryTracker;
 
@@ -1332,9 +1488,6 @@ _AW(ITT_STUB_IMPL,metadata_str_add)\
     ITT_STUB_IMPL(marker)\
     ITT_STUB_IMPL(marker_ex)\
     ITT_STUB_IMPL(counter_inc_delta_v3)\
-    ITT_STUB_IMPL(counter_inc_v3)\
-    ITT_STUB_IMPL(counter_inc_delta)\
-    ITT_STUB_IMPL(counter_inc)\
 _AW(ITT_STUB_IMPL,counter_create)\
 _AW(ITT_STUB_IMPL,counter_create_typed)\
     ITT_STUB_IMPL(counter_set_value)\
@@ -1385,6 +1538,7 @@ _AW(ITT_STUB_IMPL,heap_function_create)\
     ITT_STUB_NO_IMPL(thread_ignore)\
 _AW(ITT_STUB_NO_IMPL,thr_name_set)\
     ITT_STUB_NO_IMPL(thr_ignore)\
+    ITT_STUB_NO_IMPL(counter_inc_delta)\
     ITT_STUB_NO_IMPL(enable_attach)\
     ITT_STUB_NO_IMPL(suppress_push)\
     ITT_STUB_NO_IMPL(suppress_pop)\
@@ -1450,6 +1604,7 @@ _AW(ITT_STUB_NO_IMPL,notify_sync_name)\
     ITT_STUB_NO_IMPL(thr_mode_set)\
     ITT_STUB_NO_IMPL(counter_destroy)\
     ITT_STUB_NO_IMPL(counter_inc)\
+    ITT_STUB_NO_IMPL(counter_inc_v3)\
 _AW(ITT_STUB_NO_IMPL,mark_create)\
 _AW(ITT_STUB_NO_IMPL,mark)\
     ITT_STUB_NO_IMPL(mark_off)\
@@ -1495,7 +1650,7 @@ void FillApiList(__itt_api_info* api_list_ptr)
 uint64_t GetFeatureSet()
 {
     static std::string env = get_environ_value("INTEL_SEA_FEATURES");
-    static std::string save = get_environ_value("INTEL_SEA_SAVE_TO");
+    static std::string save = GetSavePath();
 
     static uint64_t features =
         (std::string::npos != env.find("mfp") ? sfMetricsFrameworkPublisher : 0)
@@ -1515,6 +1670,10 @@ uint64_t GetFeatureSet()
         (std::string::npos != env.find("rmtr") ? sfRemotery : 0)
     |
         (std::string::npos != env.find("brflr") ? sfBrofiler : 0)
+    |
+        (std::string::npos != env.find("memstat") ? sfMemStat : 0)
+    |
+        (std::string::npos != env.find("memcount") ? sfMemCounters : 0)
     ;
     return features;
 }
@@ -1666,10 +1825,17 @@ void InitSEA()
     for (auto ptr: relations)
         g_relations[i++] = ptr ? UNICODE_AGNOSTIC(string_handle_create)(ptr) : nullptr;
 
+
+    GetSEARecorder().Init(g_rfMainThread);
+
 #ifdef _WIN32 //adding information about process explicitly
     ReportModule(GetModuleHandle(NULL));
 #else
     //XXX ReportModule(dlopen(NULL, RTLD_LAZY));
+#endif
+#if defined(_DEBUG) && defined(STANDARD_SOURCES) && 0
+    void Test();
+    Test();
 #endif
 }
 
@@ -1729,6 +1895,7 @@ extern "C" //plain C interface for languages like python
             (__itt_scope)scope
         );
     }
+
     SEA_EXPORT void itt_task_begin(void* domain, uint64_t id, uint64_t parent, void* name, uint64_t timestamp)
     {
         __itt_task_begin_ex(
@@ -1740,6 +1907,19 @@ extern "C" //plain C interface for languages like python
             reinterpret_cast<__itt_string_handle*>(name)
         );
     }
+
+    SEA_EXPORT void itt_task_begin_overlapped(void* domain, uint64_t id, uint64_t parent, void* name, uint64_t timestamp)
+    {
+        __itt_task_begin_overlapped_ex(
+            reinterpret_cast<__itt_domain*>(domain),
+            nullptr,
+            timestamp,
+            __itt_id_make(domain, id),
+            parent ? __itt_id_make(domain, parent) : __itt_null,
+            reinterpret_cast<__itt_string_handle*>(name)
+        );
+    }
+
 
     SEA_EXPORT void itt_metadata_add(void* domain, uint64_t id, void* name, double value)
     {
@@ -1770,6 +1950,16 @@ extern "C" //plain C interface for languages like python
             nullptr,
             timestamp
         );
+    }
+
+    SEA_EXPORT void itt_task_end_overlapped(void* domain, uint64_t timestamp, uint64_t taskid)
+    {
+        __itt_task_end_overlapped_ex(
+            reinterpret_cast<__itt_domain*>(domain),
+            nullptr,
+            timestamp,
+            __itt_id_make(domain, taskid)
+       );
     }
 
     SEA_EXPORT void* itt_counter_create(void* domain, void* name)

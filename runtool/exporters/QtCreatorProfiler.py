@@ -7,14 +7,14 @@ from sea_runtool import TaskCombiner, get_name, to_hex
 class QTProfiler(TaskCombiner):
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, args, tree)
-        self.file_name = self.get_targets()[-1]
+        self.file_name = self.args.output + ".qtd"
         self.file = open(self.file_name, "w")
         self.notes = []
         self.start_time = None
         self.end_time = None
 
     def get_targets(self):
-        return [self.args.output + ".qtd"]
+        return [self.file_name] if self.file_name else []
 
     def set_times(self, start, end):
         if self.start_time is None:
@@ -42,13 +42,6 @@ class QTProfiler(TaskCombiner):
         if begin.has_key('parent'):
             details += to_hex(begin['parent']) + "->"
         details += name
-        """XXX
-        details += name + ":"
-        if begin.has_key('id'):
-            details += "(" + to_hex(begin['id']) + ")"
-        else:
-            details = details.rstrip(":")
-        """
 
         if type == 'counter' or type == 'marker':
             kind = 'Painting'
@@ -57,21 +50,6 @@ class QTProfiler(TaskCombiner):
         else:
             kind = 'Javascript'
 
-        pid_tid = "%d,%d" % (begin['pid'], begin['tid'])
-        if self.tree["threads"].has_key(pid_tid):
-            thread_name = '%s(%d)' % (self.tree["threads"][pid_tid], begin["tid"])
-        else:
-            thread_name = str(begin['tid'])
-
-        """XXX
-        record = (
-            begin['__file__'].replace("\\", "/") if begin.has_key('__file__') else "",
-            begin['__line__'] if begin.has_key('__line__') else "0",
-            kind,
-            "%s | %s | %s" % (details, thread_name, begin['domain']),
-            name
-        )
-        """
         record = (
             begin['__file__'].replace("\\", "/") if begin.has_key('__file__') else "",
             begin['__line__'] if begin.has_key('__line__') else "0",
@@ -126,12 +104,17 @@ class QTProfiler(TaskCombiner):
         import fileinput
         self.file.close()
         fi = fileinput.input(self.file_name, inplace=1)
+        wrote_header = False
         for line in fi:
             if fi.isfirstline():
                 self.write_header()
+                wrote_header = True
             print line,
-        with open(self.file_name, "a") as file:
-            self.write_footer(file)
+        if wrote_header:
+            with open(self.file_name, "a") as file:
+                self.write_footer(file)
+        else:
+            self.file_name = None
 
     @staticmethod
     def join_traces(traces, output, args):  # TODO: implement progress
@@ -141,7 +124,7 @@ class QTProfiler(TaskCombiner):
             print >> file, '<?xml version="1.0" encoding="UTF-8"?>'
             traces = [minidom.parse(trace) for trace in traces]  # parse all traces right away
             traceStarts = sorted([int(dom.documentElement.attributes['traceStart'].nodeValue) for dom in traces]) #earliest start time
-            traceEnds = sorted([int(dom.documentElement.attributes['traceEnd'].nodeValue) for dom in traces], reverse = True)#latest end time
+            traceEnds = sorted([int(dom.documentElement.attributes['traceEnd'].nodeValue) for dom in traces], reverse=True)#latest end time
             print >> file, '<trace version="1.02" traceStart="%d" traceEnd="%d">' % (traceStarts[0], traceEnds[0])
             print >> file, '<eventData totalTime="%d">' % (traceEnds[0] - traceStarts[0])
             event_count = []  # accumulate event count to map indices

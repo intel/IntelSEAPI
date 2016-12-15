@@ -1,7 +1,11 @@
 import os
 import sys
 import json
+import strings
+import tempfile
 import subprocess
+import multiprocessing
+from datetime import datetime, timedelta
 from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst, get_importers, PseudoProgress
 
 MAX_GT_SIZE = 50 * 1024 * 1024
@@ -269,7 +273,10 @@ class GoogleTrace(TaskCombiner):
             else:
                 frame_id = '%d:%s' % (frame['ptr'], parent)
             if not self.frames.has_key(frame_id):
-                data = {'category': os.path.basename(frame['module']), 'name': frame['str']}
+                data = {'category': os.path.basename(frame['module']), 'name': frame['str'].replace(' ', '\t')}
+                if '__file__' in frame and frame['__file__']:
+                    line = str(frame['__line__']) if '__line__' in frame else '0'
+                    data['name'] += ' %s(%s)' % (frame['__file__'].replace(' ', '\t'), line)
                 if parent is not None:
                     data['parent'] = parent
                 self.frames[frame_id] = data
@@ -395,6 +402,19 @@ class GoogleTrace(TaskCombiner):
         self.file.close()
 
     @staticmethod
+    def get_catapult_path(args):
+        if 'INTEL_SEA_CATAPULT' in os.environ and os.path.exists(os.environ['INTEL_SEA_CATAPULT']):
+            return os.environ['INTEL_SEA_CATAPULT']
+        elif args.bindir:
+            path = os.path.join(args.bindir, 'catapult', 'tracing')
+            if os.path.exists(path):
+                return path
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'catapult', 'tracing')
+        if os.path.exists(path):
+            return path
+        return None
+
+    @staticmethod
     def join_traces(traces, output, args):
         ftrace = []  # ftrace files have to be joint by time: chrome reads them in unpredictable order and complains about time
         for file in traces:
@@ -403,36 +423,55 @@ class GoogleTrace(TaskCombiner):
         if len(ftrace) > 1:  # just concatenate all files in order of creation
             ftrace.sort()  # name defines sorting
             merged = os.path.join(os.path.dirname(ftrace[0]), 'merged.ftrace')
+            trace_event_clock_sync = False
             with open(merged, 'w') as output_file:
                 for file_name in ftrace:
                     with open(file_name) as input_file:
                         for line in input_file:
+                            if 'trace_event_clock_sync' in line:
+                                if trace_event_clock_sync:
+                                    continue
+                                trace_event_clock_sync = True
                             output_file.write(line)
             traces = [file for file in traces if not file.endswith('.ftrace')]
             traces.append(merged)
 
-        if 'INTEL_SEA_CATAPULT' in os.environ:
-            sys.path.append(os.environ['INTEL_SEA_CATAPULT'])
-            from tracing_build import trace2html
-            import codecs
-            with codecs.open(output + '.html', 'w', 'utf-8') as new_file:
-                def WriteHTMLForTracesToFile(trace_filenames, output_file, config_name=None):
-                    trace_data_list = []
-                    for filename in trace_filenames:
-                        with open(filename, 'r') as f:
-                            trace_data = f.read()
-                            try:
-                                trace_data = json.loads(trace_data)
-                            except ValueError:
-                                pass
-                            trace_data_list.append(trace_data)
-                    title = os.path.basename(output).split('_')[0] + ": Intel(R) Single Event API"
-                    trace2html.WriteHTMLForTraceDataToFile(trace_data_list, title, output_file, config_name)
-                with PseudoProgress("Catapulting...") as progress:
-                    WriteHTMLForTracesToFile(traces, new_file)
+        catapult_path = GoogleTrace.get_catapult_path(args)
+        if catapult_path:
+            import threading
+            proc = threading.Thread(target=GoogleTrace.catapult, args=(catapult_path, output, traces))
+            proc.start()
+            with Progress(0, 0, strings.catapulting) as progress:
+                count = 0
+                while proc.is_alive():
+                    progress.tick(count)
+                    count += 1
+                    proc.join(0.5)
             return output + '.html'
         else:
             return GoogleTrace.zip_traces(traces, output)
+
+    @staticmethod
+    def catapult(catapult_path, output, traces):
+        sys.path.append(catapult_path)
+        from tracing_build import trace2html
+        import codecs
+        with codecs.open(output + '.html', 'w', 'utf-8') as new_file:
+            def WriteHTMLForTracesToFile(trace_filenames, output_file, config_name=None):
+                trace_data_list = []
+                for filename in trace_filenames:
+                    with open(filename, 'r') as f:
+                        trace_data = f.read()
+                        try:
+                            trace_data = json.loads(trace_data)
+                        except ValueError:
+                            pass
+                        trace_data_list.append(trace_data)
+                title = os.path.basename(output).split('_')[0] + ": Intel(R) Single Event API"
+                trace2html.WriteHTMLForTraceDataToFile(trace_data_list, title, output_file, config_name)
+
+            WriteHTMLForTracesToFile(traces, new_file)
+        return output + '.html'
 
     @staticmethod
     def zip_traces(traces, output):
@@ -452,3 +491,13 @@ EXPORTER_DESCRIPTORS = [{
     'available': True,
     'exporter': GoogleTrace
 }]
+
+
+def support_no_console(log):
+    if sys.executable.lower().endswith("w.exe"):
+        sys.stdout = open(os.devnull, "w")
+        sys.stderr = open(log, "w")
+        sys.stdin = open(os.devnull, "r")
+
+if __name__ != "__main__":
+    support_no_console(os.path.join(tempfile.gettempdir(), datetime.now().strftime('sea_%H_%M_%S__%d_%m_%Y.log')))

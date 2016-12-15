@@ -2,6 +2,7 @@ import cgi
 
 from sea_runtool import GraphCombiner, to_hex, format_time
 
+
 class DGML(GraphCombiner):
     def __init__(self, args, tree):
         GraphCombiner.__init__(self, args, tree)

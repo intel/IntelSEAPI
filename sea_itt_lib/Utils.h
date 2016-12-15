@@ -241,3 +241,4 @@ public:
 const size_t StackSize = 100;
 using TStack = void*[StackSize];
 size_t GetStack(TStack& stack);
+std::string GetStackString();

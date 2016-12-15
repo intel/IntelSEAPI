@@ -100,7 +100,9 @@ void TaskStack(int level)
 {
     ITT_FUNCTION_TASK();
     std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
+    void* pMem = malloc(rand() % 100);
     if (level) TaskStack(level - 1);
+    free(pMem);
     std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 100));
 }
 

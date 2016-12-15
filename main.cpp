@@ -171,7 +171,7 @@ int ResolveSymbol(char* request)
     char* addr = strrchr(request, ':') + 1;
     *(addr - 1) = 0;
     std::string res = GetFunctionName(_atoi64(addr), request);
-    std::cout << res;
+    std::cout << res << std::endl;
     return res.size() ? 0 : -1;
 }
 

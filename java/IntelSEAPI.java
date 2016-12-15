@@ -16,7 +16,8 @@
 #
 **********************************************************************************************************************************************************************************************************************************************************************************************/
 
-package com.intel.sea;
+package com.intel.sea; 
+
 import java.util.*;
 import java.io.File;
 import java.lang.reflect.*;
@@ -25,26 +26,58 @@ public class IntelSEAPI
 {
     private static boolean s_bInitialized = false;
     static {
+        //Check, this class running on Android or not
+        boolean isAndroid;
+        try {
+            Class.forName("android.app.Activity");
+            isAndroid = true;
+        }
+        catch (ClassNotFoundException e) {
+            isAndroid = false;
+        }
+
         String bitness = System.getProperty("os.arch").contains("64") ? "64" : "32";
-        String envName = "INTEL_LIBITTNOTIFY" + bitness;
-        String seaPath = System.getenv(envName);
-        if (seaPath != null)
-        {
-            File file = new File(seaPath);
-            System.setProperty("java.library.path", System.getProperty("java.library.path") + ";" +file.getParent());
+        if (isAndroid) {
             try {
-                Field fieldSysPath = ClassLoader.class.getDeclaredField("sys_paths");
-                fieldSysPath.setAccessible(true);
-                fieldSysPath.set(null, null);
-                String name = file.getName();
-                System.loadLibrary(name.substring(0, name.lastIndexOf('.')));
+                String libName = "IntelSEAPI" + bitness;
+                System.loadLibrary(libName);
 
                 s_bInitialized = true;
-            } catch (Exception exc)
-            {
+            }
+            catch (UnsatisfiedLinkError exc) {
+                System.err.println("Load exception: " + exc.getMessage());
+            }
+        }
+        else {
+            String envName = "INTEL_LIBITTNOTIFY" + bitness;
+            String seaPath = System.getenv(envName);
+            if (seaPath != null) {
+                File file = new File(seaPath);
+                String os = System.getProperty("os.name");
+                char sep = (os.startsWith("Windows") ? ';' : ':');
+
+                System.setProperty("java.library.path", System.getProperty("java.library.path") + sep + file.getParent());
+                try {
+                    Field fieldSysPath = ClassLoader.class.getDeclaredField("sys_paths");
+                    fieldSysPath.setAccessible(true);
+                    fieldSysPath.set(null, null);
+                    String name = file.getName();
+
+                    String subname = name.substring(0, name.lastIndexOf('.'));
+                    if (os.startsWith("Mac")) {
+                        subname = subname.substring("lib".length());
+                    }
+
+                    System.loadLibrary(subname);
+
+                    s_bInitialized = true;
+                } catch (Exception exc) {
+                    System.err.println("Load exception: " + exc.getMessage());
+                }
             }
         }
     }
+
     private native static long createDomain(String name);
     private native static long createString(String name); //for names
     private native static void beginTask(long domain, long name, long id, long parent, long timestamp);
@@ -144,23 +177,23 @@ public class IntelSEAPI
             return 0;
         return getTimestamp();
     }
-
+    
     public static void main(String[] args)
     {
         IntelSEAPI itt = new IntelSEAPI("java");
         itt.marker("Begin", Scope.Process, 0, 0);
         long ts1 = itt.getTime();
-
+        
         itt.taskBegin("Main", 0, 0);
         for (double i = 0; i < 100; i += 1.)
         {
             itt.counter("java_counter", i, 0);
         }
         itt.taskEnd();
-
+        
         long ts2 = itt.getTime();
         itt.marker("End", Scope.Process, 0, 0);
-
+        
         itt.track("group", "track");
         long dur = (ts2-ts1) / 100;
         for (long ts = ts1; ts < ts2; ts += dur)

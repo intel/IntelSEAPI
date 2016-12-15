@@ -1,15 +1,20 @@
 import os
+import sys
 from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_exporters
+sys.path.append(os.path.realpath(os.path.dirname(__file__)))  # weird CentOS behaviour workaround
 from etw import GPUQueue
+
 
 class DTrace(GPUQueue):
     def __init__(self, args, gt, callbacks):
         GPUQueue.__init__(self, args, callbacks)
         self.res = [args.input + '.ftrace']
         self.cs = gt.ContextSwitch(self.res[0])
+        self.ignore_gpu = True  # workaround for incomplete dtrace ring
         self.cpu_packets = {}
         self.gpu_packets = {}
         self.thread_names = {}
+        self.gpu_frame = {'catch': [0, 0], 'task': None}
         for callback in self.callbacks.callbacks:
             callback("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': -1, 'tid': -1, 'data': 'GPU Engines', 'time': 0, 'delta': -2})
 
@@ -32,8 +37,11 @@ class DTrace(GPUQueue):
                 prev_name=prev_name.replace(' ', '_'), next_name=next_name.replace(' ', '_')
             )
         elif cmd.startswith('dtHook'):
-            pid, tid = args[0:2]
-            self.gpu_call(time, cmd[6:], int(pid, 16), int(tid, 16), args[2:])
+            if cmd == 'dtHookCompleteExecute':
+                self.ignore_gpu = False
+            if not self.ignore_gpu:
+                pid, tid = args[0:2]
+                self.gpu_call(time, cmd[6:], int(pid, 16), int(tid, 16), args[2:])
         elif cmd in ['e', 'r']:
             pid, tid = args[0:2]
             self.task(time, int(pid, 16), int(tid, 16), cmd == 'e', args[2], args[3:])
@@ -42,23 +50,27 @@ class DTrace(GPUQueue):
 
     def task(self, time, pid, tid, starts, name, args):
         data = {
-            'domain': 'AppleIntelHD5000Graphics', 'type': 0 if starts else 1,
+            'domain': 'AppleIntelGraphics', 'type': 0 if starts else 1,
             'time': time, 'tid': tid, 'pid': pid, 'str': name,
             'args': dict((idx, val) for idx, val in enumerate(args))
         }
         self.callbacks.on_event('task_begin' if starts else 'task_end', data)
+        if name == 'IGAccelGLContext::BlitFramebuffer':
+            self.gpu_frame['catch'][0 if starts else 1] = time
 
     def gpu_call(self, time, cmd, pid, tid, args):
         if 'PrepareQueueKMD' == cmd:
             pass
         elif 'SwCtxCreation' == cmd:
             pass
+        elif 'SubmitExecList' == cmd:
+            pass
         elif 'SubmitQueueKMD' == cmd:
             id = args[1]
             if id in self.gpu_packets:
                 return
             self.gpu_packets[id] = begin_data = {
-                'domain': 'AppleIntelHD5000Graphics', 'type': 2,
+                'domain': 'AppleIntelGraphics', 'type': 2,
                 'time': time, 'tid': int(args[3], 16), 'pid': -1, 'str': args[4], 'id': int(id, 16),
                 'args': dict((idx, val) for idx, val in enumerate(args))
             }
@@ -70,6 +82,8 @@ class DTrace(GPUQueue):
                 if self.callbacks.check_time_in_limits(relation[0]['time']):
                     for callback in self.callbacks.callbacks:
                         callback.relation(*relation)
+                    if self.gpu_frame['catch'][0] <= relation[1]['time'] <= self.gpu_frame['catch'][1]:
+                        self.gpu_frame['task'] = id
 
             self.auto_break_gui_packets(begin_data, 2 ** 64 + begin_data['tid'], True)
             self.callbacks.on_event("task_begin_overlapped", begin_data)
@@ -78,7 +92,7 @@ class DTrace(GPUQueue):
             if id in self.cpu_packets:
                 return
             self.cpu_packets[id] = begin_data = {
-                'domain': 'AppleIntelHD5000Graphics', 'type': 2,
+                'domain': 'AppleIntelGraphics', 'type': 2,
                 'time': time, 'tid': -tid, 'pid': pid, 'str': id, 'id': int(id, 16),
                 'args': dict((idx, val) for idx, val in enumerate(args))
             }
@@ -98,6 +112,8 @@ class DTrace(GPUQueue):
             id = args[1]
             if id in self.cpu_packets:
                 self.cpu_packets[id]['name'] = '3DBlt:' + id
+        elif 'CompleteExecList' == cmd:
+            pass
         elif 'CompleteExecute' == cmd:
             id = args[1]
             if id in self.cpu_packets:
@@ -111,12 +127,20 @@ class DTrace(GPUQueue):
                 end_data.update({'time': time, 'type': 3})
                 self.auto_break_gui_packets(end_data, 2 ** 64 + end_data['tid'], False)
                 self.callbacks.on_event("task_end_overlapped", end_data)
+                if id == self.gpu_frame['task']:
+                    self.on_gpu_frame(time, end_data['pid'], end_data['tid'])
                 del self.gpu_packets[id]
+
         elif 'RemoveQueueKMD' == cmd:
             id = args[1]
             pass
+        elif 'WriteStamp' == cmd:
+            pass
         else:
             print cmd
+
+    def on_gpu_frame(self, time, pid, tid):
+        self.callbacks.on_event("marker", {'pid': pid, 'tid': tid, 'domain': 'gits', 'time': time, 'str': "GPU Frame", 'type': 5, 'data': 'task'})
 
     def finalize(self):
         for tid, (name, pid) in self.thread_names.iteritems():
@@ -125,13 +149,13 @@ class DTrace(GPUQueue):
                 callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (%d)' % (thread_name, tid)})
 
     def get_result(self):
-        return self.res
+        return [path for path in self.res if os.path.exists(path)]
 
 
 def transform_dtrace(args):
-    tree = default_tree()
+    tree = default_tree(args)
     tree['ring_buffer'] = True
-    TaskCombiner.disable_handling_leftovers = True
+    args.no_left_overs = True
     gt = get_exporters()['gt']
     with Callbacks(args, tree) as callbacks:
         if callbacks.is_empty():

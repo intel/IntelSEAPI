@@ -34,7 +34,8 @@ class I915(GPUQueue):
         return args
 
     def start_task(self, args, lcls):
-        self.state[self.parse_args(args)['uniq']] = lcls
+        args = self.parse_args(args)
+        self.state[args['uniq'] if 'uniq' in args else args['seqno']] = lcls
 
     def add_relation(self, frm, to, static={'count': 0}):
         relation = (frm.copy(), to.copy(), frm)
@@ -48,7 +49,7 @@ class I915(GPUQueue):
 
     def join_task(self, pid, tid, timestamp, name, args):
         args = self.parse_args(args)
-        id = args['uniq']
+        id = args['uniq'] if 'uniq' in args else args['seqno']
         if id not in self.state:
             return None
         prev = self.state[id]
@@ -64,7 +65,7 @@ class I915(GPUQueue):
     def handle_record(self, proc, pid, tid, cpu, flags, timestamp, name, args):
         if name.startswith('i915_gem_request_wait'):
             args = self.parse_args(args)
-            id = args['uniq']
+            id = args['uniq'] if 'uniq' in args else args['seqno']
             if name.endswith('_end'):
                 if id not in self.cpu_packets:
                     return
@@ -103,8 +104,8 @@ class I915(GPUQueue):
 
             start = cputime + (start - gputime) * 80
             end = cputime + (end - gputime) * 80
-            id = args['uniq']
-            call_data = {'tid': ring, 'pid': -1, 'domain': 'i915', 'time': start, 'str': args['uniq'], 'type': 2, 'args': args, 'id': id}
+            id = args['uniq'] if 'uniq' in args else args['seqno']
+            call_data = {'tid': ring, 'pid': -1, 'domain': 'i915', 'time': start, 'str': id, 'type': 2, 'args': args, 'id': id}
 
             self.auto_break_gui_packets(call_data, 2 ** 64 + call_data['tid'], True)
             self.callbacks.on_event("task_begin_overlapped", call_data)
@@ -211,17 +212,20 @@ class I915(GPUQueue):
             self.start_task(args, locals())
         elif 'i915_gem_request_add' in name:
             call_data = self.join_task(pid, tid, timestamp, 'gem_ring_dispatch->gem_request_add', args)
-            id = call_data['id']
-            if id in self.relations:
-                self.add_relation(call_data, self.relations[id])
-            self.relations[id] = call_data
-            self.relations_add[id] = call_data
+            if call_data:
+                id = call_data['id']
+                if id in self.relations:
+                    self.add_relation(call_data, self.relations[id])
+                self.relations[id] = call_data
+                self.relations_add[id] = call_data
         elif 'i915_scheduler_remove' == name:  # ring=0, do_submit=1
             pass
         elif 'i915_scheduler_landing' == name:  # ring=4, uniq=246869, seqno=308717, status=3
             self.start_task(args, locals())
         elif 'i915_gem_request_complete' == name:  # dev=0, ring=4, uniq=246869, seqno=308717
             call_data = self.join_task(pid, tid, timestamp, 'scheduler_landing->gem_request_complete', args)
+            if not call_data:
+                return
             id = call_data['id']
             if id in self.gpu_relations:
                 self.add_relation(call_data, self.gpu_relations[id])

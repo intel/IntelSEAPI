@@ -1,4 +1,4 @@
-#*********************************************************************************************************************************************************************************************************************************************************************************************
+﻿#*********************************************************************************************************************************************************************************************************************************************************************************************
 #   Intel(R) Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
@@ -25,14 +25,17 @@ import subprocess
 
 install_dest = r"./../installer"
 
+
 def get_share_folder():
     import datetime
     folder_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(install_dest, folder_name)
 
+
 def run_shell(cmd):
     print "\n>>", cmd
     os.system(cmd)
+
 
 def replace_in_file(file, what_by):
     import fileinput
@@ -41,6 +44,7 @@ def replace_in_file(file, what_by):
             if what in line:
                 line = line.replace(what, by)
         sys.stdout.write(line)
+
 
 def get_yocto():
     if not os.environ.has_key('CXX'):
@@ -51,6 +55,7 @@ def get_yocto():
     if '-m32' in cxx:
         return {'bits':'32'}
     return {'bits':'64'}
+
 
 def GetJDKPath():
     if sys.platform == 'win32':
@@ -85,7 +90,7 @@ def GetJDKPath():
         if err or not path:
             return None
         if sys.platform == 'darwin':
-            path = "/System/Library/Frameworks/JavaVM.framework/Headers"
+            path = subprocess.check_output("/usr/libexec/java_home").split('\n')[0]
             return (path if os.path.exists(path) else None)
         else:
             matches = []
@@ -96,29 +101,69 @@ def GetJDKPath():
                 return None
             return os.path.split(matches[0])[0]
 
+if sys.platform == 'win32':
+    def read_registry(path, depth=0xFFFFFFFF, statics={}):
+        import _winreg
+        parts = path.split('\\')
+        hub = parts[0]
+        path = '\\'.join(parts[1:])
+        if not statics:
+            statics['hubs'] = {'HKLM': _winreg.HKEY_LOCAL_MACHINE}
+
+        def enum_nodes(curpath, level):
+            if level < 1:
+                return {}
+            res = {}
+            try:
+                aKey = _winreg.OpenKey(statics['hubs'][hub], curpath, 0, _winreg.KEY_READ | _winreg.KEY_WOW64_64KEY)
+            except WindowsError:
+                return res
+
+            try:
+                i = 0
+                while True:
+                    name, value, _ = _winreg.EnumValue(aKey, i)
+                    i += 1
+                    res[name] = value
+            except WindowsError:
+                pass
+
+            keys = []
+            try:
+                i = 0
+                while True:
+                    key = _winreg.EnumKey(aKey, i)
+                    i += 1
+                    keys.append(key)
+            except WindowsError:
+                pass
+
+            _winreg.CloseKey(aKey)
+
+            for key in keys:
+                res[key] = enum_nodes(curpath + '\\' + key, level - 1)
+
+            return res
+
+        return enum_nodes(path, depth)
+
+
 def get_vs_versions():
     if sys.platform != 'win32':
         return []
-    import _winreg
-    try:
-        aKey = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\Microsoft\VisualStudio', 0, _winreg.KEY_READ | _winreg.KEY_WOW64_64KEY)
-    except WindowsError:
-        print "No Visual Studio found"
-        return []
-    subkeys = []
-    try:
-        i = 0
-        while True:
-            subkey = _winreg.EnumKey(aKey, i)
-            if '.' in subkey:
-                subkeys.append(subkey.split('.')[0])
-            i += 1
-    except WindowsError:
-        pass
-    if not subkeys:
+    bush = read_registry(r'HKLM\SOFTWARE\Microsoft\VisualStudio', 2)
+
+    versions = []
+    for key, val in bush.iteritems():
+        if '.' not in key:
+            continue
+        version = key.split('.')[0]
+        if int(version) >= 12 and 'VC' in val:
+            versions.append(version)
+    if not versions:
         print "No Visual Studio version found"
-        return []
-    return sorted(subkeys)
+    return sorted(versions)
+
 
 def main():
     import argparse
@@ -129,7 +174,7 @@ def main():
     parser.add_argument("--force_bits", choices=["32", "64"])
     parser.add_argument("-a", "--android", action="store_true")
     parser.add_argument("-c", "--clean", action="store_true")
-    if sys.platform == 'win32':
+    if sys.platform == 'win32' and vs_versions:
         parser.add_argument("--vs", choices=vs_versions, default=vs_versions[0])
     args = parser.parse_args()
 

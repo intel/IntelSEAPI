@@ -17,6 +17,9 @@
 **********************************************************************************************************************************************************************************************************************************************************************************************/
 
 #pragma once
+
+//#define TURBO_MODE
+
 #ifdef _WIN32
     #include <windows.h>
 #else
@@ -80,18 +83,26 @@ class CRecorder
     CRecorder& operator = (const CRecorder&) = delete;
 public:
     CRecorder();
-    void Init(const std::string& path, uint64_t time, void* pCut);
+    bool Init(const std::string& path, uint64_t time, void* pCut);
     size_t CheckCapacity(size_t size);
     void* Allocate(size_t size);
     uint64_t GetCount(){return m_counter;}
     uint64_t GetCreationTime(){return m_time;}
-    void Close();
+    void Close(bool bSave);
     inline bool SameCut(void* pCut){return pCut == m_pCut;}
     ~CRecorder();
 protected:
+#ifdef IN_MEMORY_RING
+    size_t m_nBufferSize = 1024 * 1024;
+    void* m_pAlloc = nullptr;
+    size_t m_nBackSize = 0;
+    void* m_pBackBuffer = nullptr;
+#endif
+    std::string m_path;
+
     std::unique_ptr<CMemMap> m_memmap;
     size_t m_nWroteTotal = 0;
-    void* volatile m_pCurPos;
+    void* m_pCurPos = nullptr;
     uint64_t m_time = 0;
     uint64_t m_counter = 0;
     void* m_pCut = nullptr;
@@ -127,7 +138,7 @@ struct SRecord
     size_t length;
     void* function;
 };
-void WriteRecord(ERecordType type, const SRecord& record);
+double* WriteRecord(ERecordType type, const SRecord& record);
 
 namespace sea {
     struct IHandler;
@@ -135,6 +146,10 @@ namespace sea {
     bool WriteGroupName(int64_t pid, const char* name);
     bool ReportString(__itt_string_handle* pStr);
     bool ReportModule(void* fn);
+    bool InitJit();
+    bool WriteJit(const void* buff, size_t size);
+    bool InitMemStat();
+    bool WriteMemStat(const void* buff, size_t size);
 }
 sea::IHandler& GetSEARecorder();
 

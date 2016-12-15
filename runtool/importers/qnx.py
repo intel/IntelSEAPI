@@ -182,9 +182,9 @@ class Parser:
 
 
 def transform_qnx(args):
-    tree = default_tree()
+    tree = default_tree(args)
     tree['ring_buffer'] = True
-    TaskCombiner.disable_handling_leftovers = True
+    args.no_left_overs = True
     with Callbacks(args, tree) as callbacks:
         if callbacks.is_empty():
             return callbacks.get_result()

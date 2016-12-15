@@ -3,10 +3,11 @@ import sys
 import glob
 import shutil
 import traceback
-from sea_runtool import Collector
+
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 import sea
-
+import strings
+from sea_runtool import Collector, Progress, format_bytes
 
 
 def time_sync():
@@ -139,6 +140,8 @@ class FTrace(Collector):
         self.echo("nop", "/sys/kernel/debug/tracing/current_tracer")  # google chrome understands this format
         self.echo("", "/sys/kernel/debug/tracing/set_event")  # disabling all events
         self.echo("", "/sys/kernel/debug/tracing/trace")  # cleansing ring buffer (we need it's header only)
+        if self.args.ring:
+            self.echo("%d" % (self.args.ring * 1024), "/sys/kernel/debug/tracing/buffer_size_kb")
 
         # best is to write sync markers here
         self.echo("1", "/sys/kernel/debug/tracing/tracing_on")  # activate tracing
@@ -175,6 +178,31 @@ class FTrace(Collector):
             shutil.copyfileobj(file_from, file_to)
         os.remove(file_name)
         return [self.file]
+
+    @classmethod
+    def cut_incomplete_ring(cls, input, output):
+        header = []
+        header_complete = False
+        with open(input) as input_file, open(output, 'wb+') as output_file:
+            size = os.path.getsize(input)
+            count = 0
+            with Progress(size, 50, strings.converting % (os.path.basename(input), format_bytes(size))) as progress:
+                for line in input_file:
+                    if line.startswith('#'):
+                        if not header_complete:
+                            header.append(line)
+                        else:
+                            if line.startswith('##### CPU'):  # cleanup
+                                output_file.seek(0)
+                                output_file.writelines(header)
+                    else:
+                        if not header_complete:
+                            output_file.writelines(header)
+                            header_complete = True
+                        output_file.write(line)
+                    if not count % 1000:
+                        progress.tick(input_file.tell())
+                    count += 1
 
 
 COLLECTOR_DESCRIPTORS = [{

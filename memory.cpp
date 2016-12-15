@@ -17,7 +17,7 @@
 **********************************************************************************************************************************************************************************************************************************************************************************************/
 
 #include "ittnotify.h"
-#ifdef _DEBUG
+#if defined(_DEBUG) && !defined(__ANDROID__)
 
 #ifdef UNICODE
     __itt_heap_function g_heap = __itt_heap_function_create(L"CRT", L"Memory");
@@ -61,7 +61,7 @@
         }
     };
 
-    int AllocHook(int allocType, void *userData, size_t size, int blockType, long requestNumber, const unsigned char *filename, int lineNumber)
+    int AllocHook(int allocType, void *userData, size_t size, int, long requestNumber, const unsigned char *, int)
     {
         static __declspec(thread) bool bRecursion = false;
         if (bRecursion) return 1;
@@ -255,8 +255,8 @@
             {
                 g_origMalloc = __malloc_hook;
                 g_origFree = __free_hook;
-                __malloc_hook = g_origMalloc;
-                __free_hook = g_origFree;
+                __malloc_hook = MallocHook;
+                __free_hook = FreeHook;
             }
             void (* volatile __malloc_initialize_hook)() = InitHooks;
 

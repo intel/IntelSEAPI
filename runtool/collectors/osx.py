@@ -53,8 +53,10 @@ class DTraceCollector(Collector):
         Collector.__init__(self, args)
         self.pid = None
         self.files = []
-        os.environ['SUDO_ASKPASS'] = self.create_ask_pass()
-        del os.environ['DYLD_INSERT_LIBRARIES']
+        if 'SUDO_ASKPASS' not in os.environ:
+            os.environ['SUDO_ASKPASS'] = self.create_ask_pass()
+        if 'DYLD_INSERT_LIBRARIES' in os.environ:
+            del os.environ['DYLD_INSERT_LIBRARIES']
         self.execute('sudo -A pkill dtrace', env=os.environ)
         self.start()
 
@@ -94,14 +96,14 @@ class DTraceCollector(Collector):
 
     @staticmethod
     def gen_options(options):
-        return '\n'.join('#pragma D option %s=%s' % (key, str(value)) for key, value in options.iteritems()) + '\n'
+        return '\n'.join('#pragma D option %s=%s' % (key, str(value)) for key, value in options) + '\n'
 
     def start(self):
         # spawn dtrace tracers and exit, all means to stop it must be saved to self members:
         # launch command line with dtrace script and remember pid
         script = os.path.join(self.args.output, 'script.d')
 
-        (probes, err) = self.execute('sudo -A dtrace -l -m *com.apple.driver.AppleIntelHD5000Graphics*', env=os.environ)
+        (probes, err) = self.execute('sudo -A dtrace -l -m *com.apple.driver.AppleIntel*Graphics*', env=os.environ)
         if err:
             return
 
@@ -113,13 +115,17 @@ class DTraceCollector(Collector):
         dtrace_script = []
 
         if self.args.ring:
-            dtrace_script.append(self.gen_options({'bufpolicy': 'ring', 'bufsize': self.args.ring}))
+            dtrace_script.append(self.gen_options([
+                ('bufpolicy', 'ring'),
+                ('bufresize', 'auto'),
+                ('bufsize', '%dm' % (self.args.ring * 10))
+            ]))
         dtrace_script.append(dtrace_context_switch)
         dtrace_script.append(self.gen_gpu_hooks(probes))
 
-        if hasattr(self.args, 'target') and self.args.target:
+        if self.args.target:
             dtrace_script.append(dtrace_metal)
-            cmd += " -p %d" % self.args.target
+            cmd += " -p %s" % self.args.target
 
         with open(script, 'w') as file:
             file.write('\n'.join(dtrace_script))
@@ -129,14 +135,18 @@ class DTraceCollector(Collector):
         self.log(cmd)
         self.log("pid: %d" % proc.pid)
 
+
     @staticmethod
     def get_pid_children(parent):
-        (out, err) = subprocess.Popen('ps -o pid,ppid -ax', shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+        (out, err) = DTraceCollector.execute('ps -o pid,ppid -ax')
         if err:
             print err
             return
         for line in out.split('\n'):
             if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 2:
                 continue
             pid, ppid = line.split()
             if str(parent) == ppid:

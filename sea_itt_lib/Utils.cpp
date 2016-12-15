@@ -70,6 +70,25 @@ size_t GetStack(TStack& stack)
     return state.current - stack;
 }
 
+std::string GetStackString()
+{
+    std::string res;
+    TStack stack;
+    size_t size = GetStack(stack);
+    for (size_t i = 2; i < size; ++i)
+    {
+        if (res.size())
+            res += "<-";
+        Dl_info dl_info = {};
+        dladdr(stack[i], &dl_info);
+        if (dl_info.dli_sname)
+            res += dl_info.dli_sname;
+        else
+            res += std::to_string(stack[i]);
+    }
+    return res;
+}
+
 #else
 
 size_t GetStack(TStack& stack)
@@ -82,6 +101,12 @@ size_t GetStack(TStack& stack)
     return backtrace(stack, StackSize);
 #endif
 }
+
+std::string GetStackString()
+{
+    return std::string();
+}
+
 #endif
 
 namespace sea {
@@ -125,14 +150,25 @@ sea::SModuleInfo Fn2Mdl(void* fn)
     //FIXME: Linux: dl_iterate_phdr(), OSX: http://stackoverflow.com/questions/28846503/getting-sizeofimage-and-entrypoint-of-dylib-module
     Dl_info dl_info = {};
     dladdr(fn, &dl_info);
-    if (dl_info.dli_fname[0] == '/') //path is absolute
+    if (!dl_info.dli_fname)
+        return SModuleInfo{dl_info.dli_fbase, 0, dl_info.dli_fname};
+
+    if (dl_info.dli_fname[0] == '/')
+    { //path is absolute
         return SModuleInfo{dl_info.dli_fbase, GetFileSize(dl_info.dli_fname), dl_info.dli_fname};
+    }
     else
     {
-        const char * absolute = realpath(dl_info.dli_fname, nullptr);
-        SModuleInfo mdlInfo{dl_info.dli_fbase, GetFileSize(dl_info.dli_fname), absolute};
-        free((void*) absolute);
-        return mdlInfo;
+        if (const char * absolute = realpath(dl_info.dli_fname, nullptr))
+        {
+            SModuleInfo mdlInfo{dl_info.dli_fbase, GetFileSize(absolute), absolute};
+            free((void*) absolute);
+            return mdlInfo;
+        }
+        else
+        {
+            return SModuleInfo{dl_info.dli_fbase, GetFileSize(dl_info.dli_fname), dl_info.dli_fname};
+        }
     }
 }
 

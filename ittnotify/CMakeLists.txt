@@ -43,7 +43,12 @@ if (NOT WIN32)
     TARGET_LINK_LIBRARIES(ittnotify dl)
 endif()
 
+if (ANDROID)
+    target_link_libraries(ittnotify log)
+endif()
+
 SET_TARGET_PROPERTIES(ittnotify PROPERTIES LINKER_LANGUAGE C)
+
 target_include_directories(ittnotify
     PUBLIC include src/ittnotify
 )

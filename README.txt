@@ -13,11 +13,12 @@ After your code is instrumented with itt, to load up the library follow these st
     On Windows and Linux:
         Set environment variable INTEL_LIBITTNOTIFY32/INTEL_LIBITTNOTIFY64 to the full path to the IntelSEAPI[32/64].[dll/so]
     On OSX:
-        Set environment variable DYLD_INSERT_LIBRARIES to the full path to the IntelSEAPI.dylib
+        Set environment variable DYLD_INSERT_LIBRARIES to the full path to the libIntelSEAPI.dylib
     On Android:
-        Write path to IntelSEAPI.so in one of these two files:
-            System wide: /data/local/tmp/com.intel.itt.collector_lib
-            Per package: /data/data/<package_name>/com.intel.itt.collector_lib
+        Write path to libIntelSEAPI[32/64].so in one of these two files:
+            System wide: /data/local/tmp/com.intel.itt.collector_lib_[32/64]
+            Per package: /data/data/<package_name>/com.intel.itt.collector_lib_[32/64]
+        Write save path to file: /data/local/tmp/com.intel.sea.save_to
 OR you can use sea_runtool.py, see examples in test_<OS>.<bat/sh>
 
 Bulding:

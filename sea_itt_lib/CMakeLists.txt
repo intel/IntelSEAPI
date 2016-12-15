@@ -72,18 +72,16 @@ if(JDK)
         set(JDK_PREFIX)
     endif()
 
-    if(NOT ANDROID)
-        add_custom_command(
-            OUTPUT ${PROJECT_SOURCE_DIR}/java/com/intel/sea/IntelSEAPI.class PRE_BUILD
-            COMMAND ${JDK_PREFIX}javac -verbose ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java -d ${PROJECT_SOURCE_DIR}/java
-            DEPENDS ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java
-        )
-        add_custom_command(
-            OUTPUT ${PROJECT_SOURCE_DIR}/java/com_intel_sea_IntelSEAPI.h PRE_BUILD
-            COMMAND ${JDK_PREFIX}javah -v -classpath ${PROJECT_SOURCE_DIR}/java -d ${PROJECT_SOURCE_DIR}/java com.intel.sea.IntelSEAPI
-            DEPENDS ${PROJECT_SOURCE_DIR}/java/com/intel/sea/IntelSEAPI.class
-        )
-    endif()
+    add_custom_command(
+        OUTPUT ${PROJECT_SOURCE_DIR}/java/com/intel/sea/IntelSEAPI.class PRE_BUILD
+        COMMAND ${JDK_PREFIX}javac -verbose ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java -d ${PROJECT_SOURCE_DIR}/java
+        DEPENDS ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java
+    )
+    add_custom_command(
+        OUTPUT ${PROJECT_SOURCE_DIR}/java/com_intel_sea_IntelSEAPI.h PRE_BUILD
+        COMMAND ${JDK_PREFIX}javah -v -classpath ${PROJECT_SOURCE_DIR}/java -d ${PROJECT_SOURCE_DIR}/java com.intel.sea.IntelSEAPI
+        DEPENDS ${PROJECT_SOURCE_DIR}/java/com/intel/sea/IntelSEAPI.class
+    )
 
     set(EXTRA_SOURCE ${EXTRA_SOURCE}
         ${PROJECT_SOURCE_DIR}/java/com_intel_sea_IntelSEAPI.h
@@ -91,12 +89,12 @@ if(JDK)
         ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java
     )
 
-    if(NOT ANDROID)
-        if (WIN32)
-            set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/win32)
-        else()
-            set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK})
-        endif()
+    if (${CMAKE_HOST_SYSTEM_NAME} MATCHES "Windows")
+        set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/win32)
+    elseif(${CMAKE_HOST_SYSTEM_NAME} MATCHES "Darwin")
+        set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/darwin)
+    elseif(${CMAKE_HOST_SYSTEM_NAME} MATCHES "Linux")
+        set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/linux)
     endif()
 
 endif()
@@ -116,12 +114,18 @@ add_library(sea_itt_lib SHARED
 
 SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES PREFIX "")
 if(APPLE)
-    SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME IntelSEAPI)
-else()
+    SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME libIntelSEAPI)
+elseif (WIN32)
     if(ARCH_64)
         SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME IntelSEAPI64)
     else()
         SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME IntelSEAPI32)
+    endif()
+else()
+    if(ARCH_64)
+        SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME libIntelSEAPI64)
+    else()
+        SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME libIntelSEAPI32)
     endif()
 endif()
 

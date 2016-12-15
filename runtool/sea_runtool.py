@@ -22,11 +22,18 @@ import sys
 import time
 import shutil
 import struct
+import strings
 import tempfile
 import binascii
+import traceback
+import subprocess
 from glob import glob
 from datetime import timedelta
-from subprocess import Popen, PIPE
+
+try:
+    sys.setdefaultencoding("utf-8")
+except:
+    pass
 
 ProgressConst = 20000
 
@@ -124,12 +131,13 @@ def parse_args(args):
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-c", "--cuts", nargs='*', help='Set "all" to merge all cuts in one trace')
     parser.add_argument("-s", "--sync")
-    parser.add_argument("-m", "--multiproc", default=True, action="store_false", help='Allows to capture follow-child mode and handle several processes writing trace')
+    parser.add_argument("--single", default=False, action="store_true", help='Narrows capture to one process')
     parser.add_argument("-r", "--ring", type=int, help='Makes trace to cycle inside ring buffer of given length in seconds')
     parser.add_argument("--time_shift", type=int, default=0)
     parser.add_argument("-l", "--limit", help='define')
     parser.add_argument("--ssh")
     parser.add_argument("-p", "--password")
+    parser.add_argument("--target", help='Pid of target')
     parser.add_argument("--dry", action="store_true", help='Dry mode, only prints what it would do')
     parser.add_argument("--stacks", action="store_true", help='Collect stacks')
     parser.add_argument("--min_dur", type=int, default=0, help='Sets minimal task length threshold (in float, microseconds). Helps opening huge traces.')
@@ -142,6 +150,7 @@ def parse_args(args):
     parser.add_argument("--strip_aliens", action="store_true", help='Filters out all but target processes')
     parser.add_argument("--remove_args", action="store_true", help='Deflates trace by removing arguments')
     parser.add_argument("--rem", help="Comment out: Allows to put everything you don't need")
+    parser.add_argument("--no_left_overs", action="store_true", help='Disables automatic prolongation of unfinished events to the end of the trace')
 
     if "!" in args:
         separator = args.index("!")
@@ -167,7 +176,7 @@ def main():
     (args, victim) = parse_args(sys.argv[1:])  # skipping the script name
     with Profiler() if args.profile else DummyWith():
         if victim:
-            if args.multiproc:
+            if not args.single:
                 if os.path.exists(args.output):
                     shutil.rmtree(args.output)
                 os.makedirs(args.output)
@@ -210,7 +219,7 @@ class Remote:
         command = '%s "%s"' % (self.execute_prefix, cmd)
         if self.args.verbose:
             print command
-        out, err = Popen(command, shell=True, stdout=PIPE, stderr=PIPE).communicate()
+        out, err = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
         if err:
             print "Error:", err
             raise Exception(err)
@@ -219,7 +228,7 @@ class Remote:
     def copy(self, source, target):
         if self.args.verbose:
             print "%s %s %s" % (self.copy_prefix, source, target)
-        out, err = Popen("%s %s %s" % (self.copy_prefix, source, target), shell=True, stdout=PIPE, stderr=PIPE).communicate()
+        out, err = subprocess.Popen("%s %s %s" % (self.copy_prefix, source, target), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
         if err:
             print "Error:", err
             raise Exception(err)
@@ -303,7 +312,9 @@ def launch(args, victim):
     script_dir = os.path.abspath(args.bindir) if args.bindir else os.path.dirname(os.path.realpath(__file__))
     paths = []
     macosx = sys.platform == 'darwin'
-    for bits in (['32', '64'] if not macosx else ['']):
+    win32 = sys.platform == 'win32'
+    bits_array = [''] if macosx else ['32', '64']
+    for bits in bits_array:
         search = os.path.sep.join([script_dir, "*IntelSEAPI" + bits + os_lib_ext()])
         files = glob(search)
         if not len(files):
@@ -319,8 +330,10 @@ def launch(args, victim):
         paths = dict(paths)
         if '32' in paths:
             env["INTEL_LIBITTNOTIFY32"] = paths['32']
+            env["INTEL_JIT_PROFILER32"] = paths['32']
         if '64' in paths:
             env["INTEL_LIBITTNOTIFY64"] = paths['64']
+            env["INTEL_JIT_PROFILER64"] = paths['64']
 
     env["INTEL_SEA_FEATURES"] = os.environ['INTEL_SEA_FEATURES'] if os.environ.has_key('INTEL_SEA_FEATURES') else ""
     env["INTEL_SEA_FEATURES"] += (" " + str(args.format)) if args.format else ""
@@ -329,7 +342,14 @@ def launch(args, victim):
         env["INTEL_SEA_RING"] = str(args.ring)
 
     if args.output:
-        env["INTEL_SEA_SAVE_TO"] = os.path.join(args.output, 'pid') if args.multiproc else args.output
+        env["INTEL_SEA_SAVE_TO"] = os.path.join(args.output, 'pid') if not args.single else args.output
+
+    # vulkan support
+    os_name = 'WIN' if win32 else 'OSX' if macosx else 'LIN'
+    var_name = os.pathsep.join(['VK_LAYER_INTEL_SEA_%s%s' % (os_name, bits) for bits in bits_array])
+
+    env['VK_INSTANCE_LAYERS'] = (os.environ['VK_INSTANCE_LAYERS'] + os.pathsep + var_name) if 'VK_INSTANCE_LAYERS' in os.environ else var_name
+    env['VK_LAYER_PATH'] = (os.environ['VK_LAYER_PATH'] + os.pathsep + script_dir) if 'VK_LAYER_PATH' in os.environ else script_dir
 
     if args.dry:
         for key, val in env.iteritems():
@@ -350,8 +370,8 @@ def launch(args, victim):
     if args.collector:
         tracer = get_collectors()[args.collector](args)
 
-    proc = Popen(victim, env=os.environ, shell=False, cwd=args.dir)
-    setattr(args, 'target', proc.pid)
+    proc = subprocess.Popen(victim, env=os.environ, shell=False, cwd=args.dir)
+    args.target = proc.pid
     if not tracer:
         if 'gt' in args.format and args.output:
             if 'linux' in sys.platform:
@@ -368,7 +388,10 @@ def launch(args, victim):
     if not args.output:
         return []
 
-    args.input = "%s-%d" % (args.output, proc.pid)
+    if args.single:
+        args.input = "%s-%d" % (args.output, proc.pid)
+    else:
+        args.input = args.output
     return transform_all(args)
 
 
@@ -377,13 +400,14 @@ def transform_all(args):
         args.trace = []
         for ext in ['etl', 'ftrace', 'dtrace']:
             for file in glob(os.path.join(args.input, '*.' + ext)):
-                if not any(sub in file for sub in ['.etl.', '.dtrace.']):
+                if not any(sub in file for sub in ['.etl.', '.dtrace.', 'merged.']):
                     args.trace.append(file)
-    if args.multiproc:
+    if not args.single:
         multi_out = []
         saved_output = args.output
         setattr(args, 'user_input', args.output)
-        for folder in glob(os.path.join(args.output, 'pid-*')):
+        sea_folders = glob(os.path.join(args.output, '*-*'))
+        for folder in sea_folders:
             if not os.path.isdir(folder):
                 continue
             args.input = folder
@@ -391,6 +415,7 @@ def transform_all(args):
             multi_out += transform(args)
             if multi_out:
                 args.trace = None
+
         output = join_gt_output(args, multi_out)
         args.output = saved_output
     else:
@@ -421,8 +446,22 @@ def split_filename(path):
     return {'dir': dir, 'name': name, 'cut': cut, 'ring':ring, 'ext': ext}
 
 
-def default_tree():
-    return {"strings": {}, "domains": {}, "threads": {}, "groups": {}, "modules": {}, "ring_buffer": False, "cuts": set()}
+def default_tree(args):
+    tree = {"strings": {}, "domains": {}, "threads": {}, "groups": {}, "modules": {}, "ring_buffer": False, "cuts": set()}
+    if os.path.isdir(args.input):
+        process_dct = os.path.join(args.input, 'process.dct')
+        if not os.path.exists(process_dct):
+            return tree
+        with open(process_dct, 'r') as file:
+            tree["process"] = eval(file.read())
+        data_jit = os.path.join(args.input, 'data.jit')
+        if os.path.exists(data_jit):
+            parse_jit(tree, data_jit)
+        for filename in glob(os.path.join(args.input, '*.mdl')):
+            with open(filename, 'r') as file:
+                parts = file.readline().split()
+                tree["modules"][int(os.path.basename(filename).replace(".mdl", ""))] = [' '.join(parts[0:-1]), parts[-1]]
+    return tree
 
 
 def build_tid_map(args, path):
@@ -439,7 +478,7 @@ def build_tid_map(args, path):
             tid = int(os.path.basename(folder).split('!')[0].split('-')[0].split('.')[0])
             tid_map[tid] = pid
 
-    if args.multiproc:
+    if not args.single:
         for folder in glob(os.path.join(path, '*-*')):
             parse_process(folder)
     else:
@@ -447,10 +486,51 @@ def build_tid_map(args, path):
     return tid_map
 
 
-def sea_reader(folder):  # reads the structure of .sea format folder into dictionary
+def parse_jit(tree, path):
+    if tree['process']['bits'] == 64:
+        pointer = {'code': 'Q', 'size': 8}
+    else:
+        pointer = {'code': 'I', 'size': 4}
+    addr_list = []
+    with open(path, 'rb') as file:
+        prev_addr = 0
+        while True:
+            chunk = file.read(4 + pointer['size'] + 4 + 4)
+            if not chunk:
+                break
+            method_id, load_address, method_size, table_size = struct.unpack('I' + pointer['code'] + 'I' + 'I', chunk)
+            data = {'id': method_id, 'addr': load_address, 'size': method_size, 'lines': []}
+            for i in range(table_size):
+                chunk = file.read(4 + 4)
+                offset_line = struct.unpack('II', chunk)
+                if not data['lines'] or offset_line != data['lines'][-1]:
+                    data['lines'].append(offset_line)
+            names = []
+            for i in range(3):
+                chunk = file.read(2)  # uint16_t
+                length = struct.unpack('H', chunk)[0]
+                names.append(file.read(length))
+            data['name'], data['class'], data['file'] = names
+            if load_address > prev_addr:
+                addr_list.append(data)
+            """ YYY
+            else:
+                assert(load_address == prev_addr)
+            """
+            prev_addr = load_address
+    if addr_list:
+        tree['jit'] = {
+            'start': addr_list[0]['addr'],
+            'end': addr_list[-1]['addr'] + addr_list[-1]['size'],
+            'data': addr_list
+        }
+
+
+def sea_reader(args):  # reads the structure of .sea format folder into dictionary
+    folder = args.input
     if not os.path.exists(folder):
         print """Error: folder "%s" doesn't exist""" % folder
-    tree = default_tree()
+    tree = default_tree(args)
     pos = folder.rfind("-")  # pid of the process is encoded right in the name of the folder
     tree["pid"] = int(folder[pos + 1:])
     folder = folder.replace("\\", "/").rstrip("/")
@@ -463,11 +543,6 @@ def sea_reader(folder):  # reads the structure of .sea format folder into dictio
                 tree["threads"][filename.replace(".tid", "")] = file.readline()
             elif filename.endswith(".pid"):  # named groups (pseudo pids) makes record: group is the handle and content is the value
                 tree["groups"][filename.replace(".pid", "")] = file.readline()
-            elif filename.endswith(".mdl"):  # registered modules - for symbol resolving
-                parts = file.readline().split()
-                tree["modules"][int(filename.replace(".mdl", ""))] = [' '.join(parts[0:-1]), parts[-1]]
-            elif filename == "process.dct":  # process info
-                tree["process"] = eval(file.read())
     for domain in toplevel[1]:  # data from every domain gets recorded into separate folder which is named after the domain name
         tree["domains"][domain] = {"files": []}
         for file in os.walk("/".join([folder, domain])).next()[2]:  # each thread of this domain has separate file with data
@@ -536,7 +611,7 @@ class PseudoProgress(Progress):
         if 'return' not in event:
             return
         cur_time = time.time()
-        if cur_time - self.time > 0.2:
+        if cur_time - self.time > 1:
             self.time = cur_time
             self.tick(cur_time)
 
@@ -565,7 +640,7 @@ def read_chunk_header(file):
 def transform(args):
     if args.verbose:
         print "Transform:", str(args)
-    tree = sea_reader(args.input)  # parse the structure
+    tree = sea_reader(args)  # parse the structure
     if args.cuts and args.cuts == ['all'] or not args.cuts:
         return transform2(args, tree)
     else:
@@ -657,9 +732,9 @@ class Callbacks:
 
     def check_time_in_limits(self, time):
         left, right = self.limits
-        if left != None and time < left:
+        if left is not None and time < left:
             return False
-        if right != None and time > right:
+        if right is not None and time > right:
             return False
         return True
 
@@ -797,7 +872,7 @@ def transform2(args, tree, skip_fn=None):
             progress = DummyWith()
         else:
             size = sum([file.get_size() for file in files])
-            progress = Progress(size, 50, 'Translation: %s (%s)' % (os.path.basename(args.input), format_bytes(size)))
+            progress = Progress(size, 50, strings.converting % (os.path.basename(args.input), format_bytes(size)))
 
         with progress:
             count = 0
@@ -846,7 +921,7 @@ def get_module_by_ptr(tree, ptr):
 
 def resolve_cmd(args, path, load_addr, ptr, cache={}):
     if sys.platform == 'win32':
-        """ XXX
+        """ FIXME: make sure SEA lib' resolve_pointer works and uncomment
         if not cache:
             sea.prepare_environ(args)
             cache['stack'] = sea.ITT('stack')
@@ -868,53 +943,82 @@ def resolve_cmd(args, path, load_addr, ptr, cache={}):
     if "INTEL_SEA_VERBOSE" in env:
         del env["INTEL_SEA_VERBOSE"]
 
-    proc = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE, env=env)
+    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     (symbol, err) = proc.communicate()
     if err:
         print err
         return ''
-    """ XXX
-    if symbol and not result:
-        print symbol, result
-        assert symbol == result
-    """
+
     return symbol
 
 
-def resolve_pointer(args, tree, ptr, call, cache={}):
-    if not cache.has_key(ptr):
-        (load_addr, path) = get_module_by_ptr(tree, ptr)
-        if path is None or not os.path.exists(path):
-            return False
-        symbol = resolve_cmd(args, path, load_addr, ptr)
-        cache[ptr] = {'module': path, 'symbol': symbol}
+def bisect_right(array, value, key=lambda item: item):
+    lo = 0
+    hi = len(array)
+    while lo < hi:
+        mid = (lo+hi)//2
+        if value < key(array[mid]):
+            hi = mid
+        else:
+            lo = mid+1
+    return lo
 
-    lines = cache[ptr]['symbol'].splitlines()
-    if not lines:
+
+def resolve_jit(tree, ptr, cache):
+    if 'jit' not in tree:
         return False
-    call['module'] = cache[ptr]['module']
-
-    if sys.platform == 'win32':
-        if len(lines) == 1:
-            call['str'] = lines[0]
-        elif len(lines) == 2:
-            call['str'] = lines[1]
-            (call['__file__'], call['__line__']) = lines[0].rstrip(")").rsplit("(", 1)
-    elif sys.platform == 'darwin':
-        if '(in' in lines[0]:
-            parts = lines[0].split(" (in ")
-            call['str'] = parts[0]
-            if ') (' in parts[1]:
-                (call['__file__'], call['__line__']) = parts[1].split(') (')[1].split(':')
-                call['__line__'] = call['__line__'].strip(')')
-        else:
-            return False
+    jit = tree['jit']
+    if jit['start'] <= ptr <= jit['end']:
+        jit_data = jit['data']
+        idx = bisect_right(jit_data, ptr, lambda item: item['addr']) - 1
+        if idx > -1:
+            offset = ptr - jit_data[idx]['addr']
+            if offset > jit_data[idx]['size']:
+                return False
+            cache[ptr] = {'module': 'jit'}
+            cache[ptr]['str'] = jit_data[idx]['name']
+            if not cache[ptr]['str']:
+                cache[ptr]['str'] = 'jit_method_%d' % jit_data[idx]['id']
+            cache[ptr]['__file__'] = jit_data[idx]['file']
+            lines = jit_data[idx]['lines']
+            idx = bisect_right(lines, offset, lambda item: item[0]) - 1
+            if idx > -1:
+                cache[ptr]['__line__'] = lines[idx][1]
+        return True
     else:
-        if ' at ' in lines[0]:
-            (call['str'], fileline) = lines[0].split(' at ')
-            (call['__file__'], call['__line__']) = fileline.strip().split(':')
-        else:
-            return False
+        return False
+
+
+def resolve_pointer(args, tree, ptr, call, cache={}):
+    if ptr not in cache:
+        if not resolve_jit(tree, ptr, cache):
+            (load_addr, path) = get_module_by_ptr(tree, ptr)
+            if path is None or not os.path.exists(path):
+                return False
+            symbol = resolve_cmd(args, path, load_addr, ptr)
+            cache[ptr] = {'module': path, 'symbol': symbol}
+            lines = cache[ptr]['symbol'].splitlines()
+            if lines:
+                if sys.platform == 'win32':
+                    if len(lines) == 1:
+                        cache[ptr]['str'] = lines[0]
+                    elif len(lines) == 2:
+                        cache[ptr]['str'] = lines[1]
+                        (cache[ptr]['__file__'], cache[ptr]['__line__']) = lines[0].rstrip(")").rsplit("(", 1)
+                elif sys.platform == 'darwin':
+                    if '(in' in lines[0]:
+                        parts = lines[0].split(" (in ")
+                        cache[ptr]['str'] = parts[0]
+                        if ') (' in parts[1]:
+                            (cache[ptr]['__file__'], cache[ptr]['__line__']) = parts[1].split(') (')[1].split(':')
+                            cache[ptr]['__line__'] = cache[ptr]['__line__'].strip(')')
+                else:
+                    if ' at ' in lines[0]:
+                        (cache[ptr]['str'], fileline) = lines[0].split(' at ')
+                        (cache[ptr]['__file__'], cache[ptr]['__line__']) = fileline.strip().split(':')
+    if 'str' not in cache[ptr]:
+        return False
+    call.update(cache[ptr])
     return True
 
 
@@ -993,8 +1097,6 @@ def represent_data(tree, name, data):
 
 
 class TaskCombiner:
-    disable_handling_leftovers = False
-
     def __enter__(self):
         return self
 
@@ -1032,7 +1134,7 @@ class TaskCombiner:
         pass
 
     def handle_leftovers(self):
-        if TaskCombiner.disable_handling_leftovers:
+        if self.args.no_left_overs:
             return
         for end in self.no_begin:
             begin = end.copy()
@@ -1111,30 +1213,24 @@ class TaskCombiner:
             if not (data.has_key('str') or data.has_key('pointer')):
                 data['str'] = 'Unknown'
             self.time_bounds[0] = min(self.time_bounds[0], data['time'])
-            get_tasks(None if fn == "task_begin" else data['id']).append(data)
-        elif fn == "task_end" or fn == "task_end_overlapped":
-            if data.has_key('delta'):  # turbo mode, only ends are written
-                self.time_bounds[0] = min(self.time_bounds[0], data['time'])
+            if 'delta' in data and data['delta']:  # turbo mode, only begins are written
                 end = data.copy()
-                end['time'] = data['time'] + data['delta']
-                if not (data.has_key('str') or data.has_key('pointer')):
-                    data['str'] = 'Unknown'
-                if data.has_key('id') and thread['args'].has_key(data['id']):
-                    data['args'] = thread['args'][data['id']]
-                    del thread['args'][data['id']]
+                end['time'] = data['time'] + int(data['delta'])
                 self.time_bounds[1] = max(self.time_bounds[1], end['time'])
-                self.complete_task('task', data, end)
+                self.complete_task('task', data, end)  # for now arguments are not supported in turbo tasks. Once argument is passed, task gets converted to normal.
             else:
-                self.time_bounds[1] = max(self.time_bounds[1], data['time'])
-                tasks = get_tasks(None if fn == "task_end" else data['id'])
-                index = get_last_index(tasks, data['type'] - 1)
-                if index is not None:
-                    item = tasks.pop(index)
-                    self.complete_task('task', item, data)
-                else:
-                    assert (self.tree["ring_buffer"] or self.tree['cuts'])
-                    if data.has_key('str'):  # nothing to show without name
-                        self.no_begin.append(data)
+                get_tasks(None if fn == "task_begin" else data['id']).append(data)
+        elif fn == "task_end" or fn == "task_end_overlapped":
+            self.time_bounds[1] = max(self.time_bounds[1], data['time'])
+            tasks = get_tasks(None if fn == "task_end" else data['id'])
+            index = get_last_index(tasks, data['type'] - 1)
+            if index is not None:
+                item = tasks.pop(index)
+                self.complete_task('task', item, data)
+            else:
+                assert (self.tree["ring_buffer"] or self.tree['cuts'])
+                if data.has_key('str'):  # nothing to show without name
+                    self.no_begin.append(data)
         elif fn == "frame_begin":
             get_tasks(data['id'] if data.has_key('id') else None).append(data)
         elif fn == "frame_end":
@@ -1241,12 +1337,16 @@ def to_hex(value):
 
 
 def get_name(begin):
-    if begin.has_key('str'):
+    if 'str' in begin:
         return begin['str']
-    elif begin.has_key('pointer'):
+    elif 'pointer' in begin:
         return "func<" + to_hex(begin['pointer']) + ">"
     else:
         return "<unknown>"
+
+
+def subst_env_vars(path):
+    return os.path.expandvars(path) if sys.platform == 'win32' else os.path.expanduser(path)
 
 
 class GraphCombiner(TaskCombiner):
@@ -1257,21 +1357,31 @@ class GraphCombiner(TaskCombiner):
         self.relations = {}
         self.threads = set()
 
+    @staticmethod
+    def get_name_ex(begin):
+        name = get_name(begin)
+        if ':' in name:
+            parts = name.split(':')
+            if parts[1].isdigit():
+                return parts[0]
+        return name
+
     def complete_task(self, type, begin, end):
         tid = begin['tid'] if 'tid' in begin else None
         self.threads.add(tid)
-        domain = self.per_domain.setdefault(begin['domain'], {'counters': {}, 'objects':{}, 'frames': {}, 'tasks': {}, 'markers': {}})
+        domain = self.per_domain.setdefault(begin['domain'], {'counters': {}, 'objects': {}, 'frames': {}, 'tasks': {}, 'markers': {}})
         if type == 'task':
-            task = domain['tasks'].setdefault(get_name(begin), {'time': []})
+            task = domain['tasks'].setdefault(self.get_name_ex(begin), {'time': []})
             task['time'].append(end['time'] - begin['time'])
             if begin.has_key('__file__'):
                 task['src'] = begin['__file__'] + ":" + begin['__line__']
-            stack = self.domains[begin['domain']]['tasks'][tid]['stack']
+            tasks = self.domains[begin['domain']]['tasks']
+            stack = tasks[tid]['stack'] if tid in tasks else []
             if len(stack):
                 parent = stack[-1]
-                self.add_relation({'label':'calls', 'from': self.make_id(parent['domain'], get_name(parent)), 'to': self.make_id(begin['domain'], get_name(begin))})
+                self.add_relation({'label': 'calls', 'from': self.make_id(parent['domain'], self.get_name_ex(parent)), 'to': self.make_id(begin['domain'], self.get_name_ex(begin))})
             else:
-                self.add_relation({'label':'executes', 'from': self.make_id("threads", str(tid)), 'to': self.make_id(begin['domain'], get_name(begin)), 'color': 'gray'})
+                self.add_relation({'label': 'executes', 'from': self.make_id("threads", str(tid)), 'to': self.make_id(begin['domain'], self.get_name_ex(begin)), 'color': 'gray'})
         elif type == 'marker':
             domain['markers'].setdefault(begin['str'], [])
         elif type == 'frame':
@@ -1297,11 +1407,11 @@ class GraphCombiner(TaskCombiner):
 
     def relation(self, data, head, tail):
         if head and tail:
-            self.add_relation({'label': data['str'], 'from': self.make_id(head['domain'], head['str']), 'to': self.make_id(tail['domain'], tail['str']), 'color': 'red'})
+            self.add_relation({'label': self.get_name_ex(data['str']), 'from': self.make_id(head['domain'], self.get_name_ex(head['str'])), 'to': self.make_id(tail['domain'], self.get_name_ex(tail['str'])), 'color': 'red'})
 
     def add_relation(self, relation):
         key = frozenset(relation.iteritems())
-        if self.relations.has_key(key):
+        if key in self.relations:
             return
         self.relations[key] = relation
 
@@ -1317,24 +1427,64 @@ class Collector:
         cls.output = output
 
     @classmethod
-    def log(cls, msg):
+    def log(cls, msg, stack=False):
+        msg = msg.strip()
+        cut = '\n' + '-' * 100 + '\n'
+        msg = cut + msg + '\n\n' + (''.join(traceback.format_stack()[:-1]) if stack else '') + cut
         if cls.output:
             cls.output.write(msg + '\n')
-        else:
-            print msg
 
     @classmethod
     def execute(cls, cmd, **kwargs):
         start_time = time.time()
-        (out, err) = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE, **kwargs).communicate()
-        cls.log("\n%s:\n%s\n%s\nTime: %s" % (cmd, out, err, str(timedelta(seconds=(time.time() - start_time)))))
+        if 'stdout' not in kwargs:
+            kwargs['stdout'] = subprocess.PIPE
+        if 'stderr' not in kwargs:
+            kwargs['stderr'] = subprocess.PIPE
+        """  # uncomment to dump environment
+        if 'env' not in kwargs:
+            env = os.environ
+        else:
+            env = kwargs['env']
+        import json
+        cls.log("Environment: %s" % json.dumps(env.data, sort_keys=True, indent=4, separators=(',', ': ')))
+        """
+        (out, err) = subprocess.Popen(cmd, shell=True, **kwargs).communicate()
+        cls.log("\ncmd:\t%s:\nout:\t%s\nerr:\t%s\ntime: %s" % (cmd, str(out).strip(), str(err).strip(), str(timedelta(seconds=(time.time() - start_time)))), err)
         return out, err
+
+    @classmethod
+    def execute_detached(cls, cmd, **kwargs):
+        cls.log("\nDetached:\t%s" % cmd)
+        if sys.platform == 'win32':
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+            info = subprocess.STARTUPINFO()
+            info.dwFlags = subprocess.STARTF_USESHOWWINDOW
+            info.wShowWindow = 0  # SW_HIDE
+            subprocess.Popen(cmd, shell=True, startupinfo=info, stdin=None, stdout=None, stderr=None, creationflags=(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP), **kwargs)
+        else:
+            subprocess.Popen(cmd, shell=True, stdin=None, stdout=None, stderr=None, **kwargs)
 
     def start(self):
         raise NotImplementedError('Collector.start is not implemented!')
 
     def stop(self, wait=True):
         raise NotImplementedError('Collector.stop is not implemented!')
+
+    @classmethod
+    def detect_instances(cls, what):
+        instances = []
+        cmd = 'where' if sys.platform == 'win32' else 'which'
+        (out, err) = cls.execute('%s %s' % (cmd, what))
+        if err:
+            return instances
+        for line in out.split('\n'):
+            line = line.strip()
+            if line:
+                instances.append(line)
+        return instances
 
 if __name__ == "__main__":
     start_time = time.time()

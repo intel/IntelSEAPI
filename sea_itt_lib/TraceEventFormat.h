@@ -90,7 +90,7 @@ public:
         return SRegularFields{
     #ifdef _WIN32
             g_PID, (int64_t)GetCurrentThreadId(),
-    #elif defined(__ANDROID_API__)
+    #elif defined(__ANDROID__)
             g_PID, (int64_t)gettid(),
     #elif __linux__
             g_PID, (int64_t)syscall(SYS_gettid),
@@ -139,8 +139,8 @@ public:
         }
         const TMap& GetMap() const {return m_args;}
     };
-#ifdef __ANDROID_API__
-    void WriteEvent(
+#ifdef __ANDROID__
+    static void WriteEvent(
         EventPhase ph,
         const std::string& name,
         const CArgs& args = CArgs(),
@@ -157,28 +157,30 @@ public:
         switch(ph)
         {
             case Begin:
-                ss << phase << "|" << rf.pid << "|" << name;
+                ss << phase << "|" << rf.tid << "|" << name;
                 ss << "|"; if (args) ss << args.Str(); // (arg1=val1;arg2=val2;...) << category
                 ss << "|"; if (categories) ss << categories;
                 break;
             case End:
                 ss << phase; //can have arguments in third place
-                if (args) ss << "||" << args.Str();
+                ss << "||";
+                if (args) ss << args.Str();
+                ss << "||"; if (categories) ss << categories;
                 break;
             case Counter:
                 for (const auto& pair: args.GetMap())
                 {
-                    ss << phase << "|" << rf.pid << "|" << pair.first << "|" << pair.second << "|" << name;
+                    ss << phase << "|" << rf.tid << "|" << pair.first << "|" << pair.second << "|" << name;
                     break; //currently only one counter at a time is supported
                 }
                 break;
             //case AsyncBegin:
             case FlowStart:
-                ss << "S|" << rf.pid << "|" << name << "|0x" << std::hex << (pID ? *pID : ~0x0);
+                ss << "S|" << rf.tid << "|" << name << "|0x" << std::hex << (pID ? *pID : ~0x0);
                 break;
             //case AsyncEnd:
             case FlowFinish:
-                ss << "F|" << rf.pid << "|" << name << "|0x" << std::hex << (pID ? *pID : ~0x0);
+                ss << "F|" << rf.tid << "|" << name << "|0x" << std::hex << (pID ? *pID : ~0x0);
                 break;
             default:
                 ss << phase;
