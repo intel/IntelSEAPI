@@ -145,8 +145,10 @@ def parse_args(args):
     parser.add_argument("--memory", choices=["total", "detailed"], default="total")
     parser.add_argument("--debug", action="store_true", help='Internal: validation')
     parser.add_argument("--profile", action="store_true", help='Internal: profile runtool execution')
+    parser.add_argument("--trace_to", help='Internal: trace runtool execution into given folder')
     parser.add_argument("--collector", choices=list(get_collectors().iterkeys()) + ['default'])
     parser.add_argument("--strip_aliens", action="store_true", help='Filters out all but target processes')
+    parser.add_argument("--system_wide", action="store_true", help='Includes all captured data(can kill viewer)')
     parser.add_argument("--remove_args", action="store_true", help='Deflates trace by removing arguments')
     parser.add_argument("--rem", help="Comment out: Allows to put everything you don't need")
     parser.add_argument("--no_left_overs", action="store_true", help='Disables automatic prolongation of unfinished events to the end of the trace')
@@ -156,11 +158,13 @@ def parse_args(args):
         parsed_args = parser.parse_args(args[:separator])
         victim = args[separator + 1:]
         victim[-1] = victim[-1].strip()  # removal of trailing '\r' - when launched from .sh
+        handle_args(parsed_args)
         return parsed_args, victim
     else:  # nothing to launch, transformation mode
         if args:
             args[-1] = args[-1].strip()  # removal of trailing '\r' - when launched from .sh
         parsed_args = parser.parse_args(args)
+        handle_args(parsed_args)
         if parsed_args.input:
             setattr(parsed_args, 'user_input', parsed_args.input)
             if not parsed_args.output:
@@ -171,8 +175,20 @@ def parse_args(args):
         sys.exit(-1)
 
 
+def handle_args(args):
+    if not args.bindir:
+        args.bindir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '../bin')
+    args.bindir = os.path.abspath(args.bindir)
+    if args.stacks and not args.system_wide:
+        args.strip_aliens = True
+
+
 def main():
     (args, victim) = parse_args(sys.argv[1:])  # skipping the script name
+    if args.trace_to:
+        import sea
+        sea.trace_execution(None, None, args.trace_to)
+
     with Profiler() if args.profile else DummyWith():
         if victim:
             if not args.single:
@@ -185,7 +201,11 @@ def main():
             if not ext:
                 transform_all(args)
             else:
-                get_importers()[ext.lstrip('.')](args)
+                output = get_importers()[ext.lstrip('.')](args)
+                output = join_gt_output(args, output)
+                replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
+                for path in output:
+                    print os.path.abspath(path).replace(*replacement)
 
 
 def os_lib_ext():
@@ -235,9 +255,6 @@ class Remote:
 
 
 def launch_remote(args, victim):
-    if not args.bindir:
-        print "--bindir must be set for remotes"
-        sys.exit(-1)
     remote = Remote(args)
 
     print 'Getting target uname...',
@@ -308,13 +325,12 @@ def launch(args, victim):
     if args.ssh:
         return launch_remote(args, victim)
     env = {}
-    script_dir = os.path.abspath(args.bindir) if args.bindir else os.path.dirname(os.path.realpath(__file__))
     paths = []
     macosx = sys.platform == 'darwin'
     win32 = sys.platform == 'win32'
     bits_array = [''] if macosx else ['32', '64']
     for bits in bits_array:
-        search = os.path.sep.join([script_dir, "*IntelSEAPI" + bits + os_lib_ext()])
+        search = os.path.sep.join([args.bindir, "*IntelSEAPI" + bits + os_lib_ext()])
         files = glob(search)
         if not len(files):
             print "Warning: didn't find any files for:", search
@@ -348,7 +364,7 @@ def launch(args, victim):
     var_name = os.pathsep.join(['VK_LAYER_INTEL_SEA_%s%s' % (os_name, bits) for bits in bits_array])
 
     env['VK_INSTANCE_LAYERS'] = (os.environ['VK_INSTANCE_LAYERS'] + os.pathsep + var_name) if 'VK_INSTANCE_LAYERS' in os.environ else var_name
-    env['VK_LAYER_PATH'] = (os.environ['VK_LAYER_PATH'] + os.pathsep + script_dir) if 'VK_LAYER_PATH' in os.environ else script_dir
+    env['VK_LAYER_PATH'] = (os.environ['VK_LAYER_PATH'] + os.pathsep + args.bindir) if 'VK_LAYER_PATH' in os.environ else args.bindir
 
     if args.dry:
         for key, val in env.iteritems():
@@ -397,31 +413,41 @@ def launch(args, victim):
 def transform_all(args):
     if not args.trace:  # no itt trace
         args.trace = []
-        for ext in ['etl', 'ftrace', 'dtrace']:
+        for ext in ['etl', 'ftrace', 'dtrace', 'perf']:
             for file in glob(os.path.join(args.input, '*.' + ext)):
                 if not any(sub in file for sub in ['.etl.', '.dtrace.', 'merged.']):
                     args.trace.append(file)
     if not args.single:
         multi_out = []
         saved_output = args.output
-        setattr(args, 'user_input', args.output)
-        sea_folders = glob(os.path.join(args.output, '*-*'))
-        for folder in sea_folders:
-            if not os.path.isdir(folder):
-                continue
-            args.input = folder
-            args.output = saved_output + '.' + os.path.basename(folder)
-            multi_out += transform(args)
-            if multi_out:
-                args.trace = None
-
+        setattr(args, 'user_input', args.input)
+        sea_folders = [folder for folder in glob(os.path.join(args.input, '*-*')) if os.path.isdir(folder)]
+        if sea_folders:
+            for folder in sea_folders:
+                args.input = folder
+                args.output = saved_output + '.' + os.path.basename(folder)
+                multi_out += transform(args)
+                if multi_out:
+                    args.trace = None
+        else:
+            traces = args.trace[:]
+            args.trace = None
+            for trace in traces:
+                ext = os.path.splitext(trace)[1]
+                args.input = trace
+                args.output = saved_output + '.' + os.path.basename(trace)
+                multi_out += get_importers()[ext.lstrip('.')](args)
         output = join_gt_output(args, multi_out)
         args.output = saved_output
     else:
         setattr(args, 'user_input', args.input)
         output = transform(args)
         output = join_gt_output(args, output)
-    print "result:", [os.path.abspath(path).replace('\\', '/') for path in output]
+
+    replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
+    for path in output:
+        print os.path.abspath(path).replace(*replacement)
+
     return output
 
 
@@ -476,6 +502,8 @@ def build_tid_map(args, path):
         for folder in glob(os.path.join(src, '*', '*.sea')):
             tid = int(os.path.basename(folder).split('!')[0].split('-')[0].split('.')[0])
             tid_map[tid] = pid
+        if pid not in tid_map:
+            tid_map[pid] = pid
 
     if not args.single:
         for folder in glob(os.path.join(path, '*-*')):
@@ -682,14 +710,15 @@ class Callbacks:
     def __init__(self, args, tree):
         self.args = args
         self.callbacks = []  # while parsing we might have one to many 'listeners' - output format writers
-        for fmt in args.format:
-            self.callbacks.append(get_exporters()[fmt](args, tree))
         self.parse_limits()
         self.allowed_pids = set()
         self.processes = {}
+        self.tasks_from_samples = {}
         if hasattr(self.args, 'user_input') and os.path.isdir(self.args.user_input):
             tid_map = build_tid_map(self.args, self.args.user_input)
             self.allowed_pids = set(tid_map.itervalues())
+        for fmt in args.format:
+            self.callbacks.append(get_exporters()[fmt](args, tree))
 
     def is_empty(self):
         return 0 == len(self.callbacks)
@@ -731,7 +760,7 @@ class Callbacks:
         return res
 
     def check_pid_allowed(self, pid):
-        if not self.args.strip_aliens or pid < 0 or pid in self.allowed_pids:
+        if not self.args.strip_aliens or (pid < 0 and abs(pid) < 100) or (abs(pid) in self.allowed_pids):
             return True
         return False
 
@@ -772,9 +801,40 @@ class Callbacks:
             def __init__(self, process, tid, name):
                 self.process = process
                 self.tid = int(tid)
+                self.overlapped = {}
                 self.task_stack = []
+                self.task_pool = {}
+                self.snapshots = {}
                 if name:
                     self.set_name(name)
+
+            def auto_break_overlapped(self, call_data, begin):
+                id = call_data['id']
+                if begin:
+                    call_data['realtime'] = call_data['time']  # as we gonna change 'time'
+                    call_data['lost'] = 0
+                    self.overlapped[id] = call_data
+                else:
+                    if id in self.overlapped:
+                        real_time = self.overlapped[id]['realtime']
+                        to_remove = []
+                        del self.overlapped[id]  # the task has ended, removing it from the pipeline
+                        time_shift = 0
+                        for begin_data in sorted(self.overlapped.itervalues(), key=lambda data: data['realtime']):  # finish all and start again to form melting task queue
+                            time_shift += 1  # making sure the order of tasks on timeline, probably has to be done in Chrome code rather
+                            end_data = begin_data.copy()  # the end of previous part of task is also here
+                            end_data['time'] = call_data['time'] - time_shift  # new begin for every task is here
+                            end_data['type'] = call_data['type']
+                            self.process.callbacks.on_event('task_end_overlapped', end_data)  # finish it
+                            if begin_data['realtime'] < real_time:
+                                begin_data['lost'] += 1
+                            if begin_data['lost'] > 10:  # we seem lost the end ETW call
+                                to_remove.append(begin_data['id'])  # main candidate is the event that started earlier but nor finished when finished the one started later
+                            else:
+                                begin_data['time'] = call_data['time'] + time_shift  # new begin for every task is here
+                                self.process.callbacks.on_event('task_begin_overlapped', begin_data)  # and start again
+                        for id in to_remove:  # FIXME: but it's better somehow to detect never ending tasks and not show them at all or mark somehow
+                            del self.overlapped[id]  # the task end was probably lost
 
             def set_name(self, name):
                 self.process.callbacks.set_thread_name(self.process.pid, self.tid, name)
@@ -805,12 +865,15 @@ class Callbacks:
                     Callbacks.Process.Thread.EventBase.__init__(self, thread, name, domain)
                     self.scope = scope
 
-                def set(self, time_stamp):
+                def set(self, time_stamp, args=None):
                     data = {
                         'pid': self.thread.process.pid, 'tid': self.thread.tid,
                         'domain': self.domain, 'str': self.name,
                         'time': time_stamp, 'type': 5, 'data': self.scope
                     }
+                    if args is not None:
+                        data.update({'args': args})
+
                     self.thread.process.callbacks.on_event('marker', data)
 
             def marker(self, scope, name, domain='sea'):  # scope is one of 'task', 'global', 'process', 'thread'
@@ -822,11 +885,12 @@ class Callbacks:
                     Callbacks.Process.Thread.EventBase.__init__(self, *args)
                     self.data = None
                     self.args = {}
+                    self.meta = {}
                     # These must be set in descendants!
                     self.event_type = type_id  # first of types
                     self.event_name = type_name
 
-                def __begin(self, time_stamp, task_id):
+                def __begin(self, time_stamp, task_id, args, meta):
                     data = {
                         'pid': self.thread.process.pid, 'tid': self.thread.tid,
                         'domain': self.domain, 'str': self.name,
@@ -834,40 +898,67 @@ class Callbacks:
                     }
                     if task_id is not None:
                         data.update({'id': task_id})
+                    if args:
+                        data.update({'args': args})
+                    if meta:
+                        data.update(meta)
                     return data
 
-                def begin(self, time_stamp, task_id=None):
-                    self.data = self.__begin(time_stamp, task_id)
+                def begin(self, time_stamp, task_id=None, args={}, meta={}):
+                    self.data = self.__begin(time_stamp, task_id, args, meta)
+
+                    if self.event_type == 2:  # overlapped task
+                        self.thread.auto_break_overlapped(self.data, True)
+                        self.thread.process.callbacks.on_event("task_begin_overlapped", self.data)
+                    return self
 
                 def add_args(self, args):  # dictionary is expected
                     self.args.update(args)
+                    return self
+
+                def add_meta(self, meta):  # dictionary is expected
+                    self.meta.update(meta)
+                    return self
 
                 def get_data(self):
                     return self.data
+
+                def get_args(self):
+                    args = self.data['args'].copy()
+                    args.update(self.args)
+                    return args
 
                 def end(self, time_stamp):
                     assert self.data  # expected to be initialized in self.begin call
                     end_data = self.data.copy()
                     end_data.update({'time': time_stamp, 'type': self.event_type + 1})
                     if self.args:
-                        self.data.update({'args': self.args})
-                    self.thread.process.callbacks.complete_task(self.event_name, self.data, end_data)
+                        if 'args' in end_data:
+                            end_data['args'].update(self.args)
+                        else:
+                            end_data['args'] = self.args
+                    if self.meta:
+                        end_data.update(self.meta)
+
+                    if self.event_type == 2:  # overlapped task
+                        self.thread.auto_break_overlapped(end_data, False)
+                        self.thread.process.callbacks.on_event("task_end_overlapped", end_data)
+                    else:
+                        self.thread.process.callbacks.complete_task(self.event_name, self.data, end_data)
                     self.data = None
                     self.args = {}
+                    self.meta = {}
 
-                def complete(self, start_time, duration, task_id=None, args={}):
-                    begin_data = self.__begin(start_time, task_id)
+                def complete(self, start_time, duration, task_id=None, args={}, meta={}):
+                    begin_data = self.__begin(start_time, task_id, args, meta)
                     end_data = begin_data.copy()
                     end_data['time'] = start_time + duration
                     end_data['type'] = self.event_type + 1
-                    if args:
-                        self.data.update({'args': args})
                     self.thread.process.callbacks.complete_task(self.event_name, begin_data, end_data)
                     return begin_data
 
             class Task(TaskBase):
                 def __init__(self, thread, name, domain, overlapped):
-                    suffix = '_overlapped' if overlapped else ''
                     Callbacks.Process.Thread.TaskBase.__init__(
                         self,
                         2 if overlapped else 0,
@@ -890,6 +981,8 @@ class Callbacks:
                         relation = (begin.copy(), self.related_begin.copy(), begin)
                         if 'realtime' in relation[1]:
                             relation[1]['time'] = relation[1]['realtime']
+                        if 'realtime' in relation[2]:
+                            relation[2]['time'] = relation[2]['realtime']
                         relation[0]['parent'] = begin['id']
                         self.thread.process.callbacks.relation(*relation)
                         self.related_begin = None
@@ -897,13 +990,14 @@ class Callbacks:
                         self.relation.related_begin = begin
                     self.relation = None
 
-                def complete(self, start_time, duration, task_id=None, args={}):
-                    begin_data = Callbacks.Process.Thread.TaskBase.complete(self, start_time, duration, task_id, args)
+                def complete(self, start_time, duration, task_id=None, args={}, meta={}):
+                    begin_data = Callbacks.Process.Thread.TaskBase.complete(self, start_time, duration, task_id, args, meta)
                     self.__check_relation(begin_data)
 
                 def relate(self, task):  # relation is being written when last of two related tasks was fully emitted
-                    self.relation = task
-                    task.relate(self)
+                    if self.relation != task:
+                        self.relation = task
+                        task.relate(self)
 
             def task(self, name, domain='sea', overlapped=False):
                 return Callbacks.Process.Thread.Task(self, name, domain, overlapped)
@@ -920,9 +1014,11 @@ class Callbacks:
                 return Callbacks.Process.Thread.Frame(self, name, domain)
 
             class Object(EventBase):
-                def __init__(self, id, *args):
-                    Callbacks.Process.Thread.EventBase.__init__(self, *args)
+                def __init__(self, thread, id, name, domain):
+                    Callbacks.Process.Thread.EventBase.__init__(self, thread, name, domain)
                     self.id = id
+                    if not self.thread.snapshots:
+                        self.thread.snapshots = {'last_time': 0}
 
                 def create(self, time_stamp):
                     data = {
@@ -931,8 +1027,12 @@ class Callbacks:
                         'time': time_stamp, 'type': 9, 'id': self.id
                     }
                     self.thread.process.callbacks.on_event("object_new", data)
+                    return self
 
                 def snapshot(self, time_stamp, args):
+                    if time_stamp <= self.thread.snapshots['last_time']:
+                        time_stamp = self.thread.snapshots['last_time'] + 1
+                    self.thread.snapshots['last_time'] = time_stamp
                     data = {
                         'pid': self.thread.process.pid, 'tid': self.thread.tid,
                         'domain': self.domain, 'str': self.name,
@@ -940,6 +1040,7 @@ class Callbacks:
                         'args': {'snapshot': args}
                     }
                     self.thread.process.callbacks.on_event("object_snapshot", data)
+                    return self
 
                 @staticmethod  # use to prepare argument for 'snapshot' call, only png in base64 string is supported by chrome
                 def create_screenshot_arg(png_base64):
@@ -975,15 +1076,15 @@ class Callbacks:
         if not statics:
             statics['cs'] = None
             for callback in self.callbacks:
-                if type(callback) is 'GoogleTrace':
-                    statics['cs'] = callback.ContextSwitch(callback.get_results()[0])
+                if 'ContextSwitch' in dir(callback):
+                    statics['cs'] = callback.ContextSwitch(callback, self.args.input + '.ftrace')
         if not statics['cs']:
             return
         statics['cs'].write(
-            time=time_stamp, cpu=int(cpu, 16),
-            prev_tid=int(prev_tid, 16), prev_state=prev_state, next_tid=int(next_tid, 16),
-            prev_prio=int(prev_prio, 16), next_prio=int(next_prio, 16),
-            prev_name=prev_name.replace(' ', '_'), next_name=next_name.replace(' ', '_')
+            time_stamp, cpu,
+            prev_tid, prev_state, next_tid,
+            prev_prio, next_prio,
+            prev_name.replace(' ', '_'), next_name.replace(' ', '_')
         )
 
     def set_process_name(self, pid, name):
@@ -993,6 +1094,58 @@ class Callbacks:
     def set_thread_name(self, pid, tid, name):
         for callback in self.callbacks:
             callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (tid %d)' % (name, tid), 'delta': abs(tid)})
+
+    def handle_stack(self, pid, tid, time, stack, kind='sampling'):
+        tasks = self.tasks_from_samples.setdefault(pid, {}).setdefault(tid, {})
+        present = set()
+        depth = len(stack) + 1
+        for frame in stack:
+            ptr = frame['ptr']
+            if not frame['str']:
+                frame['str'] = '0x%x' % ptr
+            if ptr not in tasks:
+                tasks[ptr] = {'begin': time, 'depth': depth}
+                tasks[ptr].update(frame)
+            present.add(ptr)
+            depth -= 1
+        to_remove = [ptr for ptr in tasks.iterkeys() if ptr not in present]
+        if to_remove:
+            def emit_task(task, end):
+                args = {}
+                if '__file__' in task and '__line__' in task:
+                    args.update({
+                        'pos': '%s(%d)' % (task['__file__'], int(task['__line__']))
+                    })
+                self.process(-pid).thread(-tid).task(task['str'], task['module'].replace('\\', '/')).complete(
+                    task['begin'] + task['depth'] * 1000, end - task['begin'] - 2000 * task['depth'], args=args, meta={'sampled': True}
+                )
+
+            leftmost = None
+            for ptr in to_remove:
+                task = tasks[ptr]
+                emit_task(task, time)
+                leftmost = min(task['begin'], leftmost) if leftmost else task['begin']
+                del tasks[ptr]
+
+            if leftmost:  # restart all tasks that were children of removed
+                to_order = []
+                max_depth = 0
+                for ptr, task in tasks.iteritems():
+                    if task['begin'] >= leftmost:
+                        to_order.append((task['begin'], ptr))
+                        emit_task(task, time)
+                        task['begin'] = time
+                    else:
+                        max_depth = max(max_depth, task['depth'])
+                if to_order:
+                    to_order.sort(key=lambda (time, _): time)
+                    for time, ptr in to_order:
+                        max_depth += 1
+                        tasks[ptr]['depth'] = max_depth
+
+        for callback in self.callbacks:
+            callback.handle_stack({'pid': -pid, 'tid': -tid, 'time': time}, stack, kind)
+
 
 # example:
 #
@@ -1039,7 +1192,7 @@ class FileWrapper:
         call = {"tid": self.tid, "pid": self.tree["pid"], "domain": self.domain}
 
         tuple = read_chunk_header(self.file)
-        if tuple == (0, 0, 0):  # mem mapping wasn't trimed on close, zero padding goes further
+        if tuple == (0, 0, 0):  # mem mapping wasn't trimmed on close, zero padding goes further
             return None
         call["time"] = tuple[0]
 
@@ -1098,7 +1251,10 @@ def transform2(args, tree, skip_fn=None):
         for domain, content in tree["domains"].iteritems():  # go thru domains
             for tid, path in content["files"]:  # go thru per thread files
                 parts = split_filename(path)
-                wrappers.setdefault(parts['dir'] + '/' + parts['name'], []).append(FileWrapper(path, args, tree, domain, tid))
+
+                file_wrapper = FileWrapper(path, args, tree, domain, tid)
+                if file_wrapper.get_record():  # record is None if something wrong with file reading
+                    wrappers.setdefault(parts['dir'] + '/' + parts['name'], []).append(file_wrapper)
 
         for unordered in wrappers.itervalues():  # chain wrappers by time
             ordered = sorted(unordered, key=lambda wrapper: wrapper.get_record()['time'])
@@ -1173,20 +1329,40 @@ def get_module_by_ptr(tree, ptr):
         return None, None
 
 
+def win_parse_symbols(symbols):
+    sym = []
+    for line in symbols.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.strip().split('\t')
+        addr, size, name = parts[:3]
+        if int(size):
+            sym.append({'addr': int(addr), 'size': int(size), 'name': name})
+            if len(parts) == 4:
+                sym[-1].update({'pos': parts[3]})
+    sym.sort(key=lambda data: data['addr'])
+    return sym
+
+
+def win_resolve(symbols, addr):
+    idx = bisect_right(symbols, addr, lambda data: data['addr']) - 1
+    if idx > -1:
+        sym = symbols[idx]
+        if sym['addr'] <= addr <= (sym['addr'] + sym['size']):
+            return (sym['pos'] + '\n' + sym['name']) if 'pos' in sym else sym['name']
+    return ''
+
+
 def resolve_cmd(args, path, load_addr, ptr, cache={}):
     if sys.platform == 'win32':
-        """ FIXME: make sure SEA lib' resolve_pointer works and uncomment
-        if not cache:
-            import sea
-            sea.prepare_environ(args)
-            cache['stack'] = sea.ITT('stack')
-        result = cache['stack'].resolve_pointer(path, ptr - load_addr)
-        return result if result else ''
-        print path, ptr - load_addr, result
-        """
-        script_dir = os.path.abspath(args.bindir) if args.bindir else os.path.dirname(os.path.realpath(__file__))
-        executable = os.path.sep.join([script_dir, 'TestIntelSEAPI32.exe'])
-        cmd = '"%s" "%s":%d' % (executable, path, ptr - load_addr)
+        if path.startswith('\\'):
+            path = 'c:' + path
+        if path.lower() in cache:
+            return win_resolve(cache[path.lower()], ptr - load_addr)
+
+        executable = os.path.sep.join([args.bindir, 'TestIntelSEAPI32.exe'])
+        cmd = '"%s" "%s"' % (executable, path)
     elif sys.platform == 'darwin':
         cmd = 'atos -o "%s" -l %s %s' % (path, to_hex(load_addr), to_hex(ptr))
     elif 'linux' in sys.platform:
@@ -1198,12 +1374,24 @@ def resolve_cmd(args, path, load_addr, ptr, cache={}):
     if "INTEL_SEA_VERBOSE" in env:
         del env["INTEL_SEA_VERBOSE"]
 
-    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-    (symbol, err) = proc.communicate()
+    try:
+        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        (symbol, err) = proc.communicate()
+    except IOError:
+        err = traceback.format_exc()
+        import gc
+        gc.collect()
+        print "gc.collect()"
+    except:
+        err = traceback.format_exc()
     if err:
+        print cmd
         print err
         return ''
 
+    if sys.platform == 'win32':
+        cache[path.lower()] = win_parse_symbols(symbol)
+        return win_resolve(cache[path.lower()], ptr - load_addr)
     return symbol
 
 
@@ -1249,29 +1437,30 @@ def resolve_pointer(args, tree, ptr, call, cache={}):
         if not resolve_jit(tree, ptr, cache):
             (load_addr, path) = get_module_by_ptr(tree, ptr)
             if path is None or not os.path.exists(path):
-                return False
-            symbol = resolve_cmd(args, path, load_addr, ptr)
-            cache[ptr] = {'module': path, 'symbol': symbol}
-            lines = cache[ptr]['symbol'].splitlines()
-            if lines:
-                if sys.platform == 'win32':
-                    if len(lines) == 1:
-                        cache[ptr]['str'] = lines[0]
-                    elif len(lines) == 2:
-                        cache[ptr]['str'] = lines[1]
-                        (cache[ptr]['__file__'], cache[ptr]['__line__']) = lines[0].rstrip(")").rsplit("(", 1)
-                elif sys.platform == 'darwin':
-                    if '(in' in lines[0]:
-                        parts = lines[0].split(" (in ")
-                        cache[ptr]['str'] = parts[0]
-                        if ') (' in parts[1]:
-                            (cache[ptr]['__file__'], cache[ptr]['__line__']) = parts[1].split(') (')[1].split(':')
-                            cache[ptr]['__line__'] = cache[ptr]['__line__'].strip(')')
-                else:
-                    if ' at ' in lines[0]:
-                        (cache[ptr]['str'], fileline) = lines[0].split(' at ')
-                        (cache[ptr]['__file__'], cache[ptr]['__line__']) = fileline.strip().split(':')
-    if 'str' not in cache[ptr]:
+                cache[ptr] = None
+            else:
+                symbol = resolve_cmd(args, path, load_addr, ptr)
+                cache[ptr] = {'module': path}
+                lines = symbol.splitlines()
+                if lines:
+                    if sys.platform == 'win32':
+                        if len(lines) == 1:
+                            cache[ptr]['str'] = lines[0]
+                        elif len(lines) == 2:
+                            cache[ptr]['str'] = lines[1]
+                            (cache[ptr]['__file__'], cache[ptr]['__line__']) = lines[0].rstrip(")").rsplit("(", 1)
+                    elif sys.platform == 'darwin':
+                        if '(in' in lines[0]:
+                            parts = lines[0].split(" (in ")
+                            cache[ptr]['str'] = parts[0]
+                            if ') (' in parts[1]:
+                                (cache[ptr]['__file__'], cache[ptr]['__line__']) = parts[1].split(') (')[1].split(':')
+                                cache[ptr]['__line__'] = cache[ptr]['__line__'].strip(')')
+                    else:
+                        if ' at ' in lines[0]:
+                            (cache[ptr]['str'], fileline) = lines[0].split(' at ')
+                            (cache[ptr]['__file__'], cache[ptr]['__line__']) = fileline.strip().split(':')
+    if not cache[ptr] or 'str' not in cache[ptr]:
         return False
     call.update(cache[ptr])
     return True
@@ -1625,6 +1814,8 @@ class GraphCombiner(TaskCombiner):
         return name
 
     def complete_task(self, type, begin, end):
+        if 'sampled' in begin and begin['sampled']:
+            return
         tid = begin['tid'] if 'tid' in begin else None
         self.threads.add(tid)
         domain = self.per_domain.setdefault(begin['domain'], {'counters': {}, 'objects': {}, 'frames': {}, 'tasks': {}, 'markers': {}})
@@ -1675,7 +1866,7 @@ class GraphCombiner(TaskCombiner):
 
 
 class Collector:
-    output = None
+    output = sys.stdout
 
     def __init__(self, args):
         self.args = args

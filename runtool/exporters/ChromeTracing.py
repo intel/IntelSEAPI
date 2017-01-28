@@ -1,6 +1,8 @@
 import os
+import sea
 import sys
 import json
+import codecs
 import strings
 import tempfile
 import subprocess
@@ -12,8 +14,10 @@ GT_FLOAT_TIME = True
 
 
 class GoogleTrace(TaskCombiner):
+
     class ContextSwitch:
-        def __init__(self, file):
+        def __init__(self, parent, file):
+            self.parent = parent
             self.file = file
             self.ftrace = None
 
@@ -25,11 +29,12 @@ class GoogleTrace(TaskCombiner):
             if not self.ftrace:
                 self.ftrace = open(self.file, 'w')
                 self.ftrace.write("# tracer: nop\n")
-                args = (prev_name, prev_tid, cpu, time / 1000000000., time / 1000000000.)
+                args = (prev_name, prev_tid, cpu, self.parent.convert_time(time) / 1000000., self.parent.convert_time(time) / 1000000.)
                 ftrace = "%s-%d [%03d] .... %.6f: tracing_mark_write: trace_event_clock_sync: parent_ts=%.6f\n" % args
                 self.ftrace.write(ftrace)
+                self.parent.targets.append(self.file)
             args = (
-                prev_name, prev_tid, cpu, time / 1000000000.,
+                prev_name, prev_tid, cpu, self.parent.convert_time(time) / 1000000.,
                 prev_name, prev_tid, prev_prio, prev_state,
                 next_name, next_tid, next_prio
             )
@@ -53,6 +58,8 @@ class GoogleTrace(TaskCombiner):
                     self.handle_ftrace(trace)
                 elif trace.endswith(".dtrace"):
                     self.handle_dtrace(trace)
+                elif trace.endswith(".perf"):
+                    self.handle_perf(trace)
                 else:
                     print "Error: unsupported extension:", trace
         self.start_new_trace()
@@ -60,9 +67,8 @@ class GoogleTrace(TaskCombiner):
     def start_new_trace(self):
         self.targets.append("%s-%d.json" % (self.args.output, self.trace_number))
         self.trace_number += 1
-        self.file = open(self.targets[-1], "w")
-        self.file.write('{')
-        self.file.write('\n"traceEvents": [\n')
+        self.file = codecs.open(self.targets[-1], "wb+", 'utf-8')
+        self.file.write('{\n"traceEvents": [\n')
 
         for key, value in self.tree["threads"].iteritems():
             pid_tid = key.split(',')
@@ -111,16 +117,24 @@ class GoogleTrace(TaskCombiner):
         self.targets += res
 
     def handle_etw_trace(self, etw_file):
-        etw_xml = etw_file + ".xml"
-        proc = subprocess.Popen('tracerpt "%s" -of XML -rts -lr -o "%s" -y' % (etw_file, etw_xml), shell=True, stderr=subprocess.PIPE)
-        (out, err) = proc.communicate()
-        if err:
-            return None
+        sea.prepare_environ(self.args)
+        sea_itf = sea.ITT('tools')
+        if sea_itf.can_parse_standard_source():
+            save = (self.args.input, self.args.output, self.args.trace)
+            (self.args.input, self.args.output, self.args.trace) = (etw_file, etw_file, None)
+            res = get_importers()['etl'](self.args)
+            (self.args.input, self.args.output, self.args.trace) = save
+        else:
+            etw_xml = etw_file + ".xml"
+            proc = subprocess.Popen('tracerpt "%s" -of XML -rts -lr -o "%s" -y' % (etw_file, etw_xml), shell=True, stderr=subprocess.PIPE)
+            (out, err) = proc.communicate()
+            if err:
+                return None
 
-        save = (self.args.input, self.args.output, self.args.trace)
-        (self.args.input, self.args.output, self.args.trace) = (etw_xml, etw_xml, None)
-        res = get_importers()['xml'](self.args)
-        (self.args.input, self.args.output, self.args.trace) = save
+            save = (self.args.input, self.args.output, self.args.trace)
+            (self.args.input, self.args.output, self.args.trace) = (etw_xml, etw_xml, None)
+            res = get_importers()['xml'](self.args)
+            (self.args.input, self.args.output, self.args.trace) = save
 
         self.targets += res
         return res
@@ -129,6 +143,15 @@ class GoogleTrace(TaskCombiner):
         save = (self.args.input, self.args.output, self.args.trace)
         (self.args.input, self.args.output, self.args.trace) = (trace, trace, None)
         res = get_importers()['dtrace'](self.args)
+        (self.args.input, self.args.output, self.args.trace) = save
+        self.targets += res
+        return res
+
+    def handle_perf(self, trace):
+        save = (self.args.input, self.args.output, self.args.trace)
+        (self.args.input, self.args.output, self.args.trace) = (trace, trace, None)
+        self.args.sync = [0, 0, 1. / 1000]  # perf ticks in ftrace time units
+        res = get_importers()['perf'](self.args)
         (self.args.input, self.args.output, self.args.trace) = save
         self.targets += res
         return res
@@ -188,7 +211,7 @@ class GoogleTrace(TaskCombiner):
         if data['str'] == "__process__":  # this is the very first record in the trace
             if data.has_key('data'):
                 self.file.write(
-                    '{"name": "process_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\"))
+                    '{"name": "process_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\").encode('utf-8'))
                 )
             if data.has_key('delta'):
                 self.file.write(
@@ -200,7 +223,7 @@ class GoogleTrace(TaskCombiner):
                 )
         elif data['str'] == "__thread__":
             self.file.write(
-                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\"))
+                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\").encode('utf-8'))
             )
             if data.has_key('delta'):
                 self.file.write(
@@ -218,7 +241,7 @@ class GoogleTrace(TaskCombiner):
         if not data.has_key('str'):
             data['str'] = "unknown"
         self.file.write(template % ("s", items[0]['pid'], items[0]['tid'], self.convert_time(items[0]['time']), data['parent'], data['str'], data['domain']))
-        self.file.write(template % ("f", items[1]['pid'], items[1]['tid'], self.convert_time(items[1]['time']), data['parent'], data['str'], data['domain']))
+        self.file.write(template % ("f", items[1]['pid'], items[1]['tid'], self.convert_time(items[1]['time'] - 1), data['parent'], data['str'], data['domain']))
 
     def format_value(self, arg):  # this function must add quotes if value is string, and not number/float, do this recursively for dictionary
         if type(arg) == type({}):
@@ -254,20 +277,22 @@ class GoogleTrace(TaskCombiner):
 
         if not res:
             return
-        if type in ['task', 'counter'] and begin.has_key('data') and begin.has_key('str'):  # FIXME: move closer to the place where stack is demanded
+        if type in ['task', 'counter'] and 'data' in begin and 'str' in begin:  # FIXME: move closer to the place where stack is demanded
             self.handle_stack(begin, resolve_stack(self.args, self.tree, begin['data']), begin['str'])
         if self.args.debug and begin['type'] != 7:
             res = "".join(res)
             try:
                 json.loads(res)
             except Exception as exc:
+                import traceback
                 print "\n" + exc.message + ":\n" + res + "\n"
+                traceback.print_stack()
             res += ',\n'
         else:
             res = "".join(res + [',\n'])
         self.file.write(res)
         if self.file.tell() > MAX_GT_SIZE:
-            self.finish()
+            self.finish(intermediate=True)
             self.start_new_trace()
 
     def handle_stack(self, task, stack, name='stack'):
@@ -279,7 +304,7 @@ class GoogleTrace(TaskCombiner):
                 frame_id = '%d' % frame['ptr']
             else:
                 frame_id = '%d:%s' % (frame['ptr'], parent)
-            if not self.frames.has_key(frame_id):
+            if frame_id not in self.frames:
                 data = {'category': os.path.basename(frame['module']), 'name': frame['str'].replace(' ', '\t')}
                 if '__file__' in frame and frame['__file__']:
                     line = str(frame['__line__']) if '__line__' in frame else '0'
@@ -291,7 +316,7 @@ class GoogleTrace(TaskCombiner):
         time = self.convert_time(task['time'])
         self.samples.append({
             'tid': task['tid'],
-            'ts': time if GT_FLOAT_TIME else int(time),
+            'ts': round(time, 3) if GT_FLOAT_TIME else int(time),
             'sf': frame_id, 'name': name
         })
 
@@ -320,12 +345,12 @@ class GoogleTrace(TaskCombiner):
             name = begin['str']
             res.append(', "s":"%s"' % (GoogleTrace.Markers[begin['data']]))
         elif "object_" in type:
-            if begin.has_key('str'):
+            if 'str' in begin:
                 name = begin['str']
             else:
                 name = ""
         elif "frame" == type:
-            if begin.has_key('str'):
+            if 'str' in begin:
                 name = begin['str']
             else:
                 name = begin['domain']
@@ -335,11 +360,11 @@ class GoogleTrace(TaskCombiner):
             else:
                 name = ""
 
-            if begin.has_key('parent'):
+            if 'parent' in begin:
                 name += to_hex(begin['parent']) + "->"
-            if begin.has_key('str'):
+            if 'str' in begin:
                 name += begin['str'] + ":"
-            if begin.has_key('pointer'):
+            if 'pointer' in begin:
                 name += "func<" + to_hex(begin['pointer']) + ">:"
             else:
                 name = name.rstrip(":")
@@ -348,7 +373,7 @@ class GoogleTrace(TaskCombiner):
         res.append(', "name":"%s"' % name)
         res.append(', "cat":"%s"' % (begin['domain']))
 
-        if begin.has_key('id'):
+        if 'id' in begin:
             res.append(', "id":%s' % (begin['id']))
         if type in ['task']:
             dur = self.convert_time(end['time']) - self.convert_time(begin['time'])
@@ -359,16 +384,16 @@ class GoogleTrace(TaskCombiner):
             else:
                 res.append(', "dur":%d' % dur)
         args = {}
-        if begin.has_key('args'):
+        if 'args' in begin:
             args = begin['args'].copy()
-        if end.has_key('args'):
+        if 'args' in end:
             args.update(end['args'])
-        if begin.has_key('__file__'):
+        if '__file__' in begin:
             args["__file__"] = begin["__file__"]
             args["__line__"] = begin["__line__"]
         if 'counter' == type:
             args[name] = begin['delta']
-        if begin.has_key('memory'):
+        if 'memory' in begin:
             total = 0
             breakdown = {}
             children = 0
@@ -396,30 +421,37 @@ class GoogleTrace(TaskCombiner):
                 counter['time'] += 1  # so, we repeat it on the end of the trace
                 self.complete_task("counter", counter, counter)
 
-    def finish(self):
-        if self.samples:
-            self.file.write('{}],\n"stackFrames":\n')
-            self.file.write(json.dumps(self.frames))
-            self.file.write(',\n"samples":\n')
-            self.file.write(json.dumps(self.samples))
-            self.file.write('}')
+    def remove_last(self, count):
+        self.file.seek(-count, os.SEEK_END)
+        self.file.truncate()
+
+    def finish(self, intermediate=False):
+        if self.samples and not intermediate:
+            self.remove_last(2)
+            self.file.write('], "stackFrames": {\n')
+            for id, frame in self.frames.iteritems():
+                self.file.write('"%s": %s,\n' % (id, json.dumps(frame)))
+            if self.frames:  # deleting last two symbols from the file as we can't leave comma at the end due to json restrictions
+                self.remove_last(2)
+            self.file.write('\n}, "samples": [\n')
+            for sample in self.samples:
+                self.file.write(json.dumps(sample) + ',\n')
+            if self.samples:   # deleting last two symbols from the file as we can't leave comma at the end due to json restrictions
+                self.remove_last(2)
+            self.file.write('\n]}')
             self.samples = []
+            self.frames = {}
         else:
-            self.file.write("{}]}")
+            self.file.write('{}]}')
         self.file.close()
 
     @staticmethod
     def get_catapult_path(args):
         if 'INTEL_SEA_CATAPULT' in os.environ and os.path.exists(os.environ['INTEL_SEA_CATAPULT']):
             return os.environ['INTEL_SEA_CATAPULT']
-        elif args.bindir:
+        else:
             path = os.path.join(args.bindir, 'catapult', 'tracing')
-            if os.path.exists(path):
-                return path
-        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'catapult', 'tracing')
-        if os.path.exists(path):
-            return path
-        return None
+            return path if os.path.exists(path) else None
 
     @staticmethod
     def join_traces(traces, output, args):

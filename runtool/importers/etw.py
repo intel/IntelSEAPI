@@ -3,10 +3,12 @@ import sys
 import glob
 import base64
 import struct
-from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, ProgressConst, TaskTypes, format_bytes, build_tid_map, resolve_pointer, parse_jit, get_decoders
+from sea_runtool import default_tree, Callbacks, Progress, ProgressConst, TaskTypes, format_bytes, build_tid_map, resolve_pointer, get_decoders
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 import sea
 import strings
+
+
 
 class ETWXML:
     def __init__(self, callback, providers):
@@ -241,8 +243,6 @@ class ETWXMLHandler(GPUQueue):
         self.process_names = {}
         self.thread_names = {}
         self.thread_pids = {}
-        self.ftrace = open(args.input + '.ftrace', 'w') if "gt" in args.format else None
-        self.first_ftrace_record = True
         self.files = {}
         self.irps = {}
         self.context_to_node = {}
@@ -252,8 +252,9 @@ class ETWXMLHandler(GPUQueue):
         self.prev_switch = None
         self.tids = set()
         self.images = {}
+        self.prev_time = None
         old_input = args.input
-        for sea_folder in glob.glob(os.path.join(self.args.input, '..', '*-*')):
+        for sea_folder in glob.glob(os.path.join(self.args.user_input, '*-*')):
             if not os.path.isdir(sea_folder):
                 continue
             args.input = sea_folder
@@ -365,7 +366,7 @@ class ETWXMLHandler(GPUQueue):
 
     @staticmethod
     def handle_file_name(file):
-        file_name = file.encode('utf-8').replace('\\', '/').replace('"', r'\"')
+        file_name = file.replace('\\', '/').replace('"', r'\"')
         file_name = file_name.split('/')
         file_name.reverse()
         return file_name[0] + " " + "/".join(file_name[1:])
@@ -497,8 +498,6 @@ class ETWXMLHandler(GPUQueue):
                     tree = self.images.setdefault(parse_int(data['ProcessId']), default_tree(self.args))
                     tree['modules'][parse_int(data['ImageBase'])] = [volume_to_drive(data['FileName']), parse_int(data['ImageSize'])]
             elif info['Opcode'] == 'CSwitch':
-                if self.ftrace is None and not self.first_ftrace_record:
-                    return
                 time = self.convert_time(system['time'])
                 if not self.callbacks.check_time_in_limits(time):
                     return
@@ -515,24 +514,14 @@ class ETWXMLHandler(GPUQueue):
                     if prev_tid == next_tid or (prev_tid, next_tid) == self.prev_switch:
                         return
                     self.prev_switch = (prev_tid, next_tid)
-                prev_name = self.get_process_name_by_tid(prev_tid)
-
-                if self.first_ftrace_record:  # FIXME: use GoogleTrace.ContextSwitch
-                    self.ftrace = open(self.args.input + '.ftrace', 'w') if "gt" in self.args.format else None
-                    self.first_ftrace_record = False
-                    if not self.ftrace:
-                        return
-                    self.ftrace.write("# tracer: nop\n")
-                    args = (prev_name, prev_tid, int(system['cpu']), time / 1000000000., time / 1000000000.)
-                    ftrace = "%s-%d [%03d] .... %.6f: tracing_mark_write: trace_event_clock_sync: parent_ts=%.6f\n" % args
-                    self.ftrace.write(ftrace)
-                args = (
-                    prev_name, prev_tid, int(system['cpu']), time / 1000000000.,
-                    prev_name, prev_tid, int(data['OldThreadPriority']), self.MapReasonToState(int(data['OldThreadState']), int(data['OldThreadWaitReason'])),
-                    self.get_process_name_by_tid(next_tid), next_tid, int(data['NewThreadPriority'])
+                self.callbacks.context_switch(  # time_stamp, cpu, prev_tid, next_tid, prev_name='', next_name='', prev_state='S', prev_prio=0, next_prio=0
+                    time,
+                    int(system['cpu']),
+                    prev_tid, next_tid,
+                    self.get_process_name_by_tid(prev_tid), self.get_process_name_by_tid(next_tid),
+                    self.MapReasonToState(int(data['OldThreadState']), int(data['OldThreadWaitReason'])),
+                    int(data['OldThreadPriority']), int(data['NewThreadPriority'])
                 )
-                ftrace = "%s-%d [%03d] .... %.6f: sched_switch: prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s ==> next_comm=%s next_pid=%d next_prio=%d\n" % args
-                self.ftrace.write(ftrace)
             elif info['Opcode'] == 'Load':
                 tree = self.images.setdefault(parse_int(data['ProcessId']), default_tree(self.args))
                 tree['modules'][parse_int(data['ImageBase'])] = [volume_to_drive(data['FileName']), parse_int(data['ImageSize'])]
@@ -550,6 +539,13 @@ class ETWXMLHandler(GPUQueue):
         return
 
     def on_stack(self, time, pid, tid, stack):
+        time = self.convert_time(parse_int(time))
+        if not self.callbacks.check_pid_allowed(pid) or not self.callbacks.check_time_in_limits(time):
+            return
+        same_time = self.prev_time == time
+        self.prev_time = time
+        if same_time:
+            return
         new_stack = []
         for addr in stack:
             res = {'ptr': addr}
@@ -557,15 +553,15 @@ class ETWXMLHandler(GPUQueue):
                 new_stack.append(res)
         if not new_stack:
             return
-        for callback in self.callbacks.callbacks:
-            callback.handle_stack({'tid': tid, 'time': self.convert_time(parse_int(time))}, new_stack, 'sampling')
+        self.callbacks.handle_stack(pid, tid, time, new_stack)
 
     def on_event(self, system, data, info):
         static = self.static  # FIXME: move to self. notation everywhere
         if self.count % (ProgressConst / 8) == 0:
             self.progress.tick(self.file.tell())
         self.count += 1
-        if not info or not data:
+
+        if not info and not data:
             return
         if not isinstance(data, dict):
             return self.on_binary(system, data, info)
@@ -915,8 +911,7 @@ class ETWXMLHandler(GPUQueue):
             # 'MICROSOFT-WINDOWS-WIN32K',
             'MICROSOFT-WINDOWS-DXGKRNL',
             'MICROSOFT-WINDOWS-DWM-CORE',
-            '{9E814AAD-3204-11D2-9A82-006008A86939}',  # MSNT_SystemTrace
-
+            '{9E814AAD-3204-11D2-9A82-006008A86939}',  # MSNT_SYSTEMTRACE
             'MSNT_SYSTEMTRACE',
             # 'MICROSOFT-WINDOWS-SHELL-CORE'
             None  # Win7 events
@@ -940,18 +935,16 @@ class ETWXMLHandler(GPUQueue):
                 self.file = reader
                 reader.parse(self.args.input)
                 self.finish()
-        if self.ftrace is not None:
-            self.ftrace.close()
-            for pid, data in self.process_names.iteritems():
-                for callback in self.callbacks.callbacks:
-                    proc_name = data['name']
-                    if len(data['cmd']) > len(proc_name):
-                        proc_name = data['cmd'].replace('\\"', '').replace('"', '')
-                    callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': parse_int(pid), 'tid': -1, 'data': proc_name})
+        for pid, data in self.process_names.iteritems():
+            proc_name = data['name']
+            if len(data['cmd']) > len(proc_name):
+                proc_name = data['cmd'].replace('\\"', '').replace('"', '')
+            pid = parse_int(pid)
+            self.callbacks.set_process_name(pid, proc_name)
+            self.callbacks.set_process_name(-pid, 'Sampling: ' + proc_name)
         for tid, (name, pid) in self.thread_names.iteritems():
-            for callback in self.callbacks.callbacks:
-                thread_name = name.replace('\\"', '').replace('"', '')
-                callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (%d)' % (thread_name, tid)})
+            thread_name = name.replace('\\"', '').replace('"', '')
+            self.callbacks.set_thread_name(pid, tid, thread_name)
 
 
 def transform_etw_xml(args):
@@ -965,8 +958,6 @@ def transform_etw_xml(args):
         handler.parse()
     args.no_left_overs = False
     res = callbacks.get_result()
-    if handler.ftrace is not None:
-        res += [handler.ftrace.name]
     return res
 
 IMPORTER_DESCRIPTORS = [

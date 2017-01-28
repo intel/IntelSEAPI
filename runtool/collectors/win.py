@@ -69,8 +69,7 @@ class WPRCollector(Collector):
     def start(self):
         if self.is_recording():
             self.cancel()
-        bin_dir = os.path.abspath(self.args.bindir) if self.args.bindir else os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
-        profile = os.path.normpath(os.path.join(bin_dir, '..', 'ETW', 'IntelSEAPI.wprp'))
+        profile = os.path.normpath(os.path.join(self.args.bindir, '..', 'ETW', 'IntelSEAPI.wprp'))
         profiles = ['-start %s' % option for option, _ in WPRCollector.get_options() if is_domain_enabled('wpa.' + option)]
         cmd = '"%s" -start "%s" %s %s' % (self.wpr, profile, ' '.join(profiles), ('' if self.args.ring else '-filemode'))
         (out, err) = self.execute(cmd)
@@ -220,11 +219,19 @@ def is_domain_enabled(domain, default=True):
     return default
 
 
+def is_older_win7():
+    return float(platform.platform().split('-')[1]) > 7
+
+
 class ETWTrace(Collector):
     def __init__(self, args):
         Collector.__init__(self, args)
         wpr = WPRCollector.detect()
         self.xperf = os.path.normpath(os.path.join(os.path.dirname(wpr), 'xperf')) if wpr else None
+        if not os.path.exists(self.xperf):
+            variants = self.detect_instances('xperf')
+            if variants:
+                self.xperf = variants[0]  # TODO: select by higher version
         self.files = []
         self.start()
 
@@ -239,7 +246,7 @@ class ETWTrace(Collector):
             self.files.append('%s\\etw.etl' % self.args.output)
             self.files.append('%s\\kernel.etl' % self.args.output)
 
-        if 'Windows-8' in platform.platform():
+        if is_older_win7():
             logman_pf = os.path.join(tempfile.gettempdir(), 'gpa_logman.pf')
             count = 0
             with open(logman_pf, 'w') as file:
@@ -254,6 +261,9 @@ class ETWTrace(Collector):
                     count += 1
                 if is_domain_enabled('SteamVR'):
                     file.write('"{8C8F13B1-60EB-4B6A-A433-DE86104115AC}"\n')
+                    count += 1
+                if is_domain_enabled('OculusVR'):
+                    file.write('"{553787FC-D3D7-4F5E-ACB2-1597C7209B3C}"\n')
                     count += 1
             if count:
                 cmd = 'logman start GPA_SEA -ct perf -bs 1024 -nb 120 480'
@@ -309,7 +319,7 @@ class ETWTrace(Collector):
             if is_domain_enabled('Kernel::ContextSwitches'):
                 time_multiplier += 10
                 kernel_logger += ['process', 'thread', 'cswitch']
-            if is_domain_enabled('Kernel::Stacks', False):
+            if is_domain_enabled('Kernel::Stacks', self.args.stacks):
                 time_multiplier += 10
                 kernel_logger += ['img', 'profile']
             if is_domain_enabled('Kernel::IO'):
@@ -344,7 +354,7 @@ class ETWTrace(Collector):
             proc = subprocess.Popen('logman stop "NT Kernel Logger" -ets', shell=True)
             if wait:
                 proc.wait()
-        if 'Windows-8' in platform.platform():
+        if is_older_win7():
             proc = subprocess.Popen('logman stop "GPA_SEA" -ets', shell=True)
         else:
             proc = subprocess.Popen('xperf -stop GPA_SEA', shell=True)

@@ -166,13 +166,51 @@ std::string GetFunctionName(DWORD64 addr, const char* szModulePath)
     return res;
 }
 
+BOOL CALLBACK EnumSymbolsCallback(_In_ PSYMBOL_INFO pSymInfo, _In_ ULONG SymbolSize, _In_opt_ PVOID UserContext)
+{
+    if (!pSymInfo) // || pSymInfo->Tag != 5/*SymTagFunction*/
+        return TRUE;
+
+    std::cout << (pSymInfo->Address - pSymInfo->ModBase) << "\t" << pSymInfo->Size << "\t" << pSymInfo->Name;
+    IMAGEHLP_LINE64 line = { sizeof(IMAGEHLP_LINE64) };
+    DWORD dwDisplacement = 0;
+    SymGetLineFromAddr64(UserContext, pSymInfo->Address, &dwDisplacement, &line);
+    if (line.FileName)
+    {
+        std::cout << "\t" << std::string(line.FileName) + "(" + std::to_string(line.LineNumber) + ")";
+    }
+
+    std::cout << std::endl;
+
+    return TRUE;
+}
+
+bool DumpModule(const char* szModulePath)
+{
+    std::string res;
+    HANDLE hCurProc = GetCurrentProcess();
+    SymSetOptions(SymGetOptions() | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_INCLUDE_32BIT_MODULES);
+    SymInitialize(hCurProc, NULL, TRUE);
+    uint64_t module = SymLoadModule64(hCurProc, NULL, szModulePath, NULL, 0, 0);
+    if (!module) return false;
+    return !!::SymEnumSymbols(hCurProc, module, NULL, EnumSymbolsCallback, hCurProc/*context*/);
+}
+
 int ResolveSymbol(char* request)
 {
-    char* addr = strrchr(request, ':') + 1;
-    *(addr - 1) = 0;
-    std::string res = GetFunctionName(_atoi64(addr), request);
-    std::cout << res << std::endl;
-    return res.size() ? 0 : -1;
+    char* addr_pos = strrchr(request, ':') + 1;
+    DWORD64 addr = _atoi64(addr_pos);
+    if (addr)
+    {
+        *(addr_pos - 1) = 0;
+        std::string res = GetFunctionName(addr, request);
+        std::cout << res << std::endl;
+        return res.size() ? 0 : -1;
+    }
+    else
+    {
+        return DumpModule(request) ? 0 : -1;
+    }
 }
 
 #endif

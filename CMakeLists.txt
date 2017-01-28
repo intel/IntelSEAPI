@@ -19,6 +19,7 @@ cmake_minimum_required(VERSION 2.8)
 
 project(IntelSEAPI)
 
+set(CMAKE_MACOSX_RPATH 1)
 OPTION(JDK "Enable Java build")
 OPTION(FORCE_32 "Force a 32bit compile on 64bit" OFF)
 
@@ -63,7 +64,7 @@ foreach (Flag ${Flags})
     message(STATUS "${Flag} = ${${Flag}}")
 endforeach()
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../bin)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../../bin)
 
 set(EXECUTABLE_OUTPUT_PATH ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
 set(LIBRARY_OUTPUT_PATH ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
@@ -99,8 +100,55 @@ else()
     endif()
 endif()
 
-add_subdirectory(sea_itt_lib)
+
+
+if (WIN32)
+    TARGET_LINK_LIBRARIES(IntelSEAPI)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi /MP")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /MP")
+
+    #SDL:
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /GS /sdl")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /GS /sdl")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /NXCompat /DynamicBase")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NXCompat /DynamicBase")
+    if(NOT ARCH_64)
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /SafeSEH")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SafeSEH")
+    endif()
+
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG") #in release as well
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG") #in release as well
+elseif (APPLE)
+    TARGET_LINK_LIBRARIES(IntelSEAPI dl)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++11 -fPIC -Wno-unused-parameter -fstack-protector-strong -fPIE -O2 -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fPIE -Wl")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fPIE -Wl")
+    set(CMAKE_OSX_ARCHITECTURES "i386;x86_64")
+elseif (ANDROID_NDK)
+    TARGET_LINK_LIBRARIES(IntelSEAPI dl)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fPIE -pthread -fstack-protector-strong -fPIE -O2 -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fPIE -pie -Wl,--no-undefined -z noexecstack -z relro -z now")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fPIE -pie -Wl,--no-undefined -z noexecstack -z relro -z now")
+    if (ARM AND ARCH_64)
+        add_definitions(-DITT_ARCH=ITT_ARCH_PPC64)
+    endif()
+else()
+    TARGET_LINK_LIBRARIES(IntelSEAPI dl)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fPIC -pthread -fstack-protector-strong -fPIE -O2 -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pie -Wl,--no-undefined -z noexecstack -z relro -z now")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fPIE -pie -Wl,--no-undefined -z noexecstack -z relro -z now")
+endif()
+
 add_subdirectory(ittnotify)
+add_subdirectory(sea_itt_lib)
+if (WIN32)
+    if(NOT ARCH_64 AND CMAKE_BUILD_TYPE STREQUAL "Debug") #Compiler Automated Instrumentation
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Gh /GH")
+    endif()
+else()
+    #SET_TARGET_PROPERTIES(IntelSEAPI PROPERTIES COMPILE_FLAGS "-finstrument-functions")
+endif()
 
 TARGET_LINK_LIBRARIES(IntelSEAPI ittnotify)
 
@@ -108,27 +156,101 @@ target_include_directories(IntelSEAPI
     PUBLIC ittnotify/include
 )
 
+################################################### INSTALLER #########################################################
+
+set(CPACK_PACKAGE_NAME "IntelSEAPI")
+set(CPACK_PACKAGE_VENDOR "Intel")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Intel(R) Single Event API")
+set(CPACK_PACKAGE_VERSION "1.0.0")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "IntelSEAPI")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Intel(R) Single Event API")
+set(CPACK_PACKAGE_DESCRIPTION_FILE "${PROJECT_SOURCE_DIR}/README.txt")
+set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/sea_itt_lib/Copyright.txt")
+set(CPACK_RESOURCE_FILE_README "${PROJECT_SOURCE_DIR}/README.txt")
+set(CPACK_RESOURCE_FILE_WELCOME "${PROJECT_SOURCE_DIR}/README.txt")
+
+install(
+    FILES
+        ${PROJECT_SOURCE_DIR}/README.txt
+    DESTINATION .
+)
+
+install(
+    DIRECTORY "${PROJECT_SOURCE_DIR}/ittnotify/include"
+    DESTINATION .
+)
+
+install(
+    FILES
+        "${PROJECT_SOURCE_DIR}/itt_notify.hpp"
+    DESTINATION include
+)
+
+set(SEA_PROJECT_BIN ${PROJECT_SOURCE_DIR}/bin)
+
+function(InstallWildCard what where)
+    install(
+        CODE "
+            file(GLOB SEA_INSTALL_FILES ${what})
+            file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${where}\" TYPE FILE FILES \${SEA_INSTALL_FILES})
+            string(REGEX REPLACE \";\" \"\\n\\t\\t\" SEA_INSTALL_FILES_MSG \"\${SEA_INSTALL_FILES}\")
+            message(\"\\n###\tInstall ${what} to ${where}:\\n\\t\\t\${SEA_INSTALL_FILES_MSG}\")
+        "
+    )
+endfunction()
+
+InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/*.py" "runtool")
+InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/importers/*.py" "runtool/importers")
+InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/exporters/*.py" "runtool/exporters")
+InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/collectors/*.py" "runtool/collectors")
+InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/decoders/*.py" "runtool/decoders")
+
 if (WIN32)
-    TARGET_LINK_LIBRARIES(IntelSEAPI)
-    if(NOT ARCH_64 AND CMAKE_BUILD_TYPE STREQUAL "Debug") #Compiler Automated Instrumentation
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Gh /GH")
-    endif()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi") #in release as well
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG") #in release as well
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG") #in release as well
-elseif (APPLE)
-    TARGET_LINK_LIBRARIES(IntelSEAPI dl)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++11 -fPIC -Wno-unused-parameter")
-    set(CMAKE_OSX_ARCHITECTURES "i386;x86_64")
-elseif (ANDROID_NDK)
-    TARGET_LINK_LIBRARIES(IntelSEAPI dl)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fPIE -pthread")
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fPIE -pie -Wl,--no-undefined")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fPIE -pie")
+    InstallWildCard("${SEA_PROJECT_BIN}/*ittnotify*.lib" "lib")
+    InstallWildCard("${SEA_PROJECT_BIN}/*.dll" "bin")
+    InstallWildCard("${SEA_PROJECT_BIN}/*.exe" "bin")
+    InstallWildCard("${SEA_PROJECT_BIN}/*.pdb" "bin")
+
+    install(
+        FILES
+            sea_itt_lib/IntelSEAPI.man
+            sea_itt_lib/IntelSEAPI.wprp
+            sea_itt_lib/IntelSEAPI_roi.xml
+            sea_itt_lib/IntelSEAPI.wpaProfile
+            sea_itt_lib/register.bat
+        DESTINATION ETW
+    )
+
+    set(CPACK_GENERATOR NSIS)
+
+    #run at exit:
+    set(CPACK_NSIS_EXECUTABLES_DIRECTORY "ETW")
+    set(CPACK_NSIS_MUI_FINISHPAGE_RUN "register.bat")
+    set(CPACK_NSIS_DISPLAY_NAME "Intel(R) Single Event API")
+
+    set(CPACK_NSIS_CONTACT "alexander.a.raud@intel.com")
+
+    SET(CPACK_NSIS_INSTALL_ROOT "c:\\\\Intel")
+
 else()
-    TARGET_LINK_LIBRARIES(IntelSEAPI dl)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fPIC -pthread")
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pie -Wl,--no-undefined")
-    #SET_TARGET_PROPERTIES(IntelSEAPI PROPERTIES COMPILE_FLAGS "-finstrument-functions")
+
+    set(CPACK_BUNDLE_NAME "IntelSEAPI")
+    set(CPACK_GENERATOR STGZ)
+    install(
+        DIRECTORY "${SEA_PROJECT_BIN}"
+        DESTINATION .
+        PATTERN "*.a" EXCLUDE
+    )
+
+    InstallWildCard("${SEA_PROJECT_BIN}/*ittnotify*.a" "lib")
+
+    if(APPLE)
+        install(
+            FILES
+                "${PROJECT_SOURCE_DIR}/sea_itt_lib/IntelSEAPI.instrument"
+            DESTINATION dtrace
+        )
+    endif()
 endif()
 
+include(CPack)

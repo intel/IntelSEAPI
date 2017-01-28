@@ -1,5 +1,6 @@
 import os
 import sys
+import codecs
 from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_exporters
 sys.path.append(os.path.realpath(os.path.dirname(__file__)))  # weird CentOS behaviour workaround
 from etw import GPUQueue
@@ -8,8 +9,7 @@ from etw import GPUQueue
 class DTrace(GPUQueue):
     def __init__(self, args, gt, callbacks):
         GPUQueue.__init__(self, args, callbacks)
-        self.res = [args.input + '.ftrace']
-        self.cs = gt.ContextSwitch(self.res[0])
+        self.cs = None
         self.ignore_gpu = True  # workaround for incomplete dtrace ring
         self.cpu_packets = {}
         self.gpu_packets = {}
@@ -18,11 +18,13 @@ class DTrace(GPUQueue):
         self.gpu_frame = {'catch': [0, 0], 'task': None}
         self.prepares = {}
         for callback in self.callbacks.callbacks:
+            if 'ContextSwitch' in dir(callback):
+                self.cs = callback.ContextSwitch(callback, args.input + '.ftrace')
             callback("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': -1, 'tid': -1, 'data': 'GPU Engines', 'time': 0, 'delta': -2})
 
     def handle_record(self, time, cmd, args):
         if cmd == 'off':
-            if not self.callbacks.check_time_in_limits(time):
+            if not self.cs or not self.callbacks.check_time_in_limits(time):
                 return
             cpu, prev_tid, prev_prio, prev_name, next_tid, next_prio, next_name = args
 
@@ -49,6 +51,19 @@ class DTrace(GPUQueue):
             self.task(time, int(pid, 16), int(tid, 16), cmd == 'e', args[2], args[3], args[4:])
         else:
             print "unsupported cmd:", cmd, args
+
+    def handle_stack(self, time, pid, tid, stack):
+        pid = int(pid, 16)
+        if not self.callbacks.check_time_in_limits(time) or not self.callbacks.check_pid_allowed(pid):
+            return
+        parsed = []
+        for frame in stack:
+            if '`' in frame:
+                module, name = frame.split('`', 1)
+                parsed.append({'ptr': hash(name), 'module': module, 'str': name})
+            else:
+                parsed.append({'ptr': int(frame, 16), 'module': '', 'str': ''})
+        self.callbacks.handle_stack(pid, int(tid, 16), time, parsed)
 
     def task(self, time, pid, tid, starts, domain, name, args):
         if name in ['IGAccelGLContext::BlitFramebuffer', 'CGLFlushDrawable']:
@@ -181,9 +196,6 @@ class DTrace(GPUQueue):
                 thread_name = name.replace('\\"', '').replace('"', '')
                 callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (%d)' % (thread_name, tid)})
 
-    def get_result(self):
-        return [path for path in self.res if os.path.exists(path)]
-
 
 def transform_dtrace(args):
     tree = default_tree(args)
@@ -196,18 +208,30 @@ def transform_dtrace(args):
         dtrace = DTrace(args, gt, callbacks)
         with Progress(os.path.getsize(args.input), 50, "Parsing: " + os.path.basename(args.input)) as progress:
             count = 0
-            with open(args.input) as file:
+            with codecs.open(args.input, 'r', 'utf-8', errors='ignore') as file:
+                reading_stack = None
+                stack = []
                 for line in file:
                     line = line.strip()
                     if not line:
+                        if reading_stack:
+                            dtrace.handle_stack(*(reading_stack + [stack]))
+                            reading_stack = None
+                            stack = []
+                        continue
+                    if reading_stack:
+                        stack.append(line)
                         continue
                     parts = line.split('\t')
+                    if parts[1] == 'stack':
+                        reading_stack = [int(parts[0], 16), parts[2], parts[3].rstrip(':')]
+                        continue
                     dtrace.handle_record(int(parts[0], 16), parts[1], parts[2:])
                     if not count % 1000:
                         progress.tick(file.tell())
                     count += 1
             dtrace.finalize()
-    return callbacks.get_result() + dtrace.get_result()
+    return callbacks.get_result()
 
 IMPORTER_DESCRIPTORS = [{
     'format': 'dtrace',

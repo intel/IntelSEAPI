@@ -33,7 +33,7 @@ def get_share_folder():
 
 
 def run_shell(cmd):
-    print "\n>>", cmd
+    print("\n>>", cmd)
     os.system(cmd)
 
 
@@ -47,14 +47,14 @@ def replace_in_file(file, what_by):
 
 
 def get_yocto():
-    if not os.environ.has_key('CXX'):
+    if 'CXX' not in os.environ:
         return None
     cxx = os.environ['CXX']
     if '-poky' not in cxx:
         return None
     if '-m32' in cxx:
-        return {'bits':'32'}
-    return {'bits':'64'}
+        return {'bits': '32'}
+    return {'bits': '64'}
 
 
 def GetJDKPath():
@@ -64,7 +64,7 @@ def GetJDKPath():
         try:
             aKey = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, path, 0, _winreg.KEY_READ | _winreg.KEY_WOW64_64KEY)
         except WindowsError:
-            print "No key:", path
+            print("No key:", path)
             return None
         subkeys = []
         try:
@@ -75,7 +75,7 @@ def GetJDKPath():
         except WindowsError:
             pass
         if not subkeys:
-            print "No subkeys for:", path
+            print("No subkeys for:", path)
             return None
         subkeys.sort()
         path += "\\" + subkeys[-1]
@@ -83,14 +83,14 @@ def GetJDKPath():
             aKey = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, path, 0, _winreg.KEY_READ | _winreg.KEY_WOW64_64KEY)
             return _winreg.QueryValueEx(aKey, "JavaHome")[0]
         except WindowsError:
-            print "No value for:", path
+            print("No value for:", path)
             return None
     else:
         path, err = subprocess.Popen("which javah", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
         if err or not path:
             return None
         if sys.platform == 'darwin':
-            path = subprocess.check_output("/usr/libexec/java_home").split('\n')[0]
+            path = subprocess.check_output("/usr/libexec/java_home").decode("utf-8").split('\n')[0]
             return path if os.path.exists(path) else None
         else:
             matches = []
@@ -161,7 +161,7 @@ def get_vs_versions():
         if int(version) >= 12:
             versions.append(version)
     if not versions:
-        print "No Visual Studio version found"
+        print("No Visual Studio version found")
     return sorted(versions)
 
 
@@ -175,6 +175,7 @@ def main():
     parser.add_argument("-a", "--android", action="store_true")
     parser.add_argument("--arm", action="store_true")
     parser.add_argument("-c", "--clean", action="store_true")
+    parser.add_argument("-v", "--verbose", action="store_true")
     if sys.platform == 'win32' and vs_versions:
         parser.add_argument("--vs", choices=vs_versions, default=vs_versions[0])
     args = parser.parse_args()
@@ -185,19 +186,23 @@ def main():
     else:
         if not yocto:
             target_bits = ['64']
-            if (sys.platform != 'darwin') or args.android: #on MAC OSX we produce FAT library including both 32 and 64 bits
+            if (sys.platform != 'darwin') or args.android:  # on MAC OSX we produce FAT library including both 32 and 64 bits
                 target_bits.append('32')
         else:
             target_bits = [yocto['bits']]
 
-    print "target_bits", target_bits
+    print("target_bits", target_bits)
 
     jdk_path = GetJDKPath()
-    print "Found JDK:", jdk_path
+    print("Found JDK:", jdk_path)
 
     work_dir = os.getcwd()
-    print work_dir
-    for bits in target_bits: #create separate build dirs
+    print(work_dir)
+    if args.clean:
+        bin_dir = os.path.join(work_dir, 'bin')
+        if os.path.exists(bin_dir):
+            shutil.rmtree(bin_dir)
+    for bits in target_bits:  # create separate build dirs
         work_folder = os.path.join(work_dir, "build_" + ("android" if args.android else "yocto" if yocto else sys.platform.replace('32', "")), bits)
         already_there = os.path.exists(work_folder)
         if already_there and args.clean:
@@ -205,7 +210,7 @@ def main():
             already_there = False
         if not already_there:
             os.makedirs(work_folder)
-        print work_folder
+        print("work_folder: ", work_folder)
         os.chdir(work_folder)
 
         if args.android:
@@ -221,11 +226,12 @@ def main():
                     ("-DANDROID_NDK=%s" % (os.environ['ANDROID_NDK'])),
                     ("-DCMAKE_BUILD_TYPE=%s" % ("Debug" if args.debug else "Release")),
                     ('-DANDROID_ABI="%s"' % abi),
-                    (('-DJDK="%s"' % jdk_path) if jdk_path else "")
+                    (('-DJDK="%s"' % jdk_path) if jdk_path else ""),
+                    ('-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON' if args.verbose else '')
                 ])))
                 run_shell('cmake --build .')
             else:
-                print "Set ANDROID_NDK environment to build Android!"
+                print("Set ANDROID_NDK environment to build Android!")
             continue
         if sys.platform == 'win32':
             if vs_versions:
@@ -238,22 +244,24 @@ def main():
             ("-DFORCE_32=ON" if bits == '32' else ""),
             ("-DCMAKE_BUILD_TYPE=Debug" if args.debug else ""),
             ("-DYOCTO=1" if yocto else ""),
-            (('-DJDK="%s"' % jdk_path) if jdk_path else "")
+            (('-DJDK="%s"' % jdk_path) if jdk_path else ""),
+            ('-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON' if args.verbose else '')
         ])))
         if sys.platform == 'win32':
             install = args.install and bits == target_bits[-1]
-            target_project = 'PACKAGE' if install else 'ALL_BUILD' #making install only on last config, to pack them all
+            target_project = 'PACKAGE' if install else 'ALL_BUILD'  # making install only on last config, to pack them all
             run_shell('cmake --build . --config %s --target %s' % ('Debug' if args.debug else 'Release', target_project))
             if install:
                 run_shell(r'echo f | xcopy "IntelSEAPI*.exe" "%s\IntelSEAPI.exe" /F' % get_share_folder())
         else:
             import glob
-            run_shell('make -j4')
+            run_shell('cmake --build . --config %s' % ('Debug' if args.debug else 'Release'))
             if not args.install or ('linux' in sys.platform and bits == '64'):
-                continue #don't pack on first round, instead on the second pass collect all
-            run_shell('cpack "%s"' % work_dir)
+                continue  # don't pack on first round, instead on the second pass collect all
+            run_shell('cmake --build . --config %s --target package' % ('Debug' if args.debug else 'Release'))
+
             installer = glob.glob(os.path.join(work_folder, "IntelSEAPI*.sh"))[0]
-            print installer
+            print(installer)
             if sys.platform == 'darwin':
                 replace_in_file(installer, [
                     ('toplevel="`pwd`"', 'toplevel="/Applications"'),

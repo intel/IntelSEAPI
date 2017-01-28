@@ -1,4 +1,5 @@
 import os
+import subprocess
 from sea_runtool import Collector, subst_env_vars
 
 
@@ -43,12 +44,24 @@ class Android(Collector):
             return out, err
         if 'no such file or directory' in str(out).lower():
             return out, out
+        if 'Permission denied' in out:
+            proc = subprocess.Popen(self.adb + ' shell su', shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if proc.pid:
+                proc.stdin.write('echo %s > %s\n' % (what, where))
+                proc.stdin.write('exit\n')
+                proc.stdin.close()
+                out_lines = list(proc.stdout)
+                out = '\n'.join(out_lines[1:-1])
+                err = '\n'.join(list(proc.stderr))
         return out, err
 
     def start(self):
         self.file = os.path.join(subst_env_vars(self.args.input), 'atrace-%s.ftrace' % (self.args.cuts[0] if self.args.cuts else '0'))
         self.echo('0', '/sys/kernel/debug/tracing/tracing_on')
         self.echo('', '/sys/kernel/debug/tracing/trace')
+        self.echo('1', '/sys/kernel/debug/tracing/events/i915/enable')
+        self.echo('1', '/sys/kernel/debug/tracing/events/kgsl/enable')
+
         if self.is_root():
             out, err = self.execute(self.adb + ' shell atrace --list_categories')
             if err:
@@ -99,7 +112,7 @@ class Android(Collector):
         if err:
             return []
         self.execute(self.adb + ' shell setprop debug.atrace.tags.enableflags 0')
-        out, err = self.execute('%s pull /sys/kernel/debug/tracing/trace %s' % (self.adb, self.file))
+        out, err = self.execute('%s pull /sys/kernel/debug/tracing/trace "%s"' % (self.adb, self.file))
         if err or 'error' in out:
             with open(self.file, 'w') as file:
                 self.execute(self.adb + ' shell cat /sys/kernel/debug/tracing/trace', stdout=file)

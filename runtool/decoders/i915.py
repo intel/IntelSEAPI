@@ -22,6 +22,7 @@ class I915(GPUQueue):
         self.gpu_relations = {}
         self.relations_add = {}
         self.has_gpu_events = False
+        self.objects = {}
 
     @staticmethod
     def parse_args(args):
@@ -35,7 +36,7 @@ class I915(GPUQueue):
 
     def start_task(self, args, lcls):
         args = self.parse_args(args)
-        self.state[args['uniq'] if 'uniq' in args else args['seqno']] = lcls
+        self.state[self.get_id(args)] = lcls
 
     def add_relation(self, frm, to, static={'count': 0}):
         relation = (frm.copy(), to.copy(), frm)
@@ -175,16 +176,6 @@ class I915(GPUQueue):
                     'tid': tid, 'pid': (pid if pid is not None else tid), 'domain': 'i915', 'time': timestamp, 'str': args['obj'], 'type': 10, 'args': {'snapshot': args}, 'id': int(args['obj'], 16)
                 })
                 """
-        elif 'i915_gem_object_create' in name:
-            """
-            args = self.parse_args(args)
-            self.callbacks.on_event("object_new", {
-                'tid': tid, 'pid': (pid if pid is not None else tid), 'domain': 'i915', 'time': timestamp, 'str': args['obj'], 'type': 9, 'args': {'snapshot': args}, 'id': int(args['obj'], 16)
-            })
-            """
-            pass
-        elif 'i915_gem_object_destroy' == name:
-            pass
         elif 'i915_reg_rw' == name:  # write reg=0x120a8, len=4, val=(0xfffffeff, 0x0)
             pass
         elif 'i915_gem_ring_queue' == name:  # ring=1, uniq=246509, seqno=0
@@ -206,8 +197,6 @@ class I915(GPUQueue):
             if id in self.relations:
                 self.add_relation(call_data, self.relations[id])
             self.relations[id] = call_data
-        elif 'i915_gem_request_retire' == name:  # dev=0, ring=0, uniq=246514, seqno=308188
-            pass
         elif 'i915_scheduler_destroy' == name:  # ring=1, uniq=246526, seqno=308228
             pass
         elif 'i915_vma_bind' == name:  # obj=ffff8800a1d70240, offset=00000000ff3e0000 size=8000 vm=ffff88044426c000
@@ -218,6 +207,12 @@ class I915(GPUQueue):
             pass
         elif 'i915_gem_ring_dispatch' == name:  # dev=0, ring=0, uniq=246537, seqno=308221, flags=0
             self.start_task(args, locals())
+            args = self.parse_args(args)
+            lane = self.callbacks.process(-1 - int(args['dev']), 'GPU').thread(-1 - int(args['ring']))
+            id = self.get_id(args)
+            task = lane.task(id, 'I915', True)
+            task.begin(timestamp, id, args)
+            lane.task_pool[id] = task
         elif 'i915_gem_request_add' in name:
             call_data = self.join_task(pid, tid, timestamp, 'gem_ring_dispatch->gem_request_add', args)
             if call_data:
@@ -230,7 +225,7 @@ class I915(GPUQueue):
             pass
         elif 'i915_scheduler_landing' == name:  # ring=4, uniq=246869, seqno=308717, status=3
             self.start_task(args, locals())
-        elif 'i915_gem_request_complete' == name:  # dev=0, ring=4, uniq=246869, seqno=308717
+        elif name in ['i915_gem_request_complete', 'i915_gem_request_retire']:  # dev=0, ring=4, uniq=246869, seqno=308717
             prev_name = self.state.get(self.get_id(args), {'name': None})['name']
             if prev_name == 'i915_scheduler_landing':
                 call_data = self.join_task(pid, tid, timestamp, 'scheduler_landing->gem_request_complete', args)
@@ -242,6 +237,16 @@ class I915(GPUQueue):
                     del self.gpu_relations[id]
                 else:
                     self.gpu_relations[id] = call_data
+                id = self.get_id(args)
+                if id in self.state:
+                    del self.state[id]
+                return
+            args = self.parse_args(args)
+            lane = self.callbacks.process(-1 - int(args['dev']), 'GPU').thread(-1 - int(args['ring']))
+            id = self.get_id(args)
+            if id in lane.task_pool:
+                lane.task_pool[id].end(timestamp)
+                del lane.task_pool[id]
         elif 'i915_page_table_entry_alloc' == name:  # vm=ffff880444268000, pde=502 (0xfedfb000-0xfedfffff)
             pass
         elif 'i915_context_free' == name:  # dev=0, ctx=ffff880401fde000, ctx_vm=ffff88044426c000
@@ -251,8 +256,48 @@ class I915(GPUQueue):
         elif 'i915_ppgtt_release' == name:  # dev=0, vm=ffff88044426c000
             pass
         elif 'i915_flip_request' == name:  # plane=1, obj=ffff88002ea16600
-            pass
+            args = self.parse_args(args)
+            self.state[args['obj']] = locals()
         elif 'i915_flip_complete' == name:  # plane=1, obj=ffff88002ea16600
+            args = self.parse_args(args)
+            id = args['obj']
+            if id in self.state:
+                start = self.state[id]
+                lane = self.callbacks.process(pid).thread(tid)
+                lane.task('Flip', 'i915').complete(start['timestamp'], timestamp - start['timestamp'])
+        elif name == 'i915_gem_object_create':
+            args = self.parse_args(args)
+            obj = args['obj']
+            thread = self.callbacks.process(pid).thread(tid)
+            self.objects[obj] = thread.object(int(obj, 16), 'GemObj:' + obj, 'i915')
+        elif name == 'i915_gem_object_destroy':
+            args = self.parse_args(args)
+            obj = args['obj']
+            if obj in self.objects:
+                del self.objects[obj]
+        elif name == 'i915_gem_object_move_to_active':
+            args = self.parse_args(args)
+            obj = args['obj']
+            if obj in self.objects:
+                args.update({'state': 'ACTIVE'})
+                self.objects[obj].create(timestamp).snapshot(timestamp, args)
+        elif name == 'i915_gem_object_move_to_inactive':
+            args = self.parse_args(args)
+            obj = args['obj']
+            if obj in self.objects:
+                args.update({'state': 'inactive'})
+                self.objects[obj].snapshot(timestamp, args).destroy(timestamp)
+        elif name == 'i915_atomic_update_start':  # 'pipe B, frame=33785, scanline=1101, pf[N]:ctrl=0 size=4af077f'
+            thread = self.callbacks.process(pid).thread(tid)
+            args = self.parse_args(args)
+            thread.task_pool[args['frame']] = locals()
+        elif name == 'i915_atomic_update_end':  # 'pipe B, frame=33785, scanline=1120'
+            thread = self.callbacks.process(pid).thread(tid)
+            args = self.parse_args(args)
+            start = thread.task_pool.get(args['frame'], None)
+            if start:
+                thread.task('i915_atomic_update').complete(start['timestamp'], timestamp - start['timestamp'], args={'frame': args['frame'], 'scanline_start': start['args']['scanline'], 'scanline_finish': args['scanline']})
+        elif name in ['i915_gem_object_pwrite', 'i915_gem_ring_flush', 'i915_gem_object_clflush', 'i915_gem_obj_prealloc_start', 'i915_gem_obj_prealloc_end', 'i915_gem_object_fault', 'i915_gem_context_reference', 'i915_gem_request_unreference', 'i915_gem_request_reference', 'i915_gem_request_complete_begin', 'i915_gem_request_complete_loop', 'i915_plane_info', 'i915_gem_context_unreference', 'i915_maxfifo_update', 'i915_gem_retire_work_handler']:
             pass
         elif 'i915' in name:
             pass

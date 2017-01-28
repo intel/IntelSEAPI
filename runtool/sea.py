@@ -65,8 +65,6 @@ def prepare_environ(args):  # FIXME: avoid using global os.environ!
     bitness = '32' if '32' in platform.architecture()[0] else '64'
     env_name = 'INTEL_LIBITTNOTIFY' + bitness
     if env_name not in os.environ or 'SEAPI' not in os.environ[env_name]:
-        bin_dir = os.path.abspath(args.bindir) if args and args.bindir else os.path.dirname(os.path.realpath(__file__))
-
         if sys.platform == 'win32':
             dl_name = 'IntelSEAPI%s.dll' % bitness
         elif sys.platform == 'darwin':
@@ -74,7 +72,7 @@ def prepare_environ(args):  # FIXME: avoid using global os.environ!
         else:
             dl_name = 'libIntelSEAPI%s.so' % bitness
 
-        os.environ[env_name] = os.path.join(bin_dir, dl_name)
+        os.environ[env_name] = os.path.join(args.bindir, dl_name)
     if 'INTEL_SEA_SAVE_TO' in os.environ:
         del os.environ['INTEL_SEA_SAVE_TO']
     return os.environ
@@ -93,15 +91,13 @@ class ITT:
         self.strings = {}
         self.tracks = {}
         self.counters = {}
-        if 'INTEL_SEA_SAVE_TO' not in os.environ:
-            print "Hint: INTEL_SEA_SAVE_TO is not set..."
         if env_name not in os.environ:
-            print "Warning:", env_name, "is not set..."
+            print("Warning:", env_name, "is not set...")
             return
         if os.path.exists(os.environ[env_name]):
             self.lib = cdll.LoadLibrary(os.environ[env_name])
         if not self.lib:
-            print "Warning: Failed to load", os.environ[env_name], "..."
+            print("Warning: Failed to load", os.environ[env_name], "...")
             return
 
         # void* itt_create_domain(const char* str)
@@ -159,12 +155,13 @@ class ITT:
             self.lib.resolve_pointer.restype = c_char_p
 
             # bool ExportExeIconAsGif(LPCWSTR szExePath, LPCWSTR szGifPath)
-            self.lib.ExportExeIconAsGif.argtypes = [c_wchar_p, c_wchar_p]
-            self.lib.ExportExeIconAsGif.restype = c_bool
+            if hasattr(self.lib, 'ExportExeIconAsGif'):
+                self.lib.ExportExeIconAsGif.argtypes = [c_wchar_p, c_wchar_p]
+                self.lib.ExportExeIconAsGif.restype = c_bool
 
-            # bool ConvertToGif(LPCWSTR szImagePath, LPCWSTR szGifPath, long width, long height)
-            self.lib.ConvertToGif.argtypes = [c_wchar_p, c_wchar_p, c_long, c_long]
-            self.lib.ConvertToGif.restype = c_bool
+                # bool ConvertToGif(LPCWSTR szImagePath, LPCWSTR szGifPath, long width, long height)
+                self.lib.ConvertToGif.argtypes = [c_wchar_p, c_wchar_p, c_long, c_long]
+                self.lib.ConvertToGif.restype = c_bool
 
         elif 'linux' in sys.platform:
             # void itt_write_time_sync_markers()
@@ -252,7 +249,7 @@ class ITT:
         def receive(receiver, time, count, names, values, progress):  # typedef bool (*receive_t)(void* receiver, uint64_t time, uint16_t count, const wchar_t** names, const wchar_t** values, double progress);
             receiver = receivers[receiver - 1]  # Should be: receiver = cast(receiver, POINTER(py_object)).contents.value, but it doesn't work so we use index of the array
             args = {}
-            for i in xrange(0, count):
+            for i in range(0, count):
                 args[names[i]] = values[i]
             reader.set_progress(progress)
             receiver.receive(time, args)
@@ -268,7 +265,7 @@ class ITT:
         return self.lib.parse_standard_source(path, self.get_receiver_t(get_receiver), self.receive_t(receive))
 
     def can_parse_standard_source(self):
-        return self.lib.parse_standard_source
+        return hasattr(self.lib, 'parse_standard_source')
 
     def get_gpa_version(self):
         if not self.lib:
@@ -296,6 +293,43 @@ class ITT:
             return os.system('sips -s format gif -z %d %d "%s" --out "%s"' % (width, height, from_path, to_path))
         else:
             os.system('convert %s -resize %dx%d %s' % (from_path, width, height, to_path))
+
+
+def get_memory_usage(statics={}):  # in bytes
+    if os.name == 'nt':
+        if not statics:
+            from ctypes import wintypes, Structure, c_size_t, sizeof, WinError, windll, byref
+
+            class PROCESS_MEMORY_COUNTERS(Structure):
+                _fields_ = [("cb", wintypes.DWORD),
+                            ("PageFaultCount", wintypes.DWORD),
+                            ("PeakWorkingSetSize", c_size_t),
+                            ("WorkingSetSize", c_size_t),
+                            ("QuotaPeakPagedPoolUsage", c_size_t),
+                            ("QuotaPagedPoolUsage", c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", c_size_t),
+                            ("QuotaNonPagedPoolUsage", c_size_t),
+                            ("PagefileUsage", c_size_t),
+                            ("PeakPagefileUsage", c_size_t)]
+
+                def __init__(self):
+                    self.cb = sizeof(self)
+
+            windll.psapi.GetProcessMemoryInfo.argtypes = (
+            wintypes.HANDLE, wintypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD)
+
+            def get_working_set_size():
+                pmi = PROCESS_MEMORY_COUNTERS()
+                if not windll.psapi.GetProcessMemoryInfo(-1, byref(pmi), sizeof(pmi)):
+                    raise WinError()
+                return pmi.WorkingSetSize
+
+            statics['GetWorkingSetSize'] = get_working_set_size
+
+        return statics['GetWorkingSetSize']()
+    else:
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == 'darwin' else 1024)  # kilobytes to bytes
 
 
 def trace_execution(fn, args, save_to=None):
@@ -342,16 +376,17 @@ def trace_execution(fn, args, save_to=None):
                         trace_execution.frames[task_id] -= 1
                     else:
                         del trace_execution.frames[task_id]
+                itt.counter('MEMORY_USAGE', get_memory_usage())
             trace_execution.recurrent = False
 
-        print trace_execution.frames
         old_profiler = sys.getprofile()
         sys.setprofile(profiler)
         old_threading_profiler = threading.setprofile(profiler)
-        fn(*args)
-        sys.setprofile(old_profiler)
-        threading.setprofile(old_threading_profiler)
-    else:
+        if fn:
+            fn(*args)
+            sys.setprofile(old_profiler)
+            threading.setprofile(old_threading_profiler)
+    elif fn:
         fn(*args)
 
 

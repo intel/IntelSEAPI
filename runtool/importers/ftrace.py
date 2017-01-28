@@ -1,5 +1,6 @@
 import os
 import sys
+import codecs
 
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 import strings
@@ -21,7 +22,9 @@ class FTrace:
 
     def handle_record(self, proc, pid, tid, cpu, flags, timestamp, name, args):
         if pid is None:
-            pid = self.tid_map[tid] if tid in self.tid_map else None
+            pid = self.tid_map[tid] if tid in self.tid_map else tid
+        elif tid not in self.tid_map:
+            self.tid_map[tid] = pid
         timestamp = int(timestamp * 1000000000)  # seconds to nanoseconds
         if name in ['tracing_mark_write', '0']:
             parts = args.split(':', 1)
@@ -64,6 +67,8 @@ def transform_ftrace(args, preprocess=None):
 
 
 class FTraceImporter:
+    FTraceDecoders = FTrace
+
     def __call__(self, *args):
         return transform_ftrace(*args)
 
@@ -86,9 +91,14 @@ class FTraceImporter:
         if not res:
             return {}
         parsed = res.groupdict().copy()
+        if parsed['tgid']:
+            parsed['tgid'] = parsed['tgid'].strip().lstrip('(').rstrip(')').strip()
+            if parsed['tgid'].isdigit():
+                parsed['tgid'] = int(parsed['tgid'])
+            else:
+                parsed['tgid'] = None
         parsed.update({
             'pid': int(parsed['pid']),
-            'tgid': int(parsed['tgid']) if parsed['tgid'] and parsed['tgid'].isdigit() else None,
             'cpu': int(parsed['cpu']),
             'time': float(parsed['time']),
         })
@@ -100,7 +110,7 @@ class FTraceImporter:
     def preprocess(input, output, fltr=None):
         header = []
         header_complete = False
-        with open(input) as input_file, open(output, 'wb+') as output_file:
+        with codecs.open(input, 'r', 'utf-8', 'ignore') as input_file, codecs.open(output, 'wb+', 'utf-8') as output_file:
             size = os.path.getsize(input)
             count = 0
             with Progress(size, 50, strings.converting % (os.path.basename(input), format_bytes(size))) as progress:

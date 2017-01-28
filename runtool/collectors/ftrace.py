@@ -3,6 +3,7 @@ import sys
 import glob
 import shutil
 import traceback
+import subprocess
 
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 import sea
@@ -112,6 +113,8 @@ class FTrace(Collector):
         self.remote = remote
         self.event_list = []
         self.file = None
+        self.perf_file = None
+        self.perf_proc = None
         for event in supported_events:
             for path in glob.glob('/sys/kernel/debug/tracing/events/*/%s/enable' % event):
                 self.event_list.append(path)
@@ -157,6 +160,12 @@ class FTrace(Collector):
         for path in glob.glob('/sys/kernel/debug/dri/*/i915_mvp_enable'):  # special case for Intel GPU events
             self.echo("1", path)
         self.echo("1", "/sys/kernel/debug/tracing/tracing_on")
+        if self.args.stacks and self.args.target:
+            self.perf_file = os.path.join(self.args.output, 'perf-%s.data' % (self.args.cuts[0] if self.args.cuts else '0'))
+            if os.path.exists(self.perf_file):
+                os.remove(self.perf_file)
+            cmd = 'perf record -a -g -o "%s" -a --pid=%s' % (self.perf_file, self.args.target)
+            self.perf_proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setpgrp)
 
     def copy_from_target(self, what, where):
         self.log("copy %s > %s" % (what, where))
@@ -166,8 +175,17 @@ class FTrace(Collector):
             shutil.copy(what, where)
 
     def stop(self, wait=True):
+        results = []
+        if self.perf_proc:
+            self.perf_proc.wait()
+            if os.path.exists(self.perf_file):
+                results.append(self.perf_file + '.perf')
+                with open(results[-1], 'wb') as file:
+                    self.execute('perf script -F comm,tid,pid,time,ip,sym,dso,symoff --show-kernel-path --demangle-kernel --full-source-path -i "%s"' % self.perf_file, stdout=file)
+                os.remove(self.perf_file)
+
         if not self.file:
-            return []
+            return results
         time_sync()
         self.echo("0", "/sys/kernel/debug/tracing/tracing_on")
         for path in glob.glob('/sys/kernel/debug/dri/*/i915_mvp_enable'):  # special case for Intel GPU events
@@ -178,7 +196,8 @@ class FTrace(Collector):
         with open(file_name) as file_from, open(self.file, 'a') as file_to:
             shutil.copyfileobj(file_from, file_to)
         os.remove(file_name)
-        return [self.file]
+        results.append(self.file)
+        return results
 
 
 COLLECTOR_DESCRIPTORS = [{

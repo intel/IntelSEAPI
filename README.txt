@@ -22,10 +22,11 @@ After your code is instrumented with itt, to load up the library follow these st
 OR you can use sea_runtool.py, see examples in test_<OS>.<bat/sh>
 
 Bulding:
+    Make sure you have cmake (https://cmake.org) in PATH
     All platforms except Android:
         >> python buildall.py -i
         this will produce installer
-        on Windows requires Visual Studio 2013 and NSIS (http://nsis.sourceforge.net/) installed
+        on Windows requires Visual Studio 2013 and NSIS (http://nsis.sourceforge.net) installed
         for Yocto just run this script in the Yocto build environment
     Android:
         requires ANDROID_NDK to be set in environment to the Android NDK path
@@ -54,7 +55,7 @@ Open Source Intel® SEAPI currently supports these formats:
     To enable: use systrace from AndroidStudio/Eclipse.
 
 * Json google trace format - All platforms: https://www.chromium.org/developers/how-tos/trace-event-profiling-tool
-    Cons: no correlation with OSX system events (yet)
+    Cons: no concerns, excellent viewer
     Pros: any platform; Corellation with ftrace (Android, Yocto, Linux), ETW (Windows). Supported: object state tracing, counters, tasks (sync and async) - immediate and with clock domains...
     To enable set environment variable INTEL_SEA_SAVE_TO=<any path>/<trace name>
     Use runtool to transform the SEA directory into json format with next command:

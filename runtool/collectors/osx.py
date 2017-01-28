@@ -23,8 +23,15 @@ sched:::off-cpu
         curlwpsinfo->pr_lwpid, curlwpsinfo->pr_pri, curpsinfo->pr_fname,
         args[0]->pr_lwpid, args[0]->pr_pri, args[1]->pr_fname
     );
+    /*{OFF_CPU}*/
 }
 
+"""
+
+OFF_CPU_STACKS = r"""
+    printf("%x\tstack\t%x\t%x:", machtimestamp, pid, tid);
+    ustack();
+    printf("\n");
 """
 
 osxaskpass = r"""#!/bin/bash
@@ -142,10 +149,15 @@ class DTraceCollector(Collector):
             dtrace_script.append(dtrace_metal)
             cmd += " -p %s" % self.args.target
 
-        with open(script, 'w') as file:
-            file.write('\n'.join(dtrace_script))
+        dtrace_script = '\n'.join(dtrace_script)
 
-        proc = subprocess.Popen(cmd, shell=True, stdin=None, stdout=None, stderr=None, env=os.environ)
+        if self.args.stacks:
+            dtrace_script = dtrace_script.replace('/*{OFF_CPU}*/', OFF_CPU_STACKS)
+
+        with open(script, 'w') as file:
+            file.write(dtrace_script)
+
+        proc = subprocess.Popen(cmd, shell=True, stdin=None, stdout=sys.stdout, stderr=sys.stderr, env=os.environ)
         self.pid = proc.pid
         self.log(cmd)
         self.log("pid: %d" % proc.pid)
@@ -171,8 +183,16 @@ class DTraceCollector(Collector):
         self.log("pid: %s" % str(self.pid))
         if not self.pid:
             return []
-        for pid in self.get_pid_children(self.pid):
+        children = list(self.get_pid_children(self.pid))
+        for pid in children:
             self.execute("sudo -A kill -2 %d" % pid, env=os.environ)
+        print pid, str(children)
+        os.waitpid(self.pid, 0)
+        for pid in children:
+            try:
+                os.waitpid(pid, 0)
+            except:
+                pass
         return self.files
 
 
