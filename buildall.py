@@ -16,6 +16,7 @@
 #
 #**********************************************************************************************************************************************************************************************************************************************************************************************
 
+from __future__ import print_function
 import os
 import sys
 import shutil
@@ -56,54 +57,12 @@ def get_yocto():
         return {'bits': '32'}
     return {'bits': '64'}
 
-
-def GetJDKPath():
-    if sys.platform == 'win32':
-        import _winreg
-        path = "SOFTWARE\\JavaSoft\\Java Development Kit"
-        try:
-            aKey = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, path, 0, _winreg.KEY_READ | _winreg.KEY_WOW64_64KEY)
-        except WindowsError:
-            print("No key:", path)
-            return None
-        subkeys = []
-        try:
-            i = 0
-            while True:
-                subkeys.append(_winreg.EnumKey(aKey, i))
-                i += 1
-        except WindowsError:
-            pass
-        if not subkeys:
-            print("No subkeys for:", path)
-            return None
-        subkeys.sort()
-        path += "\\" + subkeys[-1]
-        try:
-            aKey = _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE, path, 0, _winreg.KEY_READ | _winreg.KEY_WOW64_64KEY)
-            return _winreg.QueryValueEx(aKey, "JavaHome")[0]
-        except WindowsError:
-            print("No value for:", path)
-            return None
-    else:
-        path, err = subprocess.Popen("which javah", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
-        if err or not path:
-            return None
-        if sys.platform == 'darwin':
-            path = subprocess.check_output("/usr/libexec/java_home").decode("utf-8").split('\n')[0]
-            return path if os.path.exists(path) else None
-        else:
-            matches = []
-            for root, dirnames, filenames in os.walk('/usr/lib/jvm'):
-                for filename in fnmatch.filter(filenames, 'jni.h'):
-                    matches.append(os.path.join(root, filename))
-            if not matches:
-                return None
-            return os.path.split(matches[0])[0]
-
 if sys.platform == 'win32':
     def read_registry(path, depth=0xFFFFFFFF, statics={}):
-        import _winreg
+        try:
+            import _winreg
+        except ImportError:
+            import winreg as _winreg
         parts = path.split('\\')
         hub = parts[0]
         path = '\\'.join(parts[1:])
@@ -148,13 +107,37 @@ if sys.platform == 'win32':
         return enum_nodes(path, depth)
 
 
+def GetJDKPath():
+    if sys.platform == 'win32':
+        bush = read_registry(r'HKLM\SOFTWARE\JavaSoft\Java Development Kit')
+        subkeys = sorted([key for key in bush if 'JavaHome' in bush[key]])
+        if subkeys:
+            return bush[subkeys[-1]]['JavaHome']
+        return None
+    else:
+        path, err = subprocess.Popen("which javah", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+        if err or not path:
+            return None
+        if sys.platform == 'darwin':
+            path = subprocess.check_output("/usr/libexec/java_home").decode("utf-8").split('\n')[0]
+            return path if os.path.exists(path) else None
+        else:
+            matches = []
+            for root, dirnames, filenames in os.walk('/usr/lib/jvm'):
+                for filename in fnmatch.filter(filenames, 'jni.h'):
+                    matches.append(os.path.join(root, filename))
+            if not matches:
+                return None
+            return os.path.split(matches[0])[0]
+
+
 def get_vs_versions():
     if sys.platform != 'win32':
         return []
     bush = read_registry(r'HKLM\SOFTWARE\Microsoft\VisualStudio', 2)
 
     versions = []
-    for key, val in bush.iteritems():
+    for key in bush:
         if '.' not in key:
             continue
         version = key.split('.')[0]

@@ -183,12 +183,10 @@ class DTraceCollector(Collector):
         self.log("pid: %s" % str(self.pid))
         if not self.pid:
             return []
-        children = list(self.get_pid_children(self.pid))
-        for pid in children:
+        dtrace_pids = [self.pid] + list(self.get_pid_children(self.pid))
+        for pid in dtrace_pids:  # FIXME: check if it has parent pid as well. Looks as we kill only children.
             self.execute("sudo -A kill -2 %d" % pid, env=os.environ)
-        print pid, str(children)
-        os.waitpid(self.pid, 0)
-        for pid in children:
+        for pid in dtrace_pids:
             try:
                 os.waitpid(pid, 0)
             except:

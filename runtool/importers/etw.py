@@ -124,7 +124,8 @@ class STDSRCReader:
             return {
                 'time': time,
                 'Task': self.taskName, 'Opcode': self.opcode, 'provider': self.provider,
-                'pid': args['hdr:ProcessId'], 'tid': args['hdr:ThreadId'], 'cpu': args['hdr:ProcessorNumber']
+                'pid': args['hdr:ProcessId'], 'tid': args['hdr:ThreadId'], 'cpu': args['hdr:ProcessorNumber'],
+                'EventID': args['hdr:EventId']
             }
 
         def receive(self, time, args):
@@ -132,12 +133,23 @@ class STDSRCReader:
             system['EventName'] = system['Task']
             data = dict((key, val) for (key, val) in args.iteritems() if key and not key.startswith('hdr:'))
             if not data and 'hdr:EventMessage' in args and args['hdr:EventMessage']:
-                text = args['hdr:EventMessage'] + '=' * (-len(args['hdr:EventMessage']) % 4)  # padding with '='s
-                try:
-                    data = base64.b64decode(text).decode('UTF-16').strip(chr(0))
-                except:
+                if len(args['hdr:EventMessage']) % 4 == 0:  # base64
+                    try:
+                        data = base64.b64decode(args['hdr:EventMessage'])
+                    except TypeError:
+                        pass  # Incorrect padding?
+                    try:
+                        data = data.decode('UTF-16').split(u'\x00')[0]  # try to take it as string
+                    except:
+                        pass  # it's a BLOB, nothing to do with it
+                        """
+                        if sys.gettrace():
+                            print "Failed to decode base64:", args['hdr:EventMessage']
+                        """
+                else:
                     if sys.gettrace():
-                        print "Failed to decode:", text
+                        print "hdr:EventMessage:", args['hdr:EventMessage']
+
             self.reader.on_event(system, data, system)
 
     def __init__(self, args, on_event, providers):
@@ -253,6 +265,7 @@ class ETWXMLHandler(GPUQueue):
         self.tids = set()
         self.images = {}
         self.prev_time = None
+        self.statistics = {}
         old_input = args.input
         for sea_folder in glob.glob(os.path.join(self.args.user_input, '*-*')):
             if not os.path.isdir(sea_folder):
@@ -375,6 +388,8 @@ class ETWXMLHandler(GPUQueue):
         if info['EventName'] == 'EventTrace':
             if info['Opcode'] == 'Header':
                 self.PerfFreq = int(data['PerfFreq'])
+                ver = '.'.join(str(num) for num in struct.unpack('BBHL', struct.pack('Q',int(data['Version'])))[:-1])
+                self.callbacks.add_metadata('OS', {'Windows': ver, 'Build': int(data['ProviderVersion'])})
         elif info['EventName'] == 'DiskIo':
             if info['Opcode'] in ['FileDelete', 'FileRundown']:
                 if self.files.has_key(data['FileObject']):
@@ -447,7 +462,7 @@ class ETWXMLHandler(GPUQueue):
                 tid = int(system['tid'])
                 pid = int(system['pid'])
                 self.callbacks.on_event("marker", {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': 'ACCESS_VIOLATION', 'type': 5, 'data': 'track_group', 'args': data})
-            elif info['Opcode'] in ['HardPageFault', 'HardFault', 'TransitionFault', 'DemandZeroFault']:
+            elif info['Opcode'] in ['HardPageFault', 'HardFault', 'TransitionFault', 'DemandZeroFault', 'CopyOnWrite', 'GuardPageFault']:
                 tid = int(system['tid'])
                 pid = int(system['pid'])
                 self.callbacks.on_event("marker", {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': info['Opcode'], 'type': 5, 'data': 'track_group', 'args': data})
@@ -461,11 +476,8 @@ class ETWXMLHandler(GPUQueue):
                 else:
                     self.virtual_mem[pid] -= size
                 self.callbacks.on_event("counter", {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': 'VirtualMemory', 'delta': float(self.virtual_mem[pid]), 'type': 6})
-            elif info['Opcode'] == 'MemResetInfo':
+            elif info['Opcode'] in ['MemResetInfo', 'VirtualAllocDCEnd']:
                 pass
-            else:
-                pass
-            pass
         elif info['EventName'] == 'Pool':
             if info['Opcode'] in ['SessionPoolAllocation', 'PoolAllocation', 'PoolFree', 'SessionPoolFree']:
                 tid = int(system['tid'])
@@ -483,14 +495,17 @@ class ETWXMLHandler(GPUQueue):
                 else:
                     pid_pool[tag_name] -= size
                 self.callbacks.on_event("counter", {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': 'POOL: ' + tag_name, 'delta': float(pid_pool[tag_name]), 'type': 6})
-            else:
-                pass
-            pass
         else:
-            if 'Start' in info['Opcode']:
+            if 'Start' in info['Opcode'] or 'End' in info['Opcode'] or info['Opcode'] in ['Defunct']:
                 event = info['EventName']
                 if event in ['Process', 'Defunct']:
-                    self.process_names[data['ProcessId']] = {'name': data['ImageFileName'].split('.')[0], 'cmd': data['CommandLine']}
+                    name = data['ImageFileName'].split('.')[0]
+                    cmd = data['CommandLine']
+                    names = self.process_names.setdefault(data['ProcessId'], {'name': name, 'cmd': cmd})
+                    if len(names['name']) < len(name):
+                        names['name'] = name
+                    if len(names['cmd']) < len(cmd):
+                        names['cmd'] = cmd
                 elif event == 'Thread':
                     pid = data['ProcessId'] if '0x0' != data['ProcessId'] else hex(int(system['pid']))
                     self.thread_pids[parse_int(data['TThreadId'])] = pid
@@ -534,8 +549,16 @@ class ETWXMLHandler(GPUQueue):
                         if key.startswith('Stack') and num.isdigit():
                             stack[int(num) - 1] = parse_int(data[key]) if data[key] else 0
                     self.on_stack(data['EventTimeStamp'], pid, parse_int(data['StackThread']), stack)
-            else:
+            elif info['Opcode'] in ['Terminate']:
                 pass
+            else:
+                provider = system['provider'].upper() if system['provider'] else None
+                if provider in self.decoders:
+                    for decoder in self.decoders[provider]:
+                        decoder.handle_record(system, data, info)
+                    return
+                if sys.gettrace():
+                    print 'Unsupported EventName:', info['EventName'], 'Opcode:', info['Opcode']
         return
 
     def on_stack(self, time, pid, tid, stack):
@@ -639,15 +662,23 @@ class ETWXMLHandler(GPUQueue):
             id = int(data['uliSubmissionId'] if data.has_key('uliSubmissionId') else data['uliCompletionId'])
             call_data['id'] = id
             call_data['str'] += ":%d" % id
+            ulQueueSubmitSequence = int(data['ulQueueSubmitSequence'])
             if 'Start' in opcode:
-                if static['queue'].has_key(int(data['ulQueueSubmitSequence'])):
-                    relation = (call_data.copy(), static['queue'][int(data['ulQueueSubmitSequence'])].copy(), call_data)
+                if ulQueueSubmitSequence in static['queue']:
+                    cpu_queue_task = static['queue'][ulQueueSubmitSequence]
+                    relation = (call_data.copy(), cpu_queue_task.copy(), call_data)
+                    statistics = self.statistics.setdefault(ulQueueSubmitSequence, {})
+                    statistics['cpu_task'] = cpu_queue_task
+                    statistics['gpu_task_begin'] = call_data
                     if 'realtime' in relation[1]:
                         relation[1]['time'] = relation[1]['realtime']
                     relation[0]['parent'] = id
                 self.auto_break_gui_packets(call_data, 2 ** 64 + tid, True)
             else:
                 self.auto_break_gui_packets(call_data, 2 ** 64 + tid, False)
+                if ulQueueSubmitSequence in self.statistics:
+                    self.statistics[ulQueueSubmitSequence]['gpu_task_end'] = call_data
+
         elif call_data['str'] == 'QueuePacket':  # Microsoft-Windows-DxgKrnl
             if 'Info' in opcode:
                 return
@@ -673,7 +704,7 @@ class ETWXMLHandler(GPUQueue):
             call_data['id'] = id
             call_data['str'] += ":%d" % id
             if 'Start' in opcode:
-                if static['queue'].has_key(id):  # forcefully closing the previous one
+                if id in static['queue']:  # forcefully closing the previous one
                     closing = call_data.copy()
                     closing['type'] = 3
                     closing['id'] = id
@@ -685,13 +716,44 @@ class ETWXMLHandler(GPUQueue):
                     relation[0]['parent'] = data['FenceValue']
                     del static['fence'][data['FenceValue']]
             elif 'Stop' in opcode:
-                if not static['queue'].has_key(id):
+                if id not in static['queue']:
                     return
                 call_data['pid'] = static['queue'][id]['pid']
                 call_data['tid'] = static['queue'][id]['tid']
+                if id in self.statistics:
+                    statistics = self.statistics[id]
+                    if 'PRESENT_RENDER' in statistics['cpu_task']['str']:
+                        key = (call_data['pid'], -call_data['tid'])
+                        present_length = 0
+                        end_time = None
+                        track = None
+                        if key in self.statistics[None]:
+                            track = self.statistics[None][key]
+                            if len(track['presents']) > 2:
+                                for code, time in track['presents']:
+                                    if 'Stop' in code:
+                                        end_time = time
+                                    elif end_time:
+                                        assert(time > end_time)
+                                        present_length = time - end_time
+                                        break
+                        if present_length and 'gpu_task_end' in statistics:
+                            gpu = (statistics['gpu_task_end']['time'] - statistics['gpu_task_begin']['realtime']) / 1000000.
+                            queue = (call_data['time'] - statistics['cpu_task']['realtime']) / 1000000.
+                            draw = present_length / 1000000.
+                            thread = self.callbacks.process(call_data['pid']).thread(-call_data['tid'])
+                            thread.counter('Draw/Queue/GPU(ms)').set_multi_value(end_time, {'GPU': gpu, 'Queue': queue, 'Draw': draw})
+                            zone_name = 'CPU Bound' if draw > queue else 'GPU Bound'
+                            if track['zone']['name'] != zone_name:
+                                if thread.marker('task', zone_name).set(end_time):  # can be False if skipped due to filtering
+                                    track['zone']['name'] = zone_name
+                            if self.callbacks.check_time_in_limits(end_time):
+                                track['zone']['last'] = end_time
+                    del self.statistics[id]
                 del static['queue'][id]
                 self.auto_break_gui_packets(call_data, call_data['tid'], False)
         elif call_data['str'] == 'SCHEDULE_FRAMEINFO':  # Microsoft-Windows-Dwm-Core
+            """  # we don't understand the nature of this event, so disable it for now
             presented = parse_int(data['qpcPresented'])
             if presented:
                 begin = parse_int(data['qpcBegin'])
@@ -701,12 +763,17 @@ class ETWXMLHandler(GPUQueue):
                 del call_data['tid']  # to be global for GUI
                 end_data = {'time': self.convert_time(parse_int(data['qpcFrame']))}
                 self.callbacks.complete_task('frame', call_data, end_data)
+            """
             return
         elif 'Profiler' in call_data['str']:  # Microsoft-Windows-DxgKrnl
             func = int(data['Function'])
-            name = FUN_NAMES[func] if FUN_NAMES.has_key(func) else 'Unknown'
+            name = FUN_NAMES[func] if func in FUN_NAMES else 'Unknown'
             call_data['str'] = name
             call_data['id'] = func
+            if name == 'DxgkPresent':
+                track = self.statistics.setdefault(None, {}).setdefault((call_data['pid'], call_data['tid']), {'zone': {'name': None, 'last': None}, 'presents':[]})
+                track['presents'].append((opcode, call_data['time']))
+                del track['presents'][:-3]
         elif call_data['str'] == 'MakeResident':  # Microsoft-Windows-DxgKrnl
             if 'Start' in opcode:
                 static['resident'].setdefault(system['tid'], []).append(data)
@@ -756,13 +823,11 @@ class ETWXMLHandler(GPUQueue):
             snap.update({'id': hash(call_data['str']), 'type': 10, 'args': {'snapshot': {'name': call_data['str']}}})
             del snap['data']
             self.callbacks.on_event("object_snapshot", snap)
-
-            call_data['domain'] = 'gfx'
-            call_data['str'] = 'VSYNC'
-        elif 'DWMVsyncCountWait' == call_data['str']:  # Microsoft-Windows-DxgKrnl
-            call_data['domain'] = 'gpu'
-            call_data['str'] = 'vblank'
-            call_data['pid'] = -1
+            return
+        elif 'VSyncDPC' == call_data['str']:  # Microsoft-Windows-DxgKrnl
+            if data['VidPnSourceId'] == '0':
+                self.callbacks.vsync(self.convert_time(data['FrameQPCTime']), data)
+            return
         elif call_data['str'] == 'Present':  # Microsoft-Windows-DxgKrnl
             if 'Start' in opcode:
                 call_data["type"] = 0
@@ -825,6 +890,11 @@ class ETWXMLHandler(GPUQueue):
                     callback.relation(*relation)
 
     def finish(self):
+        if None in self.statistics:
+            for (pid, tid), track in self.statistics[None].iteritems():
+                thread = self.callbacks.process(pid).thread(tid)
+                if track['zone']['last']:
+                    thread.marker('task', track['zone']['name']).set(track['zone']['last'])
         for callback in self.callbacks.callbacks:
             for adapter, (id, flags) in self.adapters.iteritems():
                 pid = -1 - id
@@ -844,9 +914,13 @@ class ETWXMLHandler(GPUQueue):
             decoder.finalize()
 
     def on_binary(self, system, data, info):
-        opcode = int(system['Opcode'])
-        if opcode >= len(OPCODES):
-            return
+        if system['Opcode'].isdigit():
+            opcode = int(system['Opcode'])
+            if opcode >= len(OPCODES):
+                return
+            opcode = OPCODES[opcode]
+        else:
+            opcode = system['Opcode']
         if info == '{fdf76a97-330d-4993-997e-9b81979cbd40}':  # DX - Create/Dest Context
             """
             struct context_t
@@ -879,7 +953,7 @@ class ETWXMLHandler(GPUQueue):
             """
             chunk = data.decode('hex')
             (context, packetType, submissionId, unknown, submitSequence) = struct.unpack('QLLLL', chunk[:24])
-            new_info = {'Task': 'DmaPacket', 'Opcode': OPCODES[opcode]}
+            new_info = {'Task': 'DmaPacket', 'Opcode': opcode}
             system['provider'] = 'Microsoft-Windows-DxgKrnl'
             return self.on_event(system, {'hContext': context, 'PacketType': packetType, 'uliSubmissionId':submissionId, 'ulQueueSubmitSequence': submitSequence}, new_info)
         elif info == '{295e0d8e-51ec-43b8-9cc6-9f79331d27d6}':  # DX - Queue Packet
@@ -893,7 +967,7 @@ class ETWXMLHandler(GPUQueue):
             """
             chunk = data.decode('hex')
             (context, packetType, submitSequence) = struct.unpack('QLL', chunk[:16])
-            new_info = {'Task': 'QueuePacket', 'Opcode': OPCODES[opcode]}
+            new_info = {'Task': 'QueuePacket', 'Opcode': opcode}
             system['provider'] = 'Microsoft-Windows-DxgKrnl'
             return self.on_event(system, {'SubmitSequence': submitSequence, 'PacketType': packetType}, new_info)
         else:

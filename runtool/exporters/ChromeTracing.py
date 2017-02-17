@@ -50,6 +50,7 @@ class GoogleTrace(TaskCombiner):
         self.frames = {}
         self.samples = []
         self.last_task = None
+        self.metadata = {}
         if self.args.trace:
             for trace in self.args.trace:
                 if trace.endswith(".etl"):
@@ -209,13 +210,17 @@ class GoogleTrace(TaskCombiner):
 
     def global_metadata(self, data):
         if data['str'] == "__process__":  # this is the very first record in the trace
-            if data.has_key('data'):
+            if 'data' in data:
                 self.file.write(
                     '{"name": "process_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\").encode('utf-8'))
                 )
-            if data.has_key('delta'):
+            if 'delta' in data:
                 self.file.write(
-                    '{"name": "process_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":%d}},\n' % (data['pid'], data['tid'], data['delta'])
+                    '{"name": "process_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":%d}},\n' % (data['pid'], data['tid'], abs(data['delta']) if abs(data['delta']) > 100 else data['delta'])
+                )
+            if 'labels' in data and data['labels']:
+                self.file.write(
+                    '{"name": "process_labels", "ph":"M", "pid":%d, "tid":%s, "args": {"labels":"%s"}},\n' % (data['pid'], data['tid'], ','.join(data['labels']))
                 )
             if data['tid'] >= 0 and not self.tree['threads'].has_key('%d,%d' % (data['pid'], data['tid'])):  # marking the main thread
                 self.file.write(
@@ -225,10 +230,12 @@ class GoogleTrace(TaskCombiner):
             self.file.write(
                 '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\").encode('utf-8'))
             )
-            if data.has_key('delta'):
+            if 'delta' in data:
                 self.file.write(
-                    '{"name": "thread_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":%d}},\n' % (data['pid'], data['tid'], data['delta'])
+                    '{"name": "thread_sort_index", "ph":"M", "pid":%d, "tid":%s, "args": {"sort_index":%d}},\n' % (data['pid'], data['tid'], abs(data['delta']) if abs(data['delta']) > 100 else data['delta'])
                 )
+        else:
+            self.metadata.setdefault(data['str'], []).append(data['data'])
 
     def relation(self, data, head, tail):
         if not head or not tail:
@@ -266,12 +273,14 @@ class GoogleTrace(TaskCombiner):
             self.last_task = (type, begin, end)
         assert (GoogleTrace.Phase.has_key(type))
         if begin['type'] == 7:  # frame_begin
-            begin['id'] = begin['tid'] if begin.has_key('tid') else 0  # Async events are groupped by cat & id
+            if 'id' not in begin:
+                begin['id'] = id(begin)  # Async events are groupped by cat & id
             res = self.format_task('b', 'frame', begin, {})
-            res += [',\n']
-            end_begin = begin.copy()
-            end_begin['time'] = end['time']
-            res += self.format_task('e', 'frame', end_begin, {})
+            if end:
+                res += [',\n']
+                end_begin = begin.copy()
+                end_begin['time'] = end['time'] - 1000
+                res += self.format_task('e', 'frame', end_begin, {})
         else:
             res = self.format_task(GoogleTrace.Phase[type], type, begin, end)
 
@@ -331,7 +340,7 @@ class GoogleTrace(TaskCombiner):
 
     def format_task(self, phase, type, begin, end):
         res = []
-        res.append('{"ph":"%s"' % (phase))
+        res.append('{"ph":"%s"' % phase)
         res.append(', "pid":%(pid)d' % begin)
         if begin.has_key('tid'):
             res.append(', "tid":%(tid)d' % begin)
@@ -374,7 +383,7 @@ class GoogleTrace(TaskCombiner):
         res.append(', "cat":"%s"' % (begin['domain']))
 
         if 'id' in begin:
-            res.append(', "id":%s' % (begin['id']))
+            res.append(', "id":"%s"' % str(begin['id']))
         if type in ['task']:
             dur = self.convert_time(end['time']) - self.convert_time(begin['time'])
             if dur < self.args.min_dur:
@@ -392,7 +401,8 @@ class GoogleTrace(TaskCombiner):
             args["__file__"] = begin["__file__"]
             args["__line__"] = begin["__line__"]
         if 'counter' == type:
-            args[name] = begin['delta']
+            if 'delta' in begin:  # multi-counter is passed as named sub-counters dict
+                args[name] = begin['delta']
         if 'memory' in begin:
             total = 0
             breakdown = {}
@@ -426,23 +436,31 @@ class GoogleTrace(TaskCombiner):
         self.file.truncate()
 
     def finish(self, intermediate=False):
-        if self.samples and not intermediate:
-            self.remove_last(2)
-            self.file.write('], "stackFrames": {\n')
-            for id, frame in self.frames.iteritems():
-                self.file.write('"%s": %s,\n' % (id, json.dumps(frame)))
-            if self.frames:  # deleting last two symbols from the file as we can't leave comma at the end due to json restrictions
-                self.remove_last(2)
-            self.file.write('\n}, "samples": [\n')
-            for sample in self.samples:
-                self.file.write(json.dumps(sample) + ',\n')
-            if self.samples:   # deleting last two symbols from the file as we can't leave comma at the end due to json restrictions
-                self.remove_last(2)
-            self.file.write('\n]}')
-            self.samples = []
-            self.frames = {}
-        else:
-            self.file.write('{}]}')
+        self.remove_last(2)  # remove trailing ,\n
+        if not intermediate:
+            if self.samples:
+                self.file.write('], "stackFrames": {\n')
+                for id, frame in self.frames.iteritems():
+                    self.file.write('"%s": %s,\n' % (id, json.dumps(frame)))
+                if self.frames:  # deleting last two symbols from the file as we can't leave comma at the end due to json restrictions
+                    self.remove_last(2)
+                self.file.write('\n}, "samples": [\n')
+                for sample in self.samples:
+                    self.file.write(json.dumps(sample) + ',\n')
+                if self.samples:   # deleting last two symbols from the file as we can't leave comma at the end due to json restrictions
+                    self.remove_last(2)
+                self.samples = []
+                self.frames = {}
+            if self.metadata:
+                self.file.write('\n],\n')
+                for key, value in self.metadata.iteritems():
+                    self.file.write('"%s": %s,\n' % (key, json.dumps(value[0] if len(value) == 1 else value)))
+                self.remove_last(2)  # remove trailing ,\n
+                self.file.write('\n}')
+                self.file.close()
+                return
+
+        self.file.write('\n]}')
         self.file.close()
 
     @staticmethod

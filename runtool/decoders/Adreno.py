@@ -15,7 +15,15 @@ class Adreno:
 
     @staticmethod
     def parse_args(args):
-        return dict(pair.split('=') for pair in args.split())
+        res = {None:[]}
+        no_pair = []
+        for chunk in args.split():
+            if '=' in chunk:
+                key, val = chunk.split('=')
+                res[key] = val
+            else:
+                res[None].append(chunk)
+        return res
 
     def gpu_queue(self, ctx, inflight, timestamp):
         state = self.ctx.setdefault(ctx, {'inflight': inflight, 'queued': None})
@@ -123,12 +131,22 @@ class Adreno:
         elif name in ['kgsl_pwr_set_state', 'kgsl_pwr_request_state']:
             args = self.parse_args(args)
             thread = self.gpu.thread(-1)
-            thread.counter('POWER_STATE').set_value(timestamp, 0 if args['state'] == 'NAP' else 1)
+            if 'state' in args:
+                state = 0 if args['state'] == 'NAP' else 1
+            else:
+                state = 0 if 'NAP' in args[None] else 1
+            thread.counter('POWER_STATE').set_value(timestamp, state)
         elif name == 'kgsl_gpubusy':
             args = self.parse_args(args)
             thread = self.gpu.thread(-1)
             thread.counter('busy').set_value(timestamp, int(args['busy']))
             thread.counter('elapsed').set_value(timestamp, int(args['elapsed']))
+        elif name == 'kgsl_tz_params':
+            args = self.parse_args(args)
+            thread = self.gpu.thread(-1)
+            thread.counter('total_time').set_value(timestamp, int(args['total_time']))
+            thread.counter('busy_time').set_value(timestamp, int(args['busy_time']))
+            thread.counter('idle_time').set_value(timestamp, int(args['idle_time']))
         elif name == 'kgsl_a3xx_irq_status':
             args = self.parse_args(args)
             thread = self.gpu.thread(-1)
@@ -136,7 +154,11 @@ class Adreno:
         elif name in ['kgsl_bus', 'kgsl_rail', 'kgsl_irq', 'kgsl_clk']:
             args = self.parse_args(args)
             thread = self.gpu.thread(-1)
-            thread.counter(name.split('_')[1].upper()).set_value(timestamp, 1 if args['flag'] == 'on' else 0)
+            if 'flag' in args:
+                state = 1 if args['flag'] == 'on' else 0
+            else:
+                state = 1 if 'on' in args[None] else 0
+            thread.counter(name.split('_')[1].upper()).set_value(timestamp, state)
         elif name in ['kgsl_register_event', 'kgsl_fire_event', 'kgsl_regwrite', 'kgsl_issueibcmds', 'kgsl_active_count']:
             args = self.parse_args(args)
             self.callbacks.process(pid).thread(tid).marker('thread', name, 'Adreno').set(timestamp, args=args)

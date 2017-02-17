@@ -228,7 +228,7 @@ class ETWTrace(Collector):
         Collector.__init__(self, args)
         wpr = WPRCollector.detect()
         self.xperf = os.path.normpath(os.path.join(os.path.dirname(wpr), 'xperf')) if wpr else None
-        if not os.path.exists(self.xperf):
+        if not self.xperf or not os.path.exists(self.xperf):
             variants = self.detect_instances('xperf')
             if variants:
                 self.xperf = variants[0]  # TODO: select by higher version

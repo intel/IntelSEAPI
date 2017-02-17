@@ -139,7 +139,7 @@ def parse_args(args):
     parser.add_argument("--target", help='Pid of target')
     parser.add_argument("--dry", action="store_true", help='Dry mode, only prints what it would do')
     parser.add_argument("--stacks", action="store_true", help='Collect stacks')
-    parser.add_argument("--min_dur", type=int, default=0, help='Sets minimal task length threshold (in float, microseconds). Helps opening huge traces.')
+    parser.add_argument("--min_dur", type=float, default=0, help='Sets minimal task length threshold (in float, microseconds). Helps opening huge traces.')
     parser.add_argument("--sampling")
     parser.add_argument("--distinct", action="store_true")
     parser.add_argument("--memory", choices=["total", "detailed"], default="total")
@@ -540,10 +540,6 @@ def parse_jit(tree, path):
             data['name'], data['class'], data['file'] = names
             if load_address > prev_addr:
                 addr_list.append(data)
-            """ YYY
-            else:
-                assert(load_address == prev_addr)
-            """
             prev_addr = load_address
     if addr_list:
         tree['jit'] = {
@@ -594,6 +590,7 @@ def sea_reader(args):  # reads the structure of .sea format folder into dictiona
 
 
 g_progress_interceptor = None
+verbose_progress = True
 
 
 class Progress:
@@ -602,7 +599,8 @@ class Progress:
         self.steps = steps
         self.shown_steps = 0
         self.message = message
-        print message, "[",
+        if verbose_progress:
+            print message, "[",
 
     def __enter__(self):
         return self
@@ -615,21 +613,25 @@ class Progress:
 
     def show_progress(self, show_steps):
         if self.shown_steps < show_steps:
-            for i in range(show_steps - self.shown_steps):
-                print ".",
+            if verbose_progress:
+                for i in range(show_steps - self.shown_steps):
+                    print ".",
             self.shown_steps = show_steps
 
     def __exit__(self, type, value, traceback):
         if g_progress_interceptor:
             g_progress_interceptor(self.message, self.total, self.total)
         self.show_progress(self.steps)
-        print "]"
+        if verbose_progress:
+            print "]"
         return False
 
     @staticmethod
-    def set_interceptor(interceptor):
+    def set_interceptor(interceptor, verbose_mode=False):
         global g_progress_interceptor
+        global verbose_progress
         g_progress_interceptor = interceptor
+        verbose_progress = verbose_mode
 
 
 class PseudoProgress(Progress):
@@ -707,18 +709,31 @@ TaskTypes = [
 
 
 class Callbacks:
+    event_filter = None
+
     def __init__(self, args, tree):
         self.args = args
+        self.tree = tree
         self.callbacks = []  # while parsing we might have one to many 'listeners' - output format writers
         self.parse_limits()
         self.allowed_pids = set()
         self.processes = {}
         self.tasks_from_samples = {}
+        self.on_finalize_callbacks = []
         if hasattr(self.args, 'user_input') and os.path.isdir(self.args.user_input):
             tid_map = build_tid_map(self.args, self.args.user_input)
             self.allowed_pids = set(tid_map.itervalues())
         for fmt in args.format:
             self.callbacks.append(get_exporters()[fmt](args, tree))
+        if args.target:
+            self.allowed_pids.add(int(args.target))
+
+    @classmethod
+    def set_event_filter(cls, filter):
+        cls.event_filter = filter
+
+    def on_finalize(self, function):  # will be called with callbacks(self) as the only argument
+        self.on_finalize_callbacks.append(function)
 
     def is_empty(self):
         return 0 == len(self.callbacks)
@@ -728,25 +743,47 @@ class Callbacks:
         return self
 
     def __exit__(self, type, value, traceback):
+        self.finalize()
         [callback.__exit__(type, value, traceback) for callback in self.callbacks]  # emulating 'with' statement
         return False
 
+    def finalize(self):
+        for pid, threads in self.tasks_from_samples.iteritems():
+            for tid, tasks in threads.iteritems():
+                self.handle_stack(pid, tid, tasks.last_stack_time,[])
+        for function in self.on_finalize_callbacks:
+            function(self)
+
     def on_event(self, type, data):
+        if self.event_filter:
+            type, data, end = self.event_filter(type, data, None)
+            if not type:
+                return False
         if self.check_pid_allowed(data['pid']) and self.check_time_in_limits(data['time']):
             if self.args.remove_args and 'args' in data:
                 del data['args']
             # copy here as handler can change the data for own good - this shall not affect other handlers
             [callback(type, data.copy()) for callback in self.callbacks]
+            return True
+        else:
+            return False
 
     def complete_task(self, type, begin, end):
-        if self.check_pid_allowed(begin['pid']) and (self.check_time_in_limits(begin['time']) or self.check_time_in_limits(end['time'])):
+        if self.event_filter:
+            type, begin, end = self.event_filter(type, begin, end)
+            if not type:
+                return False
+        if self.check_pid_allowed(begin['pid']) and (self.check_time_in_limits(begin['time']) or (end and self.check_time_in_limits(end['time']))):
             if self.args.remove_args:
                 if 'args' in begin:
                     del begin['args']
                 if 'args' in end:
                     del end['args']
             # copy here as handler can change the data for own good - this shall not affect other handlers
-            [callback.complete_task(type, begin.copy(), end.copy()) for callback in self.callbacks]
+            [callback.complete_task(type, begin.copy(), end.copy() if end else end) for callback in self.callbacks]
+            return True
+        else:
+            return False
 
     def relation(self, data, head, tail):
         if self.check_time_in_limits(data['time']):
@@ -805,6 +842,7 @@ class Callbacks:
                 self.task_stack = []
                 self.task_pool = {}
                 self.snapshots = {}
+                self.lanes = {}
                 if name:
                     self.set_name(name)
 
@@ -857,6 +895,14 @@ class Callbacks:
                     }
                     self.thread.process.callbacks.on_event('counter', data)
 
+                def set_multi_value(self, time_stamp, values_dict):  # values_dict is name:value dictionary
+                    data = {
+                        'pid': self.thread.process.pid, 'tid': self.thread.tid,
+                        'domain': self.domain, 'str': self.name,
+                        'time': time_stamp, 'args':values_dict, 'type': 6
+                    }
+                    self.thread.process.callbacks.on_event('counter', data)
+
             def counter(self, name, domain='sea'):
                 return Callbacks.Process.Thread.Counter(self, name, domain)
 
@@ -874,15 +920,15 @@ class Callbacks:
                     if args is not None:
                         data.update({'args': args})
 
-                    self.thread.process.callbacks.on_event('marker', data)
+                    return self.thread.process.callbacks.on_event('marker', data)
 
             def marker(self, scope, name, domain='sea'):  # scope is one of 'task', 'global', 'process', 'thread'
                 scopes = {'task': 'task', 'global': 'global', 'process': 'track_group', 'thread': 'track'}
                 return Callbacks.Process.Thread.Marker(self, scopes[scope], name, domain)
 
             class TaskBase(EventBase):
-                def __init__(self, type_id, type_name, *args):
-                    Callbacks.Process.Thread.EventBase.__init__(self, *args)
+                def __init__(self, type_id, type_name, thread, name, domain):
+                    Callbacks.Process.Thread.EventBase.__init__(self, thread, name, domain)
                     self.data = None
                     self.args = {}
                     self.meta = {}
@@ -930,15 +976,18 @@ class Callbacks:
 
                 def end(self, time_stamp):
                     assert self.data  # expected to be initialized in self.begin call
-                    end_data = self.data.copy()
-                    end_data.update({'time': time_stamp, 'type': self.event_type + 1})
-                    if self.args:
-                        if 'args' in end_data:
-                            end_data['args'].update(self.args)
-                        else:
-                            end_data['args'] = self.args
-                    if self.meta:
-                        end_data.update(self.meta)
+                    if time_stamp:
+                        end_data = self.data.copy()
+                        end_data.update({'time': time_stamp, 'type': self.event_type + 1})
+                        if self.args:
+                            if 'args' in end_data:
+                                end_data['args'].update(self.args)
+                            else:
+                                end_data['args'] = self.args
+                        if self.meta:
+                            end_data.update(self.meta)
+                    else:
+                        end_data = None  # special case when end is unknown and has to be calculated by viewer
 
                     if self.event_type == 2:  # overlapped task
                         self.thread.auto_break_overlapped(end_data, False)
@@ -983,7 +1032,7 @@ class Callbacks:
                             relation[1]['time'] = relation[1]['realtime']
                         if 'realtime' in relation[2]:
                             relation[2]['time'] = relation[2]['realtime']
-                        relation[0]['parent'] = begin['id']
+                        relation[0]['parent'] = begin['id'] if 'id' in begin else id(begin)
                         self.thread.process.callbacks.relation(*relation)
                         self.related_begin = None
                     else:  # we store our begin in the related task and it will emit the relation on its end
@@ -1003,15 +1052,35 @@ class Callbacks:
                 return Callbacks.Process.Thread.Task(self, name, domain, overlapped)
 
             class Frame(TaskBase):
-                def __init__(self, *args):
-                    Callbacks.Process.Thread.TaskBase.__init__(
-                        self, 7,
-                        'frame',
-                        *args
-                    )
+                def __init__(self, thread, name, domain):
+                    Callbacks.Process.Thread.TaskBase.__init__(self, 7, 'frame', thread, name, domain)
 
             def frame(self, name, domain='sea'):
                 return Callbacks.Process.Thread.Frame(self, name, domain)
+
+            class Lane:
+                def __init__(self, thread, name, domain):
+                    self.thread, self.domain = thread, domain
+                    self.name = '%s (%d):' % (name, thread.tid)
+                    self.first_frame = None
+                    self.id = hex(hash(self))
+                    self.thread.process.callbacks.on_finalize(self.finalize)
+
+                def finalize(self, _):
+                    if self.first_frame:
+                        Callbacks.Process.Thread\
+                            .TaskBase(7, 'frame', self.thread, self.name, self.domain) \
+                            .begin(self.first_frame - 1000, self.id).end(None)  # the open-ended frame (automatically closed by viewer)
+
+                def frame_begin(self, time_stamp, name, args={}, meta={}):
+                    if not self.first_frame or time_stamp < self.first_frame:
+                        self.first_frame = time_stamp
+                    return Callbacks.Process.Thread.TaskBase(7, 'frame', self.thread, name, self.domain).begin(time_stamp, self.id, args, meta)
+
+            def lane(self, name, domain='sea'):
+                if name not in self.lanes:
+                    self.lanes[name] = Callbacks.Process.Thread.Lane(self, name, domain)
+                return self.lanes[name]
 
             class Object(EventBase):
                 def __init__(self, thread, id, name, domain):
@@ -1067,10 +1136,10 @@ class Callbacks:
             self.processes[pid] = Callbacks.Process(self, pid, name)
         return self.processes[pid]
 
-    def vsync(self, time_stamp, statics={}):
+    def vsync(self, time_stamp, args={}, statics={}):
         if not statics:
-            statics['marker'] = self.process(-1).thread(-1).marker('thread', 'vblank', 'gpu')
-        statics['marker'].set(time_stamp)
+            statics['marker'] = self.process(-1).thread(-1, 'VSYNC').marker('thread', 'vblank', 'gpu')
+        statics['marker'].set(time_stamp, args)
 
     def context_switch(self, time_stamp, cpu, prev_tid, next_tid, prev_name='', next_name='', prev_state='S', prev_prio=0, next_prio=0, statics={}):
         if not statics:
@@ -1087,61 +1156,88 @@ class Callbacks:
             prev_name.replace(' ', '_'), next_name.replace(' ', '_')
         )
 
-    def set_process_name(self, pid, name):
+    def set_process_name(self, pid, name, labels=[]):
         for callback in self.callbacks:
-            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': pid, 'tid': -1, 'delta': pid, 'data': name})
+            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': pid, 'tid': -1, 'delta': pid, 'data': name, 'labels': labels})
 
     def set_thread_name(self, pid, tid, name):
         for callback in self.callbacks:
-            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (tid %d)' % (name, tid), 'delta': abs(tid)})
+            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (tid %d)' % (name, tid), 'delta': tid})
+
+    def add_metadata(self, name, data):
+        for callback in self.callbacks:
+            callback("metadata_add", {'domain': 'IntelSEAPI', 'data': data, 'str': name, 'tid': None})
+
+    class AttrDict(dict):
+        pass  # native dict() refuses setattr call
 
     def handle_stack(self, pid, tid, time, stack, kind='sampling'):
-        tasks = self.tasks_from_samples.setdefault(pid, {}).setdefault(tid, {})
+        tasks = self.tasks_from_samples.setdefault(pid, {}).setdefault(tid, self.AttrDict())
+        tasks.last_stack_time = time
+        to_remove = []
+
+        # Find currently present tasks:
         present = set()
-        depth = len(stack) + 1
         for frame in stack:
             ptr = frame['ptr']
             if not frame['str']:
                 frame['str'] = '0x%x' % ptr
-            if ptr not in tasks:
-                tasks[ptr] = {'begin': time, 'depth': depth}
-                tasks[ptr].update(frame)
+            else:
+                frame['str'] = '%s(0x%x)' % (frame['str'], ptr)
             present.add(ptr)
-            depth -= 1
-        to_remove = [ptr for ptr in tasks.iterkeys() if ptr not in present]
+
+        # Remove currently absent tasks (they are finished):
+        for ptr in tasks:
+            if ptr not in present:
+                to_remove.append(ptr)
+
+        to_add = []
+        # Find affected tasks, those to the right of most recent of removed. These affected are to be 'restarted'
         if to_remove:
-            def emit_task(task, end):
-                args = {}
+            leftmost_time = min(tasks[ptr]['begin'] for ptr in to_remove)
+            for ptr, task in tasks.iteritems():
+                if task['begin'] > leftmost_time and ptr not in to_remove:
+                    to_remove.append(ptr)
+                    to_add.append(task.copy())
+
+            # Actual removal of the tasks with flushing them to timeline:
+            to_remove.sort(key=lambda ptr: tasks[ptr]['begin'])
+            shift = 1
+            #lane = self.process(pid).thread(tid).lane('sampled')  #TODO: implement proper lane frames
+            thread = self.process(-pid).thread(-tid)
+            for ptr in to_remove:
+                task = tasks[ptr]
+                end_time = time - 1000 * shift
+                if end_time <= task['begin']:  #this might happen on finalization and with very deep stack
+                    continue
+                args = {'module': task['module'].replace('\\', '/')}
                 if '__file__' in task and '__line__' in task:
                     args.update({
                         'pos': '%s(%d)' % (task['__file__'], int(task['__line__']))
                     })
-                self.process(-pid).thread(-tid).task(task['str'], task['module'].replace('\\', '/')).complete(
-                    task['begin'] + task['depth'] * 1000, end - task['begin'] - 2000 * task['depth'], args=args, meta={'sampled': True}
-                )
-
-            leftmost = None
-            for ptr in to_remove:
-                task = tasks[ptr]
-                emit_task(task, time)
-                leftmost = min(task['begin'], leftmost) if leftmost else task['begin']
+                """  #TODO: implement proper lane frames
+                lane.frame_begin(
+                    task['begin'], task['str'], args=args, meta={'sampled': True}
+                ).end(end_time)
+                """
+                thread.task(task['str']).begin(task['begin'], args=args, meta={'sampled': True}).end(end_time)
                 del tasks[ptr]
+                shift += 1
 
-            if leftmost:  # restart all tasks that were children of removed
-                to_order = []
-                max_depth = 0
-                for ptr, task in tasks.iteritems():
-                    if task['begin'] >= leftmost:
-                        to_order.append((task['begin'], ptr))
-                        emit_task(task, time)
-                        task['begin'] = time
-                    else:
-                        max_depth = max(max_depth, task['depth'])
-                if to_order:
-                    to_order.sort(key=lambda (time, _): time)
-                    for time, ptr in to_order:
-                        max_depth += 1
-                        tasks[ptr]['depth'] = max_depth
+        # pre-sort restarted tasks by their initial time to keep natural order
+        to_add.sort(key=lambda task: task['begin'])
+
+        # Add new tasks to the end of the list
+        for frame in reversed(stack):  # Frames originally come in reverse order [bar, foo, main]
+            if frame['ptr'] not in tasks:
+                to_add.append(frame.copy())
+
+        # Actual adding of tasks:
+        shift = 1
+        for task in to_add:
+            task['begin'] = time + 1000 * shift
+            tasks[task['ptr']] = task
+            shift += 1
 
         for callback in self.callbacks:
             callback.handle_stack({'pid': -pid, 'tid': -tid, 'time': time}, stack, kind)

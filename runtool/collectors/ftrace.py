@@ -164,7 +164,7 @@ class FTrace(Collector):
             self.perf_file = os.path.join(self.args.output, 'perf-%s.data' % (self.args.cuts[0] if self.args.cuts else '0'))
             if os.path.exists(self.perf_file):
                 os.remove(self.perf_file)
-            cmd = 'perf record -a -g -o "%s" -a --pid=%s' % (self.perf_file, self.args.target)
+            cmd = 'perf record -a -g -o "%s" --pid=%s' % (self.perf_file, self.args.target)
             self.perf_proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setpgrp)
 
     def copy_from_target(self, what, where):
