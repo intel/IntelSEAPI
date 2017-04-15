@@ -131,7 +131,7 @@ void workerthread(int data)
 
         if (rand() % 5 == 1)
         {
-            ITT_SCOPE_TRACK(nullptr, "GPU");
+            ITT_SCOPE_TRACK(nullptr, "USER_SCOPE");
             unsigned long long end = TClock::now().time_since_epoch().count();
             unsigned long long length = end - start;
             __itt_task_begin_ex(g_domain, clock_domain, start + length / 4, __itt_null, id, handle_gpu);

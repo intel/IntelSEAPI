@@ -876,6 +876,8 @@ class ETWXMLHandler(GPUQueue):
                 if 'Info' in opcode: return
                 call_data['id'] = int(data['Handle'], 16)
             """
+        elif call_data['str'] in ['AdapterAllocation', 'DeviceAllocation']:  # Microsoft-Windows-DxgKrnl
+            return  # TODO: it might have important information for building memory charts
         else:
             if 'Start' in opcode or 'Stop' in opcode:
                 call_data['id'] = hash(call_data['str'])

@@ -116,7 +116,25 @@ size_t GetStack(TStack& stack)
 
 std::string GetStackString()
 {
+#ifdef _WIN32
     return std::string();
+#else
+    TStack stack = {};
+    size_t size = GetStack(stack);
+
+    char **bt_syms = backtrace_symbols(stack, size);
+    if (!bt_syms)
+        return std::string();
+    std::string res;
+    for (int i = 2; i < size; i++) {
+        if (res.size())
+            res += "<-";
+        res += bt_syms[i];
+    }
+
+    free(bt_syms);
+    return res;
+#endif
 }
 
 #endif

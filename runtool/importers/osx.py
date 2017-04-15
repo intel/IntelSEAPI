@@ -17,10 +17,16 @@ class DTrace(GPUQueue):
         self.gpu_transition = {}
         self.gpu_frame = {'catch': [0, 0], 'task': None}
         self.prepares = {}
+        self.pid_names = {}
+        self.tid_map = {}
         for callback in self.callbacks.callbacks:
             if 'ContextSwitch' in dir(callback):
                 self.cs = callback.ContextSwitch(callback, args.input + '.ftrace')
             callback("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': -1, 'tid': -1, 'data': 'GPU Engines', 'time': 0, 'delta': -2})
+
+    def add_tid_name(self, tid, name):
+        if tid in self.tid_map:
+            self.pid_names[self.tid_map[tid]] = name
 
     def handle_record(self, time, cmd, args):
         if cmd == 'off':
@@ -33,13 +39,16 @@ class DTrace(GPUQueue):
                 prev_tid = '0'
             if next_prio == '0' and next_name == 'kernel_task':
                 next_tid = '0'
-
+            prev_tid = int(prev_tid, 16)
+            next_tid = int(next_tid, 16)
             self.cs.write(
                 time=time, cpu=int(cpu, 16),
-                prev_tid=int(prev_tid, 16), prev_state='S', next_tid=int(next_tid, 16),
+                prev_tid=prev_tid, prev_state='S', next_tid=next_tid,
                 prev_prio=int(prev_prio, 16), next_prio=int(next_prio, 16),
                 prev_name=prev_name.replace(' ', '_'), next_name=next_name.replace(' ', '_')
             )
+            self.add_tid_name(prev_tid, prev_name)
+            self.add_tid_name(next_tid, next_name)
         elif cmd.startswith('dtHook'):
             if not self.ignore_gpu:
                 pid, tid = args[0:2]
@@ -52,8 +61,10 @@ class DTrace(GPUQueue):
         else:
             print "unsupported cmd:", cmd, args
 
-    def handle_stack(self, time, pid, tid, stack):
+    def handle_stack(self, kind, time, pid, tid, stack):
         pid = int(pid, 16)
+        tid = int(tid, 16)
+        self.tid_map[tid] = pid
         if not self.callbacks.check_time_in_limits(time) or not self.callbacks.check_pid_allowed(pid):
             return
         parsed = []
@@ -63,9 +74,10 @@ class DTrace(GPUQueue):
                 parsed.append({'ptr': hash(name), 'module': module, 'str': name})
             else:
                 parsed.append({'ptr': int(frame, 16), 'module': '', 'str': ''})
-        self.callbacks.handle_stack(pid, int(tid, 16), time, parsed)
+        self.callbacks.handle_stack(pid, tid, time, parsed, kind)
 
     def task(self, time, pid, tid, starts, domain, name, args):
+        self.tid_map[tid] = pid
         if name in ['IGAccelGLContext::BlitFramebuffer', 'CGLFlushDrawable']:
             self.gpu_frame['catch'][0 if starts else 1] = time
             if name == 'CGLFlushDrawable':
@@ -184,8 +196,10 @@ class DTrace(GPUQueue):
             pass
         elif 'WriteStamp' == cmd:
             pass
+        elif 'DidFlip' == cmd:
+            pass
         else:
-            print cmd
+            print "Unhandled gpu_call:", cmd
 
     def on_gpu_frame(self, time, pid, tid):
         self.callbacks.on_event("marker", {'pid': pid, 'tid': tid, 'domain': 'gits', 'time': time, 'str': "GPU Frame", 'type': 5, 'data': 'task'})
@@ -195,6 +209,9 @@ class DTrace(GPUQueue):
             for callback in self.callbacks.callbacks:
                 thread_name = name.replace('\\"', '').replace('"', '')
                 callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (%d)' % (thread_name, tid)})
+        for pid, name in self.pid_names.iteritems():
+            self.callbacks.set_process_name(pid, name)
+            self.callbacks.set_process_name(-pid, 'Sampling: ' + name)
 
 
 def transform_dtrace(args):
@@ -212,6 +229,8 @@ def transform_dtrace(args):
                 reading_stack = None
                 stack = []
                 for line in file:
+                    count += 1
+                    ends_with_vt = (11 == ord(line[-1])) if len(line) else False
                     line = line.strip()
                     if not line:
                         if reading_stack:
@@ -220,16 +239,19 @@ def transform_dtrace(args):
                             stack = []
                         continue
                     if reading_stack:
-                        stack.append(line)
+                        if ends_with_vt:  # Vertical Tab signifies too long stack frame description
+                            line += '...'
+                            end_of_line = file.readline()  # it is also treated as line end by codecs.open
+                            line += end_of_line.strip()
+                        stack.append(line.replace('\t', ' '))
                         continue
                     parts = line.split('\t')
-                    if parts[1] == 'stack':
-                        reading_stack = [int(parts[0], 16), parts[2], parts[3].rstrip(':')]
+                    if parts[1] in ['ustack', 'kstack', 'jstack']:
+                        reading_stack = [parts[1], int(parts[0], 16), parts[2], parts[3].rstrip(':')]
                         continue
                     dtrace.handle_record(int(parts[0], 16), parts[1], parts[2:])
                     if not count % 1000:
                         progress.tick(file.tell())
-                    count += 1
             dtrace.finalize()
     return callbacks.get_result()
 

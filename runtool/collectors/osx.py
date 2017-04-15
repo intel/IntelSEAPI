@@ -29,8 +29,14 @@ sched:::off-cpu
 """
 
 OFF_CPU_STACKS = r"""
-    printf("%x\tstack\t%x\t%x:", machtimestamp, pid, tid);
+    printf("%x\tkstack\t%x\t%x:", machtimestamp, pid, tid);
+    stack();
+    printf("\n%x\tustack\t%x\t%x:", machtimestamp, pid, tid);
     ustack();
+    /*
+    printf("\n%x\tjstack\t%x\t%x:", machtimestamp, pid, tid);
+    jstack(); //TODO: enable better support for jstack-s
+    */
     printf("\n");
 """
 
@@ -70,7 +76,9 @@ pid$target:OpenGL:CGLFlushDrawable:return
 
 """
 
+
 class DTraceCollector(Collector):
+
     def __init__(self, args):
         Collector.__init__(self, args)
         self.pid = None
@@ -142,6 +150,7 @@ class DTraceCollector(Collector):
                 ('bufresize', 'auto'),
                 ('bufsize', '%dm' % (self.args.ring * 10))
             ]))
+
         dtrace_script.append(dtrace_context_switch)
         dtrace_script.append(self.gen_gpu_hooks(probes))
 
@@ -157,7 +166,7 @@ class DTraceCollector(Collector):
         with open(script, 'w') as file:
             file.write(dtrace_script)
 
-        proc = subprocess.Popen(cmd, shell=True, stdin=None, stdout=sys.stdout, stderr=sys.stderr, env=os.environ)
+        proc = subprocess.Popen(cmd, shell=True, stdin=None, stdout=self.output, stderr=self.output, env=os.environ)
         self.pid = proc.pid
         self.log(cmd)
         self.log("pid: %d" % proc.pid)

@@ -378,32 +378,37 @@ __itt_domain* domain_createW(const wchar_t* name)
 }
 #endif
 
+inline __itt_string_handle* create_and_add_string_handle_to_list(const char* name)
+{
+    static __itt_string_handle *string_handle_list_tail = NULL;
+    static __itt_global* pGlobal = GetITTGlobal();
+
+    __itt_string_handle *result = NULL;
+
+    NEW_STRING_HANDLE_A(pGlobal, result, string_handle_list_tail, name);
+    string_handle_list_tail = result;
+    return result;
+}
+
 __itt_string_handle* ITTAPI UNICODE_AGNOSTIC(string_handle_create)(const char* name)
 {
-    __itt_string_handle *h_tail = NULL, *h = NULL;
-
     if (name == NULL)
     {
         return NULL;
     }
-
-
     CIttLocker locker;
-    static __itt_global* pGlobal = GetITTGlobal();
-
-    for (h_tail = NULL, h = pGlobal->string_list; h != NULL; h_tail = h, h = h->next)
+    static std::unordered_map<std::string, __itt_string_handle*> handle_map;
+    auto found_handle = handle_map.find(name);
+    if (found_handle != handle_map.end())
     {
-        if (h->strA != NULL && !__itt_fstrcmp(h->strA, name)) break;
-    }
-    if (h == NULL)
-    {
-        NEW_STRING_HANDLE_A(pGlobal, h, h_tail, name);
+        return found_handle->second;
     }
 
-    sea::ReportString(h);
-    return h;
+    __itt_string_handle *result = create_and_add_string_handle_to_list(name);
+    handle_map[name] = result;
+    sea::ReportString(result);
+    return result;
 }
-
 
 #ifdef _WIN32
 __itt_string_handle* string_handle_createW(const wchar_t* name)

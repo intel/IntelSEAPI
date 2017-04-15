@@ -22,12 +22,12 @@ import time
 import shutil
 import struct
 import strings
+from datetime import datetime, timedelta
 import tempfile
 import binascii
 import traceback
 import subprocess
 from glob import glob
-from datetime import timedelta
 
 try:
     sys.setdefaultencoding("utf-8")
@@ -201,11 +201,17 @@ def main():
             if not ext:
                 transform_all(args)
             else:
-                output = get_importers()[ext.lstrip('.')](args)
-                output = join_gt_output(args, output)
-                replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
-                for path in output:
-                    print os.path.abspath(path).replace(*replacement)
+                try:
+                    output = get_importers()[ext.lstrip('.')](args)
+                except KeyError:
+                    print("Error! Format %s is unavailable or unsupported" % ext)
+                else:
+                    output = join_gt_output(args, output)
+                    replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
+                    for path in output:
+                        print os.path.abspath(path).replace(*replacement)
+
+
 
 
 def os_lib_ext():
@@ -382,21 +388,43 @@ def launch(args, victim):
         victim = 'trace-cmd record -e IntelSEAPI/* ' + victim
 
     tracer = None
+
     if args.collector:
-        tracer = get_collectors()[args.collector](args)
+        tracer = get_collectors()[args.collector]
+    elif not tracer:  # using default collector per system
+        if 'linux' in sys.platform:
+            tracer = get_collectors()['ftrace']
+        elif 'win32' == sys.platform:
+            tracer = get_collectors()['etw']
+        elif 'darwin' in sys.platform:
+            tracer = get_collectors()['dtrace']
+    run_suspended = False
 
-    proc = subprocess.Popen(victim, env=os.environ, shell=False, cwd=args.dir)
-    args.target = proc.pid
-    if not tracer:
-        if 'gt' in args.format and args.output:
-            if 'linux' in sys.platform:
-                tracer = get_collectors()['ftrace'](args)
-            elif 'win32' == sys.platform:
-                tracer = get_collectors()['etw'](args)
-            elif 'darwin' in sys.platform:
-                tracer = get_collectors()['dtrace'](args)
+    if run_suspended:
+        suspended = '(cd "%s"; kill -STOP $$; exec %s )' % (args.dir or '.', ' '.join(victim))
+        #suspended = '(kill -STOP $$; exec %s )' % ' '.join(victim)
+        proc = subprocess.Popen(suspended, env=os.environ, shell=True)
+    else:
+        proc = subprocess.Popen(victim, env=os.environ, shell=False, cwd=args.dir)
 
+    if tracer:
+        if sys.platform != 'win32' and not run_suspended:  # FIXME: implement suspended start on Windows!
+            import signal
+            os.kill(proc.pid, signal.SIGSTOP)
+        args.target = proc.pid
+
+        log = open(os.path.join((tempfile.gettempdir() if sys.platform == 'win32' else '/tmp'), datetime.now().strftime('sea_%H_%M_%S__%d_%m_%Y.log')), 'a')
+        tracer.set_output(log)
+        print "For execution details see:", log.name
+        tracer = tracer(args)  # turning class into instance
+
+        if sys.platform != 'win32':  # collector start may be long, so we freeze victim during this time
+            print "PID:", proc.pid
+            import signal
+            os.kill(proc.pid, signal.SIGCONT)
+    print "Waiting application to exit..."
     proc.wait()
+    print "Stopping collectors..."
     if tracer:
         args.trace = tracer.stop()
 
@@ -707,15 +735,15 @@ TaskTypes = [
     "relation"
 ]
 
-
 class Callbacks:
     event_filter = None
+    task_postprocessor = None
 
     def __init__(self, args, tree):
         self.args = args
         self.tree = tree
         self.callbacks = []  # while parsing we might have one to many 'listeners' - output format writers
-        self.parse_limits()
+        self.limits = Callbacks.parse_limits(getattr(self.args, 'limit', None))
         self.allowed_pids = set()
         self.processes = {}
         self.tasks_from_samples = {}
@@ -725,12 +753,21 @@ class Callbacks:
             self.allowed_pids = set(tid_map.itervalues())
         for fmt in args.format:
             self.callbacks.append(get_exporters()[fmt](args, tree))
+
+        if self.task_postprocessor:
+            for callback in self.callbacks:
+                callback.set_task_postprocessor(self.task_postprocessor)
+
         if args.target:
             self.allowed_pids.add(int(args.target))
 
     @classmethod
     def set_event_filter(cls, filter):
         cls.event_filter = filter
+
+    @classmethod
+    def set_task_postprocessor(cls, postprocessor):
+        cls.task_postprocessor = postprocessor
 
     def on_finalize(self, function):  # will be called with callbacks(self) as the only argument
         self.on_finalize_callbacks.append(function)
@@ -748,9 +785,10 @@ class Callbacks:
         return False
 
     def finalize(self):
-        for pid, threads in self.tasks_from_samples.iteritems():
-            for tid, tasks in threads.iteritems():
-                self.handle_stack(pid, tid, tasks.last_stack_time,[])
+        for kind, data in self.tasks_from_samples.iteritems():
+            for pid, threads in data.iteritems():
+                for tid, tasks in threads.iteritems():
+                    self.handle_stack(pid, tid, tasks.last_stack_time, [], kind)
         for function in self.on_finalize_callbacks:
             function(self)
 
@@ -809,16 +847,24 @@ class Callbacks:
             return False
         return True
 
-    def parse_limits(self):
+    @staticmethod
+    def parse_limits(limits_string):
+        """
+        Convert the limits string to 2-elements tuple (<begin>, <end>)
+
+        Args:
+            limits_string: String with limits in format (<begin>):(<end>). Begin and end is optional.
+        """
+
         left_limit = None
         right_limit = None
-        if self.args.limit:
-            limits = self.args.limit.split(":")
+        if limits_string:
+            limits = limits_string.split(":")
             if limits[0]:
                 left_limit = int(limits[0])
             if limits[1]:
                 right_limit = int(limits[1])
-        self.limits = (left_limit, right_limit)
+        return left_limit, right_limit
 
     def get_limits(self):
         return self.limits
@@ -899,7 +945,7 @@ class Callbacks:
                     data = {
                         'pid': self.thread.process.pid, 'tid': self.thread.tid,
                         'domain': self.domain, 'str': self.name,
-                        'time': time_stamp, 'args':values_dict, 'type': 6
+                        'time': time_stamp, 'args': values_dict, 'type': 6
                     }
                     self.thread.process.callbacks.on_event('counter', data)
 
@@ -1146,7 +1192,7 @@ class Callbacks:
             statics['cs'] = None
             for callback in self.callbacks:
                 if 'ContextSwitch' in dir(callback):
-                    statics['cs'] = callback.ContextSwitch(callback, self.args.input + '.ftrace')
+                    statics['cs'] = callback.ContextSwitch(callback, self.args.input)
         if not statics['cs']:
             return
         statics['cs'].write(
@@ -1172,9 +1218,15 @@ class Callbacks:
         pass  # native dict() refuses setattr call
 
     def handle_stack(self, pid, tid, time, stack, kind='sampling'):
-        tasks = self.tasks_from_samples.setdefault(pid, {}).setdefault(tid, self.AttrDict())
+        use_lanes = False
+
+        tasks = self.tasks_from_samples.setdefault(kind, {}).setdefault(pid, {}).setdefault(tid, self.AttrDict())
         tasks.last_stack_time = time
         to_remove = []
+
+        if not use_lanes:
+            pid = -pid if pid > 100 else pid
+            tid = -tid
 
         # Find currently present tasks:
         present = set()
@@ -1203,24 +1255,27 @@ class Callbacks:
             # Actual removal of the tasks with flushing them to timeline:
             to_remove.sort(key=lambda ptr: tasks[ptr]['begin'])
             shift = 1
-            #lane = self.process(pid).thread(tid).lane('sampled')  #TODO: implement proper lane frames
-            thread = self.process(-pid).thread(-tid)
+            if use_lanes:
+                lane = self.process(pid).thread(tid).lane(kind)  #TODO: implement proper lane frames
+            else:
+                thread = self.process(pid).thread(tid)
             for ptr in to_remove:
                 task = tasks[ptr]
                 end_time = time - 1000 * shift
-                if end_time <= task['begin']:  #this might happen on finalization and with very deep stack
+                if end_time <= task['begin']:  # this might happen on finalization and with very deep stack
                     continue
                 args = {'module': task['module'].replace('\\', '/')}
                 if '__file__' in task and '__line__' in task:
                     args.update({
                         'pos': '%s(%d)' % (task['__file__'], int(task['__line__']))
                     })
-                """  #TODO: implement proper lane frames
-                lane.frame_begin(
-                    task['begin'], task['str'], args=args, meta={'sampled': True}
-                ).end(end_time)
-                """
-                thread.task(task['str']).begin(task['begin'], args=args, meta={'sampled': True}).end(end_time)
+                if use_lanes:
+                    lane.frame_begin(
+                        task['begin'], task['str'], args=args, meta={'sampled': True}
+                    ).end(end_time)
+                else:
+                    if kind in ['sampling', 'ustack']:  # temporary workaround for OSX case where there are three stacks
+                        thread.task(task['str']).begin(task['begin'], args=args, meta={'sampled': True}).end(end_time)
                 del tasks[ptr]
                 shift += 1
 
@@ -1240,7 +1295,7 @@ class Callbacks:
             shift += 1
 
         for callback in self.callbacks:
-            callback.handle_stack({'pid': -pid, 'tid': -tid, 'time': time}, stack, kind)
+            callback.handle_stack({'pid': pid, 'tid': tid, 'time': time}, stack, kind)
 
 
 # example:
@@ -1637,6 +1692,8 @@ def represent_data(tree, name, data):
 
 
 class TaskCombiner:
+    not_implemented_err_string = 'You must implement this method in the TaskCombiner derived class!'
+
     def __enter__(self):
         return self
 
@@ -1657,9 +1714,32 @@ class TaskCombiner:
         self.memory = {}
         self.total_memory = 0
         self.prev_memory = None
+        self.task_postprocessor = None
         (self.source_scale_start, self.target_scale_start, self.ratio) = tuple([0, 0, 1. / 1000])  # nanoseconds to microseconds
         if self.args.sync:
             self.set_sync(*self.args.sync)
+
+    def get_targets(self):
+        """Returns list with the paths to output files."""
+        raise NotImplementedError(TaskCombiner.not_implemented_err_string)
+
+    def complete_task(self, type, begin, end):
+        """
+        Handles task to the derived class output format.
+
+        Args:
+            type: Task type.
+            begin: Dictionary with task begin data.
+            end: Dictionary with task end data.
+        """
+        raise NotImplementedError(TaskCombiner.not_implemented_err_string)
+
+    def finish(self):
+        """Called to finalize a derived class."""
+        raise NotImplementedError(TaskCombiner.not_implemented_err_string)
+
+    def set_task_postprocessor(self, postprocessor):
+        self.task_postprocessor = postprocessor
 
     def set_sync(self, *sync):
         (self.source_scale_start, self.target_scale_start, self.ratio) = tuple(sync)
@@ -1769,6 +1849,8 @@ class TaskCombiner:
             index = get_last_index(tasks, data['type'] - 1)
             if index is not None:
                 item = tasks.pop(index)
+                if self.task_postprocessor:
+                    self.task_postprocessor.postprocess('task', item, data)
                 self.complete_task('task', item, data)
             else:
                 assert (self.tree["ring_buffer"] or self.tree['cuts'])
@@ -1909,16 +1991,19 @@ class GraphCombiner(TaskCombiner):
                 return parts[0]
         return name
 
+    def get_per_domain(self, domain):
+        return self.per_domain.setdefault(domain, {'counters': {}, 'objects': {}, 'frames': {}, 'tasks': {}, 'markers': {}})
+
     def complete_task(self, type, begin, end):
         if 'sampled' in begin and begin['sampled']:
             return
         tid = begin['tid'] if 'tid' in begin else None
         self.threads.add(tid)
-        domain = self.per_domain.setdefault(begin['domain'], {'counters': {}, 'objects': {}, 'frames': {}, 'tasks': {}, 'markers': {}})
+        domain = self.get_per_domain(begin['domain'])
         if type == 'task':
             task = domain['tasks'].setdefault(self.get_name_ex(begin), {'time': []})
             task['time'].append(end['time'] - begin['time'])
-            if begin.has_key('__file__'):
+            if '__file__' in begin:
                 task['src'] = begin['__file__'] + ":" + begin['__line__']
             tasks = self.domains[begin['domain']]['tasks']
             stack = tasks[tid]['stack'] if tid in tasks else []
@@ -1932,7 +2017,10 @@ class GraphCombiner(TaskCombiner):
         elif type == 'frame':
             pass
         elif type == 'counter':
-            domain['counters'].setdefault(begin['str'], []).append(begin['delta'])
+            if 'delta' in begin:
+                domain['counters'].setdefault(begin['str'], []).append(begin['delta'])
+            else:
+                return  # TODO: add multi-value support
         elif 'object' in type:
             if 'snapshot' in type:
                 return
@@ -1960,6 +2048,20 @@ class GraphCombiner(TaskCombiner):
             return
         self.relations[key] = relation
 
+    def handle_stack(self, task, stack, name='stack'):
+        tid = abs(task['tid']) if 'tid' in task else None
+        self.threads.add(tid)
+        parent = None
+        for frame in reversed(stack):
+            domain = self.get_per_domain(frame['module'])
+            name = frame['str'].split('+')[0]
+            domain['tasks'].setdefault(name, {'time': [0]})
+            if parent:
+                self.add_relation({'label': 'calls', 'from': self.make_id(parent['module'], parent['name']), 'to': self.make_id(frame['module'], name)})
+            else:
+                self.add_relation({'label': 'executes', 'from': self.make_id("threads", str(tid)), 'to': self.make_id(frame['module'], name), 'color': 'gray'})
+            parent = frame.copy()
+            parent.update({'name': name})
 
 class Collector:
     output = sys.stdout

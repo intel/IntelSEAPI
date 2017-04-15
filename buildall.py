@@ -107,6 +107,11 @@ if sys.platform == 'win32':
         return enum_nodes(path, depth)
 
 
+def locate_exact(what):
+    items = subprocess.check_output(['locate', what]).decode("utf-8").split('\n')
+    return [item for item in items if item.endswith(what)]
+
+
 def GetJDKPath():
     if sys.platform == 'win32':
         bush = read_registry(r'HKLM\SOFTWARE\JavaSoft\Java Development Kit')
@@ -119,8 +124,21 @@ def GetJDKPath():
         if err or not path:
             return None
         if sys.platform == 'darwin':
-            path = subprocess.check_output("/usr/libexec/java_home").decode("utf-8").split('\n')[0]
-            return path if os.path.exists(path) else None
+            javacs = locate_exact('javac')
+            if not javacs:
+                return None
+            jnis = locate_exact('jni.h')
+            if jnis:
+                longest = {'prefix': '', 'jni': '', 'java': ''}
+                for jni in jnis:
+                    for java in javacs:
+                        prefix = os.path.commonprefix([jni, java])
+                        if len(prefix) > len(longest['prefix']):
+                            longest = {'prefix': prefix, 'jni': jni, 'java': java}
+                return longest['prefix'].rstrip('/')
+            else:
+                path = subprocess.check_output("/usr/libexec/java_home").decode("utf-8").split('\n')[0]
+                return path if os.path.exists(path) else None
         else:
             matches = []
             for root, dirnames, filenames in os.walk('/usr/lib/jvm'):

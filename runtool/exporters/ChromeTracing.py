@@ -18,7 +18,7 @@ class GoogleTrace(TaskCombiner):
     class ContextSwitch:
         def __init__(self, parent, file):
             self.parent = parent
-            self.file = file
+            self.file = file + '.ftrace'
             self.ftrace = None
 
         def write(self, time, cpu, prev_tid, prev_state, next_tid, prev_prio=0, next_prio=0, prev_name=None, next_name=None):

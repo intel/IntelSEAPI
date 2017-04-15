@@ -271,9 +271,9 @@ int main(int argc, char* argv[])
     const char* api_ver = __itt_api_version();
     VerbosePrint("ITT Version: %s\n", api_ver ? api_ver : "Not loaded");
 
-    std::thread thrd(ChangePaths);
+    //std::thread thrd(ChangePaths); //only for stress testing
     Main(work_seconds);
-    thrd.join();
+    //thrd.join();
     return 0;
 }
 

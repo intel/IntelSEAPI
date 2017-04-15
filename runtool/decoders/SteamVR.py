@@ -126,7 +126,12 @@ class SteamVR(GPUQueue):
         call_data.update({'str': data, 'type': 0})
         call_data['time'] = self.parser.convert_time(events[id])
         end_data['type'] = 1
-        self.callbacks.complete_task('task', call_data, end_data)
+
+        lane_task = self.callbacks.process(call_data['pid']).\
+            thread(call_data['tid']).lane(call_data['str'], call_data['domain']).\
+            frame_begin(call_data['time'], call_data['str'])
+        lane_task.end(end_data['time'])
+
         del events[id]
 
     @classmethod

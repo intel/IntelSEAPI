@@ -70,7 +70,10 @@ class QTProfiler(TaskCombiner):
 
         args = {}
         if type == "counter":
-            args['value'] = begin['delta']
+            if 'delta' in begin:
+                args['value'] = begin['delta']
+            else:  # TODO: add multi-value support
+                return
         if begin.has_key('args'):
             args = begin['args']
             if end.has_key('args'):
