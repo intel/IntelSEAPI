@@ -174,6 +174,7 @@ enum SEAFeature
     sfBrofiler = 0x80,
     sfMemStat = 0x100,
     sfMemCounters = 0x200,
+    sfRadTelemetry = 0x400,
 };
 
 uint64_t GetFeatureSet();
@@ -297,6 +298,8 @@ public:
     virtual void CreateCounter(const __itt_counter& id) {}
     virtual void Counter(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, const __itt_string_handle *pName, double value) {}
     virtual void SetThreadName(const CTraceEventFormat::SRegularFields& rf, const char* name) {}
+    virtual void Alloc(const CTraceEventFormat::SRegularFields& rf, const void* addr, size_t size, const char* domain, const char* name) {};
+    virtual void Free(const CTraceEventFormat::SRegularFields& rf, const void* addr, size_t size, const char* domain, const char* name) {};
 
     virtual ~IHandler(){}
 };

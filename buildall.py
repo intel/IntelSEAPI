@@ -67,7 +67,7 @@ if sys.platform == 'win32':
         hub = parts[0]
         path = '\\'.join(parts[1:])
         if not statics:
-            statics['hubs'] = {'HKLM': _winreg.HKEY_LOCAL_MACHINE}
+            statics['hubs'] = {'HKLM': _winreg.HKEY_LOCAL_MACHINE, 'HKCL': _winreg.HKEY_CLASSES_ROOT}
 
         def enum_nodes(curpath, level):
             if level < 1:
@@ -149,18 +149,28 @@ def GetJDKPath():
             return os.path.split(matches[0])[0]
 
 
-def get_vs_versions():
+def get_vs_versions():  # https://www.mztools.com/articles/2008/MZ2008003.aspx
     if sys.platform != 'win32':
         return []
-    bush = read_registry(r'HKLM\SOFTWARE\Microsoft\VisualStudio', 2)
-
     versions = []
+    """
+    bush = read_registry(r'HKLM\SOFTWARE\Microsoft\VisualStudio', 2)
+    print(bush)
+
     for key in bush:
         if '.' not in key:
             continue
         version = key.split('.')[0]
         if int(version) >= 12:
             versions.append(version)
+    """
+    hkcl = read_registry(r'HKCL', 1)
+    for key in hkcl:
+        if 'VisualStudio.DTE.' in key:
+            version = key.split('.')[2]
+            if int(version) >= 12:
+                versions.append(version)
+
     if not versions:
         print("No Visual Studio version found")
     return sorted(versions)

@@ -100,6 +100,10 @@ else()
     endif()
 endif()
 
+if (EXISTS "${PROJECT_SOURCE_DIR}/RadTelemetry")
+    MESSAGE("Found: Rad Telemetry")
+    set (RAD_TELEMETRY_DIR ${PROJECT_SOURCE_DIR}/RadTelemetry)
+endif()
 
 
 if (WIN32)

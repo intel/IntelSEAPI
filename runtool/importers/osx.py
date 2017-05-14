@@ -58,6 +58,9 @@ class DTrace(GPUQueue):
         elif cmd in ['e', 'r']:
             pid, tid = args[0:2]
             self.task(time, int(pid, 16), int(tid, 16), cmd == 'e', args[2], args[3], args[4:])
+        elif cmd == 'arg':
+            pid, tid = args[0:2]
+            self.arg(time, int(pid, 16), int(tid, 16), args[2], '\t'.join(args[3:]))
         else:
             print "unsupported cmd:", cmd, args
 
@@ -82,12 +85,28 @@ class DTrace(GPUQueue):
             self.gpu_frame['catch'][0 if starts else 1] = time
             if name == 'CGLFlushDrawable':
                 return
+        """ OLD WAY
         data = {
             'domain': domain, 'type': 0 if starts else 1,
             'time': time, 'tid': tid, 'pid': pid, 'str': name,
             'args': dict((idx, val) for idx, val in enumerate(args))
         }
         self.callbacks.on_event('task_begin' if starts else 'task_end', data)
+        """
+        thread = self.callbacks.process(pid).thread(tid)
+        if starts:
+            item = thread.task(name, domain) if not args or args[0] == '0' else thread.frame(name, domain)
+            thread.task_stack.append(item.begin(time))
+        elif thread.task_stack:  # it's fine, circular buffer can eat some begins
+            task = thread.task_stack.pop()
+            task.end(time)
+
+    def arg(self, time, pid, tid, name, value):
+        thread = self.callbacks.process(pid).thread(tid)
+        if thread.task_stack:
+            thread.task_stack[-1].add_args({name: value})
+        else:
+            print "Orphan arg:", name, value
 
     def submit_prepare(self, time, id, pid, tid, args):
         if id not in self.prepares:
@@ -117,10 +136,6 @@ class DTrace(GPUQueue):
                 'time': time, 'tid': tid, 'pid': pid, 'str': 'PrepareQueueKMD', 'id': int(id, 16),
                 'args': dict((idx, val) for idx, val in enumerate(args))
             }
-        elif 'SwCtxCreation' == cmd:
-            pass
-        elif 'SubmitExecList' == cmd:
-            pass
         elif 'SubmitQueueKMD' == cmd:
             id = args[-3] if len(args) == 7 else args[-4]
             self.submit_prepare(time, id, pid, tid, args)
@@ -166,8 +181,6 @@ class DTrace(GPUQueue):
             id = args[1]
             if id in self.cpu_packets:
                 self.cpu_packets[id]['name'] = '3DBlt:' + id
-        elif 'CompleteExecList' == cmd:
-            pass
         elif 'CompleteExecute' == cmd:
             id = args[-1]
             gpu_task_id = id
@@ -190,13 +203,7 @@ class DTrace(GPUQueue):
                 if id == self.gpu_frame['task']:
                     self.on_gpu_frame(time, end_data['pid'], end_data['tid'])
                 del self.gpu_packets[gpu_task_id]
-        elif 'RemoveQueueKMD' == cmd:
-            pass
-        elif 'SwCtxDestroy' == cmd:
-            pass
-        elif 'WriteStamp' == cmd:
-            pass
-        elif 'DidFlip' == cmd:
+        elif cmd in ['RemoveQueueKMD', 'DidFlip', 'WriteStamp', 'SwCtxDestroy', 'SwCtxCreation', 'CompleteExecList', 'SubmitExecList']:
             pass
         else:
             print "Unhandled gpu_call:", cmd
@@ -231,7 +238,9 @@ def transform_dtrace(args):
                 for line in file:
                     count += 1
                     ends_with_vt = (11 == ord(line[-1])) if len(line) else False
-                    line = line.strip()
+                    #old_line = line
+                    line = line.strip('\r\n')
+                    #print "%d\t%s" % (count, line)
                     if not line:
                         if reading_stack:
                             dtrace.handle_stack(*(reading_stack + [stack]))

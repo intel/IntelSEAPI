@@ -1333,6 +1333,12 @@ public:
         static bool bMemCount = !!(GetFeatureSet() & sfMemCounters);
 
         if (!m_bInitialized) return;
+
+        for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
+        {
+            g_handlers[i]->Alloc(GetRegularFields(), addr, size, pHeapFunction->pDomain->nameA, pHeapFunction->name.c_str());
+        }
+
         SNode* pNode = UpdateAllocation(size, +1, nullptr);
         TBlockData block;
         {
@@ -1395,23 +1401,31 @@ public:
     void Free(SHeapFunction* pHeapFunction, const void* addr)
     {
         static bool bMemCount = !!(GetFeatureSet() & sfMemCounters);
-        if (!m_bInitialized) return;
-        std::lock_guard<TCritSec> lock(m_cs);
-        const auto& pair = m_size_map[addr];
-        size_t size = pair.first;
-        SNode* pNode = pair.second;
-        m_size_map.erase(addr);
-        if (bMemCount)
+        size_t size = 0;
+        if (m_bInitialized)
         {
-            auto it = m_counter_map.find(size);
-            if (m_counter_map.end() == it)
-                return; //how come?
-            else
-                --it->second.second;
-            Counter(pHeapFunction->pDomain, it->second.first, double(it->second.second));
+            std::lock_guard<TCritSec> lock(m_cs);
+
+            const auto& pair = m_size_map[addr];
+            size = pair.first;
+            SNode* pNode = pair.second;
+            m_size_map.erase(addr);
+            if (bMemCount)
+            {
+                auto it = m_counter_map.find(size);
+                if (m_counter_map.end() == it)
+                    return; //how come?
+                else
+                    --it->second.second;
+                Counter(pHeapFunction->pDomain, it->second.first, double(it->second.second));
+            }
+            if (pNode) //if we missed allocation, we don't care about freeing
+                UpdateAllocation(size, -1, pNode);
         }
-        if (pNode) //if we missed allocation, we don't care about freeing
-            UpdateAllocation(size, -1, pNode);
+        for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
+        {
+            g_handlers[i]->Free(GetRegularFields(), addr, size, pHeapFunction->pDomain->nameA, pHeapFunction->name.c_str());
+        }
     }
 
     void SaveMemoryStatistics()
@@ -1685,7 +1699,8 @@ uint64_t GetFeatureSet()
         (std::string::npos != env.find("memstat") ? sfMemStat : 0)
     |
         (std::string::npos != env.find("memcount") ? sfMemCounters : 0)
-    ;
+    |
+        (std::string::npos != env.find("rad") ? sfRadTelemetry : 0);
     return features;
 }
 

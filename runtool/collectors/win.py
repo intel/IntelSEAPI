@@ -232,6 +232,8 @@ class ETWTrace(Collector):
             variants = self.detect_instances('xperf')
             if variants:
                 self.xperf = variants[0]  # TODO: select by higher version
+            else:
+                self.xperf = None
         self.files = []
         self.start()
 

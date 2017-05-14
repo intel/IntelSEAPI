@@ -32,19 +32,19 @@ public:
         if (!oTask.pName)
             return;
         __itt_id id = (bOverlapped || oTask.id.d1 || oTask.id.d2) ? oTask.id : __itt_id{ uint64_t(&oTask), uint64_t(&oTask) };
-        uint64_t data[3] = { rf.pid, rf.tid, rf.nanoseconds };
+        uint64_t data[3] = { uint64_t(rf.pid), uint64_t(rf.tid), rf.nanoseconds };
         EventWriteTASK_COMPLETE(oTask.pDomain->nameA, oTask.pName->strA, &IdCaster{ id }.to, &IdCaster{ oTask.parent }.to, Cookie<CTraceEventFormat::CArgs>(oTask).Str().c_str(), rf.nanoseconds - oTask.rf.nanoseconds, data);
     }
 
     void Marker(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, __itt_id id, __itt_string_handle *pName, __itt_scope scope) override
     {
-        uint64_t data[3] = { rf.pid, rf.tid, rf.nanoseconds };
+        uint64_t data[3] = { uint64_t(rf.pid), uint64_t(rf.tid), rf.nanoseconds };
         EventWriteMARKER(pDomain->nameA, pName->strA, id.d1, GetScope(scope), data);
     }
 
     void Counter(const CTraceEventFormat::SRegularFields& rf, const __itt_domain *pDomain, const __itt_string_handle *pName, double value) override
     {
-        uint64_t data[3] = { rf.pid, rf.tid, rf.nanoseconds };
+        uint64_t data[3] = { uint64_t(rf.pid), uint64_t(rf.tid), rf.nanoseconds };
         EventWriteCOUNTER(pDomain->nameA, pName->strA, value, data);
     }
 

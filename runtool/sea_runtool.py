@@ -202,14 +202,15 @@ def main():
                 transform_all(args)
             else:
                 try:
-                    output = get_importers()[ext.lstrip('.')](args)
+                    importer = get_importers()[ext.lstrip('.')]
                 except KeyError:
                     print("Error! Format %s is unavailable or unsupported" % ext)
-                else:
-                    output = join_gt_output(args, output)
-                    replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
-                    for path in output:
-                        print os.path.abspath(path).replace(*replacement)
+                    return
+                output = importer(args)
+                output = join_gt_output(args, output)
+                replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
+                for path in output:
+                    print os.path.abspath(path).replace(*replacement)
 
 
 
@@ -441,7 +442,8 @@ def launch(args, victim):
 def transform_all(args):
     if not args.trace:  # no itt trace
         args.trace = []
-        for ext in ['etl', 'ftrace', 'dtrace', 'perf']:
+        importers = get_importers()
+        for ext in importers.iterkeys():
             for file in glob(os.path.join(args.input, '*.' + ext)):
                 if not any(sub in file for sub in ['.etl.', '.dtrace.', 'merged.']):
                     args.trace.append(file)
@@ -2005,13 +2007,16 @@ class GraphCombiner(TaskCombiner):
             task['time'].append(end['time'] - begin['time'])
             if '__file__' in begin:
                 task['src'] = begin['__file__'] + ":" + begin['__line__']
-            tasks = self.domains[begin['domain']]['tasks']
-            stack = tasks[tid]['stack'] if tid in tasks else []
-            if len(stack):
-                parent = stack[-1]
-                self.add_relation({'label': 'calls', 'from': self.make_id(parent['domain'], self.get_name_ex(parent)), 'to': self.make_id(begin['domain'], self.get_name_ex(begin))})
-            else:
-                self.add_relation({'label': 'executes', 'from': self.make_id("threads", str(tid)), 'to': self.make_id(begin['domain'], self.get_name_ex(begin)), 'color': 'gray'})
+            if begin['domain'] in self.domains:  # assumption that task was managed with ITT way
+                tasks = self.domains[begin['domain']]['tasks']
+                stack = tasks[tid]['stack'] if tid in tasks else []
+                if len(stack):
+                    parent = stack[-1]
+                    self.add_relation({'label': 'calls', 'from': self.make_id(parent['domain'], self.get_name_ex(parent)), 'to': self.make_id(begin['domain'], self.get_name_ex(begin))})
+                else:
+                    self.add_relation({'label': 'executes', 'from': self.make_id("threads", str(tid)), 'to': self.make_id(begin['domain'], self.get_name_ex(begin)), 'color': 'gray'})
+            else:  # FIXME: real complete_tasks formed by modern API are not tracked
+                pass
         elif type == 'marker':
             domain['markers'].setdefault(begin['str'], [])
         elif type == 'frame':

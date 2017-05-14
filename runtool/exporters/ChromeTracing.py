@@ -280,6 +280,8 @@ class GoogleTrace(TaskCombiner):
                 res += [',\n']
                 end_begin = begin.copy()
                 end_begin['time'] = end['time'] - 1000
+                if 'args' in end:
+                    end_begin['args'] = end['args']
                 res += self.format_task('e', 'frame', end_begin, {})
         else:
             res = self.format_task(GoogleTrace.Phase[type], type, begin, end)
