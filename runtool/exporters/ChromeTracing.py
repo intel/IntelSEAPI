@@ -51,6 +51,7 @@ class GoogleTrace(TaskCombiner):
         self.samples = []
         self.last_task = None
         self.metadata = {}
+        self.last_relation_id = 0
         if self.args.trace:
             for trace in self.args.trace:
                 if trace.endswith(".etl"):
@@ -237,18 +238,23 @@ class GoogleTrace(TaskCombiner):
         else:
             self.metadata.setdefault(data['str'], []).append(data['data'])
 
+    def generate_relation_id(self):
+        self.last_relation_id = self.last_relation_id + 1
+        return self.last_relation_id
+
     def relation(self, data, head, tail):
         if not head or not tail:
             return
         items = sorted([head, tail], key=lambda item: item['time'])  # we can't draw lines in backward direction, so we sort them by time
+        relation_id = self.generate_relation_id()
         if GT_FLOAT_TIME:
             template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%.3f, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
         else:
             template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%d, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
         if not data.has_key('str'):
             data['str'] = "unknown"
-        self.file.write(template % ("s", items[0]['pid'], items[0]['tid'], self.convert_time(items[0]['time']), data['parent'], data['str'], data['domain']))
-        self.file.write(template % ("f", items[1]['pid'], items[1]['tid'], self.convert_time(items[1]['time'] - 1), data['parent'], data['str'], data['domain']))
+        self.file.write(template % ("s", items[0]['pid'], items[0]['tid'], self.convert_time(items[0]['time']), relation_id, data['str'], data['domain']))
+        self.file.write(template % ("f", items[1]['pid'], items[1]['tid'], self.convert_time(items[1]['time'] - 1), relation_id, data['str'], data['domain']))
 
     def format_value(self, arg):  # this function must add quotes if value is string, and not number/float, do this recursively for dictionary
         if type(arg) == type({}):
