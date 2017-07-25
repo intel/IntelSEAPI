@@ -30,7 +30,7 @@
     #define _CRTBLD //hack, no words
         #include <../crt/src/dbgint.h> //for definition of _CrtMemBlockHeader
     #undef _CRTBLD
-#elif _MSC_VER == 1900 //VS2015
+#elif _MSC_VER >= 1900 //VS2015
     struct _CrtMemBlockHeader //it's in debug_heap.cpp now
     {
         _CrtMemBlockHeader* _block_header_next;

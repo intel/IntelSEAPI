@@ -211,11 +211,14 @@ def is_domain_enabled(domain, default=True):
     if not filter:
         return default
     filter = subst_env_vars(filter)
-    with open(filter) as file:
-        for line in file:
-            enabled = not line.startswith('#')
-            if domain == line.strip(' #\n\r'):
-                return enabled
+    try:
+        with open(filter) as file:
+            for line in file:
+                enabled = not line.startswith('#')
+                if domain == line.strip(' #\n\r'):
+                    return enabled
+    except IOError:
+        pass
     return default
 
 

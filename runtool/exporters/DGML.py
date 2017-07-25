@@ -13,6 +13,7 @@ class DGML(GraphCombiner):
         return [self.args.output + ".dgml"]
 
     def finish(self):
+        GraphCombiner.finish(self)
         self.file.write('<Nodes>\n')
         for domain, data in self.per_domain.iteritems():
             # counters

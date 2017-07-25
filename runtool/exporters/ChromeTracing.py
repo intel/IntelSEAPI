@@ -1,6 +1,8 @@
 import os
-import sea
 import sys
+#sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))  # uncomment for debugging single file
+
+import sea
 import json
 import codecs
 import strings
@@ -54,6 +56,9 @@ class GoogleTrace(TaskCombiner):
         self.last_relation_id = 0
         if self.args.trace:
             for trace in self.args.trace:
+                if not os.path.exists(trace):
+                    print "Error: File not found:", trace
+                    continue
                 if trace.endswith(".etl"):
                     self.handle_etw_trace(trace)
                 elif trace.endswith(".ftrace"):
@@ -477,7 +482,16 @@ class GoogleTrace(TaskCombiner):
             return os.environ['INTEL_SEA_CATAPULT']
         else:
             path = os.path.join(args.bindir, 'catapult', 'tracing')
-            return path if os.path.exists(path) else None
+            if os.path.exists(path):
+                return path
+            zip_path = os.path.join(args.bindir, 'catapult.zip')
+            if os.path.exists(zip_path):
+                print "Extracting catapult..."
+                from zipfile import PyZipFile
+                pzf = PyZipFile(zip_path)
+                pzf.extractall(args.bindir)
+                return path
+            return None
 
     @staticmethod
     def join_traces(traces, output, args):
@@ -567,3 +581,4 @@ def support_no_console(log):
 
 if __name__ != "__main__":
     support_no_console(os.path.join(tempfile.gettempdir(), datetime.now().strftime('sea_%H_%M_%S__%d_%m_%Y.log')))
+

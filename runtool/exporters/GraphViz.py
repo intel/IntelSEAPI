@@ -12,6 +12,7 @@ class GraphViz(GraphCombiner):
         return [self.args.output + ".gv"]
 
     def finish(self):
+        GraphCombiner.finish(self)
         cluster_index = 0
         clusters = {}
         for domain, data in self.per_domain.iteritems():

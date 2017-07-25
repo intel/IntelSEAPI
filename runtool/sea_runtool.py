@@ -29,12 +29,25 @@ import traceback
 import subprocess
 from glob import glob
 
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), 'decoders')))
+try:
+    import MDAPI
+except:
+    pass
+
+
 try:
     sys.setdefaultencoding("utf-8")
 except:
     pass
 
 ProgressConst = 20000
+
+
+def global_storage(name):
+    __builtins__.setdefault('SEAPI', {})
+    __builtins__['SEAPI'].setdefault(name, {})
+    return __builtins__['SEAPI'][name]
 
 
 def format_time(time):
@@ -211,8 +224,6 @@ def main():
                 replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
                 for path in output:
                     print os.path.abspath(path).replace(*replacement)
-
-
 
 
 def os_lib_ext():
@@ -401,6 +412,16 @@ def launch(args, victim):
             tracer = get_collectors()['dtrace']
     run_suspended = False
 
+    if args.dir:
+        full_victim = os.path.join(args.dir, victim[0])
+        if os.path.exists(full_victim):
+            victim[0] = full_victim
+
+    try:
+        mdapi = MDAPI.MDAPIPump(args, 'OA.RenderBasic', 1000, 0)  # proc.pid
+    except:
+        mdapi = None
+
     if run_suspended:
         suspended = '(cd "%s"; kill -STOP $$; exec %s )' % (args.dir or '.', ' '.join(victim))
         #suspended = '(kill -STOP $$; exec %s )' % ' '.join(victim)
@@ -418,16 +439,24 @@ def launch(args, victim):
         tracer.set_output(log)
         print "For execution details see:", log.name
         tracer = tracer(args)  # turning class into instance
+        if mdapi:
+            mdapi.start()
 
         if sys.platform != 'win32':  # collector start may be long, so we freeze victim during this time
             print "PID:", proc.pid
             import signal
             os.kill(proc.pid, signal.SIGCONT)
+
     print "Waiting application to exit..."
     proc.wait()
     print "Stopping collectors..."
+
     if tracer:
         args.trace = tracer.stop()
+
+    if mdapi:
+        mdapi.stop()
+        mdapi.join()
 
     if not args.output:
         return []
@@ -737,13 +766,238 @@ TaskTypes = [
     "relation"
 ]
 
-class Callbacks:
+
+class TaskCombinerCommon:
+    def __init__(self, args, tree):
+        self.no_begin = []  # for the ring buffer case when we get task end but no task begin
+        self.time_bounds = [2 ** 64, 0]  # left and right time bounds
+        self.tree = tree
+        self.args = args
+        self.domains = {}
+        self.prev_sample = 0
+        self.memory = {}
+        self.total_memory = 0
+        self.prev_memory = None
+
+    def finish(self):
+        self.handle_leftovers()
+
+    def handle_leftovers(self):
+        if self.args.no_left_overs:
+            return
+        for end in self.no_begin:
+            begin = end.copy()
+            begin['time'] = self.time_bounds[0]
+            self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
+        for domain, threads in self.domains.iteritems():
+            for tid, records in threads['tasks'].iteritems():
+                for id, per_id_records in records['byid'].iteritems():
+                    for begin in per_id_records:
+                        end = begin.copy()
+                        end['time'] = self.time_bounds[1]
+                        self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
+                for begin in records['stack']:
+                    end = begin.copy()
+                    end['time'] = self.time_bounds[1]
+                    self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
+            if self.prev_sample:
+                self.flush_counters(threads, {'tid': 0, 'pid': self.tree['pid'], 'domain': domain})
+
+    def __call__(self, fn, data):
+        domain = self.domains.setdefault(data['domain'], {'tasks': {}, 'counters': {}})
+        thread = domain['tasks'].setdefault(data['tid'], {'byid': {}, 'stack': [], 'args': {}})
+
+        def get_tasks(id):
+            if not id:
+                return thread['stack']
+            return thread['byid'].setdefault(id, [])
+
+        def get_task(id):
+            if id:
+                tasks = get_tasks(id)
+                if not tasks:  # they can be stacked
+                    tasks = get_tasks(None)
+                    if not tasks or not tasks[-1].has_key('id') or tasks[-1]['id'] != id:
+                        return None
+            else:
+                tasks = get_tasks(None)
+            if tasks:
+                return tasks[-1]
+            else:
+                return None
+
+        def find_task(id):
+            for thread_stacks in domain['tasks'].itervalues():  # look in all threads
+                if thread_stacks['byid'].has_key(id) and thread_stacks['byid'][id]:
+                    return thread_stacks['byid'][id][-1]
+                else:
+                    for item in thread_stacks['stack']:
+                        if item.has_key('id') and item['id'] == id:
+                            return item
+
+        def get_stack(tid):
+            stack = []
+            for domain in self.domains.itervalues():
+                if not domain['tasks'].has_key(tid):
+                    continue
+                thread = domain['tasks'][tid]
+                for byid in thread['byid'].itervalues():
+                    stack += byid
+                if thread['stack']:
+                    stack += thread['stack']
+            stack.sort(key=lambda item: item['time'])
+            return stack
+
+        def get_last_index(tasks, type):
+            if not len(tasks):
+                return None
+            index = len(tasks) - 1
+            while index > -1 and tasks[index]['type'] != type:
+                index -= 1
+            if index > -1:
+                return index
+            return None
+
+        if fn == "task_begin" or fn == "task_begin_overlapped":
+            if not (data.has_key('str') or data.has_key('pointer')):
+                data['str'] = 'Unknown'
+            self.time_bounds[0] = min(self.time_bounds[0], data['time'])
+            if 'delta' in data and data['delta']:  # turbo mode, only begins are written
+                end = data.copy()
+                end['time'] = data['time'] + int(data['delta'])
+                self.time_bounds[1] = max(self.time_bounds[1], end['time'])
+                if not self.handle_special('task', data, end):
+                    self.complete_task('task', data, end)  # for now arguments are not supported in turbo tasks. Once argument is passed, task gets converted to normal.
+            else:
+                get_tasks(None if fn == "task_begin" else data['id']).append(data)
+        elif fn == "task_end" or fn == "task_end_overlapped":
+            self.time_bounds[1] = max(self.time_bounds[1], data['time'])
+            tasks = get_tasks(None if fn == "task_end" else data['id'])
+            index = get_last_index(tasks, data['type'] - 1)
+            if index is not None:
+                item = tasks.pop(index)
+                if self.task_postprocessor:
+                    self.task_postprocessor.postprocess('task', item, data)
+                if not self.handle_special('task', item, data):
+                    self.complete_task('task', item, data)
+            else:
+                assert (self.tree["ring_buffer"] or self.tree['cuts'])
+                if data.has_key('str'):  # nothing to show without name
+                    self.no_begin.append(data)
+        elif fn == "frame_begin":
+            get_tasks(data['id'] if data.has_key('id') else None).append(data)
+        elif fn == "frame_end":
+            frames = get_tasks(data['id'] if data.has_key('id') else None)
+            index = get_last_index(frames, 7)
+            if index is not None:
+                item = frames.pop(index)
+                self.complete_task("frame", item, data)
+            else:
+                assert (self.tree["ring_buffer"] or self.tree['cuts'])
+        elif fn == "metadata_add":
+            if 'id' in data:
+                task = get_task(data['id'])
+                if task:
+                    args = task.setdefault('args', {})
+                else:
+                    args = thread['args'].setdefault(data['id'], {})
+
+                args[data['str']] = data['delta'] if 'delta' in data else represent_data(self.tree, data['str'], data['data']) if 'data' in data else '0x0'
+            else:  # global metadata
+                self.global_metadata(data)
+        elif fn == "object_snapshot":
+            if data.has_key('args'):
+                args = data['args'].copy()
+            else:
+                args = {'snapshot': {}}
+            if data.has_key('data'):
+                state = data['data']
+                for pair in state.split(","):
+                    (key, value) = tuple(pair.split("="))
+                    args['snapshot'][key] = value
+            data['args'] = args
+            self.complete_task(fn, data, data)
+        elif fn in ["marker", "counter", "object_new", "object_delete"]:
+            if fn == "marker" and data['data'] == 'task':
+                markers = get_tasks("marker_" + (data['id'] if data.has_key('id') else ""))
+                if markers:
+                    item = markers.pop()
+                    item['type'] = 7  # frame_begin
+                    item['domain'] += ".continuous_markers"
+                    item['time'] += 1
+                    self.complete_task("frame", item, data)
+                markers.append(data)
+            elif fn == "counter" and self.args.sampling:
+                if (data['time'] - self.prev_sample) > (int(self.args.sampling) * 1000):
+                    if not self.prev_sample:
+                        self.prev_sample = data['time']
+                    else:
+                        self.flush_counters(domain, data)
+                        self.prev_sample = data['time']
+                        domain['counters'] = {}
+                counter = domain['counters'].setdefault(data['str'], {'begin':data['time'], 'end': data['time'], 'values': []})
+                counter['values'].append(data['delta'])
+                counter['begin'] = min(counter['begin'], data['time'])
+                counter['end'] = max(counter['end'], data['time'])
+            else:
+                if data['domain'] == 'Memory':
+                    size = int(data['str'].split('<')[1].split('>')[0])
+                    prev_value = 0.
+                    if self.memory.has_key(size):
+                        prev_value = self.memory[size]
+                    delta = data['delta'] - prev_value  # data['delta'] has current value of the counter
+                    self.total_memory += delta * size
+                    self.memory[size] = data['delta']
+                    stack = get_stack(data['tid'])
+                    if stack:
+                        current = stack[-1]
+                        values = current.setdefault('memory', {None: 0}).setdefault(size, [])
+                        values.append(delta)
+                        for parent in stack[:-1]:
+                            values = parent.setdefault('memory', {None: 0})
+                            values[None] += delta * size
+                    if self.args.memory == "total":
+                        if (self.prev_memory is None) or ((self.convert_time(data['time']) - self.convert_time(self.prev_memory['time'])) > self.args.min_dur * 10):
+                            data['str'] = "CRT:Memory:Total(bytes)"
+                            data['delta'] = self.total_memory
+                            self.complete_task(fn, data, data)
+                            self.prev_memory = data
+                        return
+                if data.has_key('id') and thread['args'].has_key(data['id']):
+                    data['args'] = thread['args'][data['id']]
+                    del thread['args'][data['id']]
+                self.complete_task(fn, data, data)
+        elif fn == "relation":
+            self.relation(
+                data,
+                get_task(data['id'] if data.has_key('id') else None),
+                get_task(data['parent']) or find_task(data['parent'])
+            )
+        else:
+            assert (not "Unsupported type:" + fn)
+
+    def handle_special(self, kind, begin, end):
+        if self.sea_decoders:
+            for decoder in self.sea_decoders:
+                if decoder.handle_special(kind, begin, end):
+                    return True
+        return False
+
+    def flush_counters(self, domain, data):
+        for name, counter in domain['counters'].iteritems():
+            common_data = data.copy()
+            common_data['time'] = counter['begin'] + (counter['end'] - counter['begin']) / 2
+            common_data['str'] = name
+            common_data['delta'] = sum(counter['values']) / len(counter['values'])
+            self.complete_task('counter', common_data, common_data)
+
+
+class Callbacks(TaskCombinerCommon):
     event_filter = None
     task_postprocessor = None
 
     def __init__(self, args, tree):
-        self.args = args
-        self.tree = tree
+        TaskCombinerCommon.__init__(self, args, tree)
         self.callbacks = []  # while parsing we might have one to many 'listeners' - output format writers
         self.limits = Callbacks.parse_limits(getattr(self.args, 'limit', None))
         self.allowed_pids = set()
@@ -756,12 +1010,19 @@ class Callbacks:
         for fmt in args.format:
             self.callbacks.append(get_exporters()[fmt](args, tree))
 
-        if self.task_postprocessor:
-            for callback in self.callbacks:
-                callback.set_task_postprocessor(self.task_postprocessor)
-
         if args.target:
             self.allowed_pids.add(int(args.target))
+
+        decoders = get_decoders()
+        self.sea_decoders = []
+        if 'sea' in decoders:
+            for decoder in decoders['sea']:
+                try:
+                    instance = decoder(args, self)
+                except RuntimeError:
+                    instance = None
+                if instance:
+                    self.sea_decoders.append(instance)
 
     @classmethod
     def set_event_filter(cls, filter):
@@ -787,6 +1048,8 @@ class Callbacks:
         return False
 
     def finalize(self):
+        for decoder in self.sea_decoders:
+            decoder.finalize()
         for kind, data in self.tasks_from_samples.iteritems():
             for pid, threads in data.iteritems():
                 for tid, tasks in threads.iteritems():
@@ -802,8 +1065,7 @@ class Callbacks:
         if self.check_pid_allowed(data['pid']) and self.check_time_in_limits(data['time']):
             if self.args.remove_args and 'args' in data:
                 del data['args']
-            # copy here as handler can change the data for own good - this shall not affect other handlers
-            [callback(type, data.copy()) for callback in self.callbacks]
+            self.__call__(type, data)
             return True
         else:
             return False
@@ -824,6 +1086,9 @@ class Callbacks:
             return True
         else:
             return False
+
+    def global_metadata(self, data):
+        [callback.global_metadata(data.copy()) for callback in self.callbacks]
 
     def relation(self, data, head, tail):
         if self.check_time_in_limits(data['time']):
@@ -887,12 +1152,14 @@ class Callbacks:
                 self.process = process
                 self.tid = int(tid)
                 self.overlapped = {}
+                self.to_overlap = {}
                 self.task_stack = []
                 self.task_pool = {}
                 self.snapshots = {}
                 self.lanes = {}
                 if name:
                     self.set_name(name)
+                self.process.callbacks.on_finalize(self.finalize)
 
             def auto_break_overlapped(self, call_data, begin):
                 id = call_data['id']
@@ -921,6 +1188,30 @@ class Callbacks:
                                 self.process.callbacks.on_event('task_begin_overlapped', begin_data)  # and start again
                         for id in to_remove:  # FIXME: but it's better somehow to detect never ending tasks and not show them at all or mark somehow
                             del self.overlapped[id]  # the task end was probably lost
+
+            def process_overlapped(self, threshold=100):
+                if not threshold or 0 != (len(self.to_overlap) % threshold):
+                    return
+                keys = sorted(self.to_overlap)[0:threshold/2]
+                to_del = set()
+                for key in keys:
+                    task = self.to_overlap[key]
+                    if task.overlap_begin:
+                        self.auto_break_overlapped(task.data, True)
+                        self.process.callbacks.on_event("task_begin_overlapped", task.data)
+                        task.overlap_begin = False
+                    else:
+                        end_data = task.data.copy()
+                        end_data['time'] = key
+                        end_data['type'] += 1
+                        self.auto_break_overlapped(end_data, False)
+                        self.process.callbacks.on_event("task_end_overlapped", end_data)
+                    to_del.add(key)
+                for key in to_del:
+                    del self.to_overlap[key]
+
+            def finalize(self, _):
+                self.process_overlapped(0)
 
             def set_name(self, name):
                 self.process.callbacks.set_thread_name(self.process.pid, self.tid, name)
@@ -983,6 +1274,7 @@ class Callbacks:
                     # These must be set in descendants!
                     self.event_type = type_id  # first of types
                     self.event_name = type_name
+                    self.overlap_begin = True
 
                 def __begin(self, time_stamp, task_id, args, meta):
                     data = {
@@ -1054,6 +1346,17 @@ class Callbacks:
                     self.thread.process.callbacks.complete_task(self.event_name, begin_data, end_data)
                     return begin_data
 
+                def end_overlap(self, time_stamp):
+                    while self.data['time'] in self.thread.to_overlap:
+                        self.data['time'] += 1
+                    self.thread.to_overlap[self.data['time']] = self
+                    while time_stamp in self.thread.to_overlap:
+                        time_stamp -= 1
+                    self.thread.to_overlap[time_stamp] = self
+                    self.data['id'] = time_stamp
+                    self.data['type'] = self.event_type = 2
+                    self.thread.process_overlapped()
+
             class Task(TaskBase):
                 def __init__(self, thread, name, domain, overlapped):
                     Callbacks.Process.Thread.TaskBase.__init__(
@@ -1075,17 +1378,20 @@ class Callbacks:
                     if not self.relation:
                         return
                     if self.related_begin:  # it's the later task, let's emit the relation
-                        relation = (begin.copy(), self.related_begin.copy(), begin)
-                        if 'realtime' in relation[1]:
-                            relation[1]['time'] = relation[1]['realtime']
-                        if 'realtime' in relation[2]:
-                            relation[2]['time'] = relation[2]['realtime']
-                        relation[0]['parent'] = begin['id'] if 'id' in begin else id(begin)
-                        self.thread.process.callbacks.relation(*relation)
+                        self.__emit_relation(begin, self.related_begin)
                         self.related_begin = None
                     else:  # we store our begin in the related task and it will emit the relation on its end
                         self.relation.related_begin = begin
                     self.relation = None
+
+                def __emit_relation(self, left, right):
+                    relation = (left.copy(), right.copy(), left)
+                    if 'realtime' in relation[1]:
+                        relation[1]['time'] = relation[1]['realtime']
+                    if 'realtime' in relation[2]:
+                        relation[2]['time'] = relation[2]['realtime']
+                    relation[0]['parent'] = left['id'] if 'id' in left else id(left)
+                    self.thread.process.callbacks.relation(*relation)
 
                 def complete(self, start_time, duration, task_id=None, args={}, meta={}):
                     begin_data = Callbacks.Process.Thread.TaskBase.complete(self, start_time, duration, task_id, args, meta)
@@ -1095,6 +1401,11 @@ class Callbacks:
                     if self.relation != task:
                         self.relation = task
                         task.relate(self)
+
+                def end_overlap(self, time_stamp):
+                    Callbacks.Process.Thread.TaskBase.end_overlap(self, time_stamp)
+                    if self.relation:
+                        self.__emit_relation(self.data, self.relation.data)
 
             def task(self, name, domain='sea', overlapped=False):
                 return Callbacks.Process.Thread.Task(self, name, domain, overlapped)
@@ -1205,16 +1516,13 @@ class Callbacks:
         )
 
     def set_process_name(self, pid, name, labels=[]):
-        for callback in self.callbacks:
-            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': pid, 'tid': -1, 'delta': pid, 'data': name, 'labels': labels})
+        self.__call__("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': pid, 'tid': -1, 'delta': pid, 'data': name, 'labels': labels})
 
     def set_thread_name(self, pid, tid, name):
-        for callback in self.callbacks:
-            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (tid %d)' % (name, tid), 'delta': tid})
+        self.__call__("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (%d)' % (name, tid), 'delta': tid})
 
     def add_metadata(self, name, data):
-        for callback in self.callbacks:
-            callback("metadata_add", {'domain': 'IntelSEAPI', 'data': data, 'str': name, 'tid': None})
+        self.__call__("metadata_add", {'domain': 'IntelSEAPI', 'data': data, 'str': name, 'tid': None})
 
     class AttrDict(dict):
         pass  # native dict() refuses setattr call
@@ -1276,7 +1584,7 @@ class Callbacks:
                         task['begin'], task['str'], args=args, meta={'sampled': True}
                     ).end(end_time)
                 else:
-                    if kind in ['sampling', 'ustack']:  # temporary workaround for OSX case where there are three stacks
+                    if kind in ['sampling', 'ustack'] or (pid == 0 and kind == 'kstack'):  # temporary workaround for OSX case where there are three stacks
                         thread.task(task['str']).begin(task['begin'], args=args, meta={'sampled': True}).end(end_time)
                 del tasks[ptr]
                 shift += 1
@@ -1459,10 +1767,10 @@ def transform2(args, tree, skip_fn=None):
                     progress.tick(sum([file.get_pos() for file in files]))
                 callbacks.on_event(TaskTypes[record['type']], record)
                 count += 1
-        for callback in callbacks.callbacks:
-            callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': tree["pid"], 'tid': -1, 'delta': -1})
-            for pid, name in tree['groups'].iteritems():
-                callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': int(pid), 'tid': -1, 'delta': -1, 'data': name})
+
+        callbacks("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': tree["pid"], 'tid': -1, 'delta': -1})
+        for pid, name in tree['groups'].iteritems():
+            callbacks("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': int(pid), 'tid': -1, 'delta': -1, 'data': name})
 
     return callbacks.get_result()
 
@@ -1675,7 +1983,7 @@ def D3D11_DEPTH_STENCIL_DESC(data):
     FrontFace = D3D11_DEPTH_STENCILOP_DESC(data[pos: pos + D3D11_DEPTH_STENCILOP_DESC.SIZE])
     pos += D3D11_DEPTH_STENCILOP_DESC.SIZE
     BackFace = D3D11_DEPTH_STENCILOP_DESC(data[pos: pos + D3D11_DEPTH_STENCILOP_DESC.SIZE])
-    return {'DepthEnable': DepthEnable, 'DepthWriteMask':DepthWriteMask, 'DepthFunc':DepthFunc, 'StencilEnable':StencilEnable, 'StencilReadMask':StencilReadMask, 'StencilWriteMask':StencilWriteMask, 'FrontFace': FrontFace, 'BackFace': BackFace};
+    return {'DepthEnable': DepthEnable, 'DepthWriteMask': DepthWriteMask, 'DepthFunc': DepthFunc, 'StencilEnable': StencilEnable, 'StencilReadMask': StencilReadMask, 'StencilWriteMask': StencilWriteMask, 'FrontFace': FrontFace, 'BackFace': BackFace};
 D3D11_DEPTH_STENCIL_DESC.SIZE = 4 * 4 + 2 + 2 + 2 * D3D11_DEPTH_STENCILOP_DESC.SIZE
 
 struct_decoders = {
@@ -1700,23 +2008,15 @@ class TaskCombiner:
         return self
 
     def __exit__(self, type, value, traceback):
-        self.handle_leftovers()
         self.finish()
         return False
 
     def __init__(self, args, tree):
-        self.no_begin = []  # for the ring buffer case when we get task end but no task begin
-        self.time_bounds = [2 ** 64, 0]  # left and right time bounds
         self.tree = tree
         self.args = args
-        self.domains = {}
-        self.events = []
         self.event_map = {}
-        self.prev_sample = 0
-        self.memory = {}
-        self.total_memory = 0
-        self.prev_memory = None
-        self.task_postprocessor = None
+        self.events = []
+
         (self.source_scale_start, self.target_scale_start, self.ratio) = tuple([0, 0, 1. / 1000])  # nanoseconds to microseconds
         if self.args.sync:
             self.set_sync(*self.args.sync)
@@ -1740,9 +2040,6 @@ class TaskCombiner:
         """Called to finalize a derived class."""
         raise NotImplementedError(TaskCombiner.not_implemented_err_string)
 
-    def set_task_postprocessor(self, postprocessor):
-        self.task_postprocessor = postprocessor
-
     def set_sync(self, *sync):
         (self.source_scale_start, self.target_scale_start, self.ratio) = tuple(sync)
 
@@ -1757,206 +2054,6 @@ class TaskCombiner:
 
     def handle_stack(self, task, stack, name='stack'):
         return
-
-    def handle_leftovers(self):
-        if self.args.no_left_overs:
-            return
-        for end in self.no_begin:
-            begin = end.copy()
-            begin['time'] = self.time_bounds[0]
-            self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
-        for domain, threads in self.domains.iteritems():
-            for tid, records in threads['tasks'].iteritems():
-                for id, per_id_records in records['byid'].iteritems():
-                    for begin in per_id_records:
-                        end = begin.copy()
-                        end['time'] = self.time_bounds[1]
-                        self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
-                for begin in records['stack']:
-                    end = begin.copy()
-                    end['time'] = self.time_bounds[1]
-                    self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
-            if self.prev_sample:
-                self.flush_counters(threads, {'tid': 0, 'pid': self.tree['pid'], 'domain': domain})
-
-    def __call__(self, fn, data):
-        domain = self.domains.setdefault(data['domain'], {'tasks': {}, 'counters': {}})
-        thread = domain['tasks'].setdefault(data['tid'], {'byid': {}, 'stack': [], 'args': {}})
-
-        def get_tasks(id):
-            if not id:
-                return thread['stack']
-            return thread['byid'].setdefault(id, [])
-
-        def get_task(id):
-            if id:
-                tasks = get_tasks(id)
-                if not tasks:  # they can be stacked
-                    tasks = get_tasks(None)
-                    if not tasks or not tasks[-1].has_key('id') or tasks[-1]['id'] != id:
-                        return None
-            else:
-                tasks = get_tasks(None)
-            if tasks:
-                return tasks[-1]
-            else:
-                return None
-
-        def find_task(id):
-            for thread_stacks in domain['tasks'].itervalues():  # look in all threads
-                if thread_stacks['byid'].has_key(id) and thread_stacks['byid'][id]:
-                    return thread_stacks['byid'][id][-1]
-                else:
-                    for item in thread_stacks['stack']:
-                        if item.has_key('id') and item['id'] == id:
-                            return item
-
-        def get_stack(tid):
-            stack = []
-            for domain in self.domains.itervalues():
-                if not domain['tasks'].has_key(tid):
-                    continue
-                thread = domain['tasks'][tid]
-                for byid in thread['byid'].itervalues():
-                    stack += byid
-                if thread['stack']:
-                    stack += thread['stack']
-            stack.sort(key=lambda item: item['time'])
-            return stack
-
-        def get_last_index(tasks, type):
-            if not len(tasks):
-                return None
-            index = len(tasks) - 1
-            while index > -1 and tasks[index]['type'] != type:
-                index -= 1
-            if index > -1:
-                return index
-            return None
-
-        if fn == "task_begin" or fn == "task_begin_overlapped":
-            if not (data.has_key('str') or data.has_key('pointer')):
-                data['str'] = 'Unknown'
-            self.time_bounds[0] = min(self.time_bounds[0], data['time'])
-            if 'delta' in data and data['delta']:  # turbo mode, only begins are written
-                end = data.copy()
-                end['time'] = data['time'] + int(data['delta'])
-                self.time_bounds[1] = max(self.time_bounds[1], end['time'])
-                self.complete_task('task', data, end)  # for now arguments are not supported in turbo tasks. Once argument is passed, task gets converted to normal.
-            else:
-                get_tasks(None if fn == "task_begin" else data['id']).append(data)
-        elif fn == "task_end" or fn == "task_end_overlapped":
-            self.time_bounds[1] = max(self.time_bounds[1], data['time'])
-            tasks = get_tasks(None if fn == "task_end" else data['id'])
-            index = get_last_index(tasks, data['type'] - 1)
-            if index is not None:
-                item = tasks.pop(index)
-                if self.task_postprocessor:
-                    self.task_postprocessor.postprocess('task', item, data)
-                self.complete_task('task', item, data)
-            else:
-                assert (self.tree["ring_buffer"] or self.tree['cuts'])
-                if data.has_key('str'):  # nothing to show without name
-                    self.no_begin.append(data)
-        elif fn == "frame_begin":
-            get_tasks(data['id'] if data.has_key('id') else None).append(data)
-        elif fn == "frame_end":
-            frames = get_tasks(data['id'] if data.has_key('id') else None)
-            index = get_last_index(frames, 7)
-            if index is not None:
-                item = frames.pop(index)
-                self.complete_task("frame", item, data)
-            else:
-                assert (self.tree["ring_buffer"] or self.tree['cuts'])
-        elif fn == "metadata_add":
-            if data.has_key('id'):
-                task = get_task(data['id'])
-                if task:
-                    args = task.setdefault('args', {})
-                else:
-                    args = thread['args'].setdefault(data['id'], {})
-
-                args[data['str']] = data['delta'] if data.has_key('delta') else represent_data(self.tree, data['str'], data['data']) if data.has_key('data') else '0x0'
-            else:  # global metadata
-                self.global_metadata(data)
-        elif fn == "object_snapshot":
-            if data.has_key('args'):
-                args = data['args'].copy()
-            else:
-                args = {'snapshot': {}}
-            if data.has_key('data'):
-                state = data['data']
-                for pair in state.split(","):
-                    (key, value) = tuple(pair.split("="))
-                    args['snapshot'][key] = value
-            data['args'] = args
-            self.complete_task(fn, data, data)
-        elif fn in ["marker", "counter", "object_new", "object_delete"]:
-            if fn == "marker" and data['data'] == 'task':
-                markers = get_tasks("marker_" + (data['id'] if data.has_key('id') else ""))
-                if markers:
-                    item = markers.pop()
-                    item['type'] = 7  # frame_begin
-                    item['domain'] += ".continuous_markers"
-                    item['time'] += 1
-                    self.complete_task("frame", item, data)
-                markers.append(data)
-            elif fn == "counter" and self.args.sampling:
-                if (data['time'] - self.prev_sample) > (int(self.args.sampling) * 1000):
-                    if not self.prev_sample:
-                        self.prev_sample = data['time']
-                    else:
-                        self.flush_counters(domain, data)
-                        self.prev_sample = data['time']
-                        domain['counters'] = {}
-                counter = domain['counters'].setdefault(data['str'], {'begin':data['time'], 'end': data['time'], 'values': []})
-                counter['values'].append(data['delta'])
-                counter['begin'] = min(counter['begin'], data['time'])
-                counter['end'] = max(counter['end'], data['time'])
-            else:
-                if data['domain'] == 'Memory':
-                    size = int(data['str'].split('<')[1].split('>')[0])
-                    prev_value = 0.
-                    if self.memory.has_key(size):
-                        prev_value = self.memory[size]
-                    delta = data['delta'] - prev_value  # data['delta'] has current value of the counter
-                    self.total_memory += delta * size
-                    self.memory[size] = data['delta']
-                    stack = get_stack(data['tid'])
-                    if stack:
-                        current = stack[-1]
-                        values = current.setdefault('memory', {None: 0}).setdefault(size, [])
-                        values.append(delta)
-                        for parent in stack[:-1]:
-                            values = parent.setdefault('memory', {None: 0})
-                            values[None] += delta * size
-                    if self.args.memory == "total":
-                        if (self.prev_memory is None) or ((self.convert_time(data['time']) - self.convert_time(self.prev_memory['time'])) > self.args.min_dur * 10):
-                            data['str'] = "CRT:Memory:Total(bytes)"
-                            data['delta'] = self.total_memory
-                            self.complete_task(fn, data, data)
-                            self.prev_memory = data
-                        return
-                if data.has_key('id') and thread['args'].has_key(data['id']):
-                    data['args'] = thread['args'][data['id']]
-                    del thread['args'][data['id']]
-                self.complete_task(fn, data, data)
-        elif fn == "relation":
-            self.relation(
-                data,
-                get_task(data['id'] if data.has_key('id') else None),
-                get_task(data['parent']) or find_task(data['parent'])
-            )
-        else:
-            assert (not "Unsupported type:" + fn)
-
-    def flush_counters(self, domain, data):
-        for name, counter in domain['counters'].iteritems():
-            common_data = data.copy()
-            common_data['time'] = counter['begin'] + (counter['end'] - counter['begin']) / 2
-            common_data['str'] = name
-            common_data['delta'] = sum(counter['values']) / len(counter['values'])
-            self.complete_task('counter', common_data, common_data)
 
 
 def to_hex(value):
@@ -1983,6 +2080,7 @@ class GraphCombiner(TaskCombiner):
         self.per_domain = {}
         self.relations = {}
         self.threads = set()
+        self.per_thread = {}
 
     @staticmethod
     def get_name_ex(begin):
@@ -1994,7 +2092,9 @@ class GraphCombiner(TaskCombiner):
         return name
 
     def get_per_domain(self, domain):
-        return self.per_domain.setdefault(domain, {'counters': {}, 'objects': {}, 'frames': {}, 'tasks': {}, 'markers': {}})
+        return self.per_domain.setdefault(domain, {
+            'counters': {}, 'objects': {}, 'frames': {}, 'tasks': {}, 'markers': {}, 'threads': {}
+        })
 
     def complete_task(self, type, begin, end):
         if 'sampled' in begin and begin['sampled']:
@@ -2007,16 +2107,23 @@ class GraphCombiner(TaskCombiner):
             task['time'].append(end['time'] - begin['time'])
             if '__file__' in begin:
                 task['src'] = begin['__file__'] + ":" + begin['__line__']
-            if begin['domain'] in self.domains:  # assumption that task was managed with ITT way
-                tasks = self.domains[begin['domain']]['tasks']
-                stack = tasks[tid]['stack'] if tid in tasks else []
-                if len(stack):
-                    parent = stack[-1]
-                    self.add_relation({'label': 'calls', 'from': self.make_id(parent['domain'], self.get_name_ex(parent)), 'to': self.make_id(begin['domain'], self.get_name_ex(begin))})
-                else:
-                    self.add_relation({'label': 'executes', 'from': self.make_id("threads", str(tid)), 'to': self.make_id(begin['domain'], self.get_name_ex(begin)), 'color': 'gray'})
-            else:  # FIXME: real complete_tasks formed by modern API are not tracked
-                pass
+
+            if begin['type'] == 0:  # non-overlapped only
+                # We expect parents to be reported in the end order (when the end time becomes known)
+                orphans = self.per_thread.setdefault(begin['tid'], [])
+                left_index = bisect_right(orphans, begin['time'], lambda (b,_): b['time'])  # first possible child
+                right_index = bisect_right(orphans, end['time'], lambda (b,_): b['time']) - 1  # last possible child
+                for i in xrange(right_index, left_index - 1, -1):  # right to left to be able deleting from array
+                    orphan = orphans[i]
+                    if orphan[1]['time'] < end['time']:  # a parent is found!
+                        self.add_relation({
+                            'label': 'calls', 'from': self.make_id(begin['domain'], self.get_name_ex(begin)),
+                            'to': self.make_id(orphan[0]['domain'], self.get_name_ex(orphan[0]))})
+                        del orphans[i]
+                orphans.insert(left_index, (begin, end))
+            else:
+                self.add_relation({'label': 'executes', 'from': self.make_id("threads", str(tid)),
+                                   'to': self.make_id(begin['domain'], self.get_name_ex(begin)), 'color': 'gray'})
         elif type == 'marker':
             domain['markers'].setdefault(begin['str'], [])
         elif type == 'frame':
@@ -2037,6 +2144,16 @@ class GraphCombiner(TaskCombiner):
                 object['destroy'] = begin['time']
         else:
             print "Unhandled:", type
+
+    def finish(self):
+        for tid, orphans in self.per_thread.iteritems():
+            last_time = 0
+            for orphan in orphans:
+                assert(orphan[1]['time'] > last_time)
+                last_time = orphan[1]['time']
+                begin = orphan[0]
+                self.add_relation({'label': 'executes', 'from': self.make_id("threads", str(tid)),
+                                   'to': self.make_id(begin['domain'], self.get_name_ex(begin)), 'color': 'gray'})
 
     def make_id(self, domain, name):
         import re

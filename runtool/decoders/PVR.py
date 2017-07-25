@@ -46,6 +46,9 @@ class PVRCSV(GPUQueue):
         self.gpu = self.callbacks.process(TRACK_INDEX, TRACK_NAME).thread(-1)
 
     def handle_record(self, data):
+        for item in ['name', 'start_tsc.CLOCK_MONOTONIC_RAW', 'end_tsc']:
+            if item not in data:
+                return
         frame = self.gpu.frame(data['name'])
         start = int(data['start_tsc.CLOCK_MONOTONIC_RAW'])
         end = int(data['end_tsc'])

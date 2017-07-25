@@ -217,7 +217,7 @@ std::string GetSavePath()
 #else
     static std::string save_to = get_environ_value("INTEL_SEA_SAVE_TO");
 #endif
-    VerbosePrint("Got save path: %s", save_to.c_str());
+    VerbosePrint("Got save path: %s\n", save_to.c_str());
     if (save_to.empty())
     {
         return save_to;
@@ -378,10 +378,23 @@ __itt_domain* domain_createW(const wchar_t* name)
 }
 #endif
 
+inline __itt_string_handle* get_tail_of_global_string_list(const __itt_global* const pGlobal)
+{
+    if (!pGlobal->string_list) return nullptr;
+
+    __itt_string_handle* result = pGlobal->string_list;
+
+    while (result->next) {
+        result = result->next;
+    }
+
+    return result;
+}
+
 inline __itt_string_handle* create_and_add_string_handle_to_list(const char* name)
 {
-    static __itt_string_handle *string_handle_list_tail = NULL;
     static __itt_global* pGlobal = GetITTGlobal();
+    static __itt_string_handle *string_handle_list_tail = get_tail_of_global_string_list(pGlobal);
 
     __itt_string_handle *result = NULL;
 
@@ -1966,6 +1979,17 @@ extern "C" //plain C interface for languages like python
             reinterpret_cast<__itt_string_handle*>(name),
             value,
             0
+        );
+    }
+
+    SEA_EXPORT void itt_metadata_add_blob(void* domain, uint64_t id, void* name, const void* value, uint32_t size)
+    {
+        __itt_metadata_add(
+            reinterpret_cast<__itt_domain*>(domain),
+            id ? __itt_id_make(domain, id) : __itt_null,
+            reinterpret_cast<__itt_string_handle*>(name),
+            __itt_metadata_unknown, size,
+            const_cast<void*>(value)
         );
     }
 

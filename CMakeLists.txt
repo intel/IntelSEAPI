@@ -205,9 +205,18 @@ endfunction()
 
 InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/*.py" "runtool")
 InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/importers/*.py" "runtool/importers")
+InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/importers/pprof_importer/*.py" "runtool/importers/pprof_importer")
 InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/exporters/*.py" "runtool/exporters")
 InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/collectors/*.py" "runtool/collectors")
 InstallWildCard("${PROJECT_SOURCE_DIR}/runtool/decoders/*.py" "runtool/decoders")
+
+if (EXISTS "${PROJECT_SOURCE_DIR}/catapult.zip")
+    install(
+        FILES
+            ${PROJECT_SOURCE_DIR}/catapult.zip
+        DESTINATION bin
+    )
+endif()
 
 if (WIN32)
     InstallWildCard("${SEA_PROJECT_BIN}/*ittnotify*.lib" "lib")

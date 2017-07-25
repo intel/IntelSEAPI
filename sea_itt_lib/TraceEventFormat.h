@@ -29,6 +29,14 @@
     static const int64_t g_PID = (int64_t)GetCurrentProcessId();
 #else
     static const int64_t g_PID = (int64_t)getpid();
+    #if defined(__APPLE__)
+    inline int64_t GetTidFromPThread()
+    {
+        uint64_t tid64 = 0;
+        pthread_threadid_np(NULL, &tid64); 
+        return (int64_t)tid64;
+    }
+    #endif
 #endif
 
 //https://github.com/google/trace-viewer
@@ -102,15 +110,17 @@ public:
     static SRegularFields GetRegularFields()
     {
         return SRegularFields{
-    #ifdef _WIN32
+    #if defined(_WIN32)
             g_PID, (int64_t)GetCurrentThreadId(),
     #elif defined(__ANDROID__)
             g_PID, (int64_t)gettid(),
-    #elif __linux__
+    #elif defined(__linux__)
             g_PID, (int64_t)syscall(SYS_gettid),
+    #elif defined(__APPLE__)
+            g_PID, GetTidFromPThread(),
     #else
             g_PID, (int64_t)syscall(SYS_thread_selfid),
-#endif
+    #endif
             GetTimeNS()
         };
     }

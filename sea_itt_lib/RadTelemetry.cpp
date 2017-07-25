@@ -45,7 +45,7 @@ class CRadTelemetry : public IHandler
         }
         else if (err == TMERR_NULL_API)
         {
-            VerbosePrint("There is no Telemetry API (the DLL isn't in the EXE's path)!\n");
+            VerbosePrint("There is no RAD Telemetry API (the DLL isn't in the EXE's path)!\n");
         }
         else if (err == TMERR_COULD_NOT_CONNECT)
         {

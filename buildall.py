@@ -111,6 +111,9 @@ def locate_exact(what):
     items = subprocess.check_output(['locate', what]).decode("utf-8").split('\n')
     return [item for item in items if item.endswith(what)]
 
+def find_in(locations, what):
+    items = subprocess.check_output(['find'] + locations + ['-name', what]).decode("utf-8").split('\n')
+    return [item for item in items if item.endswith(what)]
 
 def GetJDKPath():
     if sys.platform == 'win32':
@@ -131,7 +134,11 @@ def GetJDKPath():
             if jnis:
                 longest = {'prefix': '', 'jni': '', 'java': ''}
                 for jni in jnis:
+                    if '/Volumes' in jni:
+                        continue
                     for java in javacs:
+                        if '/Volumes' in java:
+                            continue
                         prefix = os.path.commonprefix([jni, java])
                         if len(prefix) > len(longest['prefix']):
                             longest = {'prefix': prefix, 'jni': jni, 'java': java}
@@ -176,6 +183,18 @@ def get_vs_versions():  # https://www.mztools.com/articles/2008/MZ2008003.aspx
     return sorted(versions)
 
 
+def detect_cmake():
+    if sys.platform == 'darwin':
+        path, err = subprocess.Popen("which cmake", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+        if not path.strip():
+            path, err = subprocess.Popen("which xcrun", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+            if not path.strip():
+                print("No cmake and no XCode found...")
+                return None
+            return 'xcrun cmake'
+    return 'cmake'
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -187,6 +206,7 @@ def main():
     parser.add_argument("--arm", action="store_true")
     parser.add_argument("-c", "--clean", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--no_java", action="store_true")
     if sys.platform == 'win32' and vs_versions:
         parser.add_argument("--vs", choices=vs_versions, default=vs_versions[0])
     args = parser.parse_args()
@@ -204,7 +224,7 @@ def main():
 
     print("target_bits", target_bits)
 
-    jdk_path = GetJDKPath()
+    jdk_path = GetJDKPath() if not args.no_java else None
     print("Found JDK:", jdk_path)
 
     work_dir = os.getcwd()
@@ -223,6 +243,11 @@ def main():
             os.makedirs(work_folder)
         print("work_folder: ", work_folder)
         os.chdir(work_folder)
+
+        cmake = detect_cmake()
+        if not cmake:
+            print("Error: cmake is not found")
+            return
 
         if args.android:
             if args.arm:
@@ -251,7 +276,7 @@ def main():
                 generator = 'Ninja'
         else:
             generator = 'Unix Makefiles'
-        run_shell('cmake "%s" -G"%s" %s' % (work_dir, generator, " ".join([
+        run_shell('%s "%s" -G"%s" %s' % (cmake, work_dir, generator, " ".join([
             ("-DFORCE_32=ON" if bits == '32' else ""),
             ("-DCMAKE_BUILD_TYPE=Debug" if args.debug else ""),
             ("-DYOCTO=1" if yocto else ""),
@@ -261,15 +286,15 @@ def main():
         if sys.platform == 'win32':
             install = args.install and bits == target_bits[-1]
             target_project = 'PACKAGE' if install else 'ALL_BUILD'  # making install only on last config, to pack them all
-            run_shell('cmake --build . --config %s --target %s' % ('Debug' if args.debug else 'Release', target_project))
+            run_shell('%s --build . --config %s --target %s' % (cmake, ('Debug' if args.debug else 'Release'), target_project))
             if install:
                 run_shell(r'echo f | xcopy "IntelSEAPI*.exe" "%s\IntelSEAPI.exe" /F' % get_share_folder())
         else:
             import glob
-            run_shell('cmake --build . --config %s' % ('Debug' if args.debug else 'Release'))
+            run_shell('%s --build . --config %s' % (cmake, ('Debug' if args.debug else 'Release')))
             if not args.install or ('linux' in sys.platform and bits == '64'):
                 continue  # don't pack on first round, instead on the second pass collect all
-            run_shell('cmake --build . --config %s --target package' % ('Debug' if args.debug else 'Release'))
+            run_shell('%s --build . --config %s --target package' % (cmake, ('Debug' if args.debug else 'Release')))
 
             installer = glob.glob(os.path.join(work_folder, "IntelSEAPI*.sh"))[0]
             print(installer)

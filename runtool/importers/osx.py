@@ -1,7 +1,7 @@
 import os
 import sys
 import codecs
-from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_exporters
+from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_exporters, get_decoders
 sys.path.append(os.path.realpath(os.path.dirname(__file__)))  # weird CentOS behaviour workaround
 from etw import GPUQueue
 
@@ -19,18 +19,34 @@ class DTrace(GPUQueue):
         self.prepares = {}
         self.pid_names = {}
         self.tid_map = {}
+        self.event_tracker = {}  # key is ring+channel => key is tracking stamp => [events]
+        self.contexts = {u'0': 'System'}  # id to type map
         for callback in self.callbacks.callbacks:
             if 'ContextSwitch' in dir(callback):
                 self.cs = callback.ContextSwitch(callback, args.input + '.ftrace')
-            callback("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': -1, 'tid': -1, 'data': 'GPU Engines', 'time': 0, 'delta': -2})
+        self.callbacks("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': -1, 'tid': -1, 'data': 'GPU Contexts', 'time': 0, 'delta': -2})
+
+        self.decoders = []
+        decoders = get_decoders()
+        if 'dtrace' in decoders:
+            for decoder in decoders['dtrace']:
+                self.decoders.append(decoder(args, callbacks))
 
     def add_tid_name(self, tid, name):
+        if tid == 0:
+            return
+        if name == 'kernel_task':
+            return
         if tid in self.tid_map:
             self.pid_names[self.tid_map[tid]] = name
+        else:
+            self.pid_names[tid] = name
 
     def handle_record(self, time, cmd, args):
+        if not self.callbacks.check_time_in_limits(time):
+            return
         if cmd == 'off':
-            if not self.cs or not self.callbacks.check_time_in_limits(time):
+            if not self.cs:
                 return
             cpu, prev_tid, prev_prio, prev_name, next_tid, next_prio, next_name = args
 
@@ -62,7 +78,13 @@ class DTrace(GPUQueue):
             pid, tid = args[0:2]
             self.arg(time, int(pid, 16), int(tid, 16), args[2], '\t'.join(args[3:]))
         else:
-            print "unsupported cmd:", cmd, args
+            if self.decoders:
+                pid, tid = args[0:2]
+                pid, tid = int(pid, 16), int(tid, 16)
+                for decoder in self.decoders:
+                    decoder.handle_record(time, pid, tid, cmd, args[2:])
+            else:
+                print "unsupported cmd:", cmd, args
 
     def handle_stack(self, kind, time, pid, tid, stack):
         pid = int(pid, 16)
@@ -128,83 +150,173 @@ class DTrace(GPUQueue):
                     self.gpu_frame['task'] = id
             return True
 
-    def gpu_call(self, time, cmd, pid, tid, args):
-        if 'PrepareQueueKMD' == cmd:  # first argument seems to be 'context', see SwCtxDestroy
-            id = args[-2] if len(args) == 3 else args[-1]
-            self.prepares[id] = {
-                'domain': 'AppleIntelGraphics', 'type': 7,
-                'time': time, 'tid': tid, 'pid': pid, 'str': 'PrepareQueueKMD', 'id': int(id, 16),
-                'args': dict((idx, val) for idx, val in enumerate(args))
-            }
-        elif 'SubmitQueueKMD' == cmd:
-            id = args[-3] if len(args) == 7 else args[-4]
-            self.submit_prepare(time, id, pid, tid, args)
-            if id in self.gpu_packets:
-                return
-            self.gpu_packets[id] = begin_data = {
-                'domain': 'AppleIntelGraphics', 'type': 2,
-                'time': time, 'tid': int(args[3], 16), 'pid': -1, 'str': id, 'id': int(id, 16),
-                'args': dict((idx, val) for idx, val in enumerate(args))
-            }
-            self.report_relation(id, begin_data)
+    @staticmethod
+    def map_context_type(ctx_type):
+        ctx_types = ['UNKNOWN', 'GL', 'CL', 'Media', 'Metal']
+        if int(ctx_type) > len(ctx_types) - 1:
+            ctx_type = 0
+        return ctx_types[int(ctx_type)]
 
-            self.auto_break_gui_packets(begin_data, 2 ** 64 + begin_data['tid'], True)
-            self.callbacks.on_event("task_begin_overlapped", begin_data)
+    @staticmethod
+    def map_ring_type(ring_type):
+        ring_types = ['Render', 'Media', 'Blit', 'VEBox']
+        if int(ring_type) > len(ring_types) - 1:
+            return 'UNKNOWN'
+        return ring_types[int(ring_type)]
+
+    def append_stage(self, ring_type, channel, stamp, data):
+        self.event_tracker.setdefault((ring_type, channel), {}).setdefault(int(stamp, 16), []).append(data)
+
+    def complete_stage(self, ring_type, channel, latest_stamp, data):
+        stamps = self.event_tracker.setdefault((ring_type, channel), {})
+        latest_stamp = int(latest_stamp, 16)
+        to_del = set(stamp for stamp in stamps.iterkeys() if stamp <= latest_stamp)
+        if len(to_del) < 100:  # in old driver with GuC the CompleteExecute might be called so rar that it is not reliable at all
+            for stamp, stages in stamps.iteritems():
+                if stamp <= latest_stamp:
+                    verbose = ['%s(%s) %d:' % (ring_type, channel, stamp)]
+                    ctx_type = None
+                    old_ctx_id = None
+                    changed_context = False
+                    for stage in stages:
+                        verbose.append(stage['cmd'])
+                        if 'ctx_id' in stage:
+                            changed_context = old_ctx_id and old_ctx_id != stage['ctx_id']
+                            verbose.append('(%s)' % (('!' if changed_context else '') + stage['ctx_id']))
+                            old_ctx_id = stage['ctx_id']
+                        if 'ctx_type' in stage:
+                            assert ctx_type == stage['ctx_type'] or not ctx_type or changed_context
+                            ctx_type = stage['ctx_type']
+                    if not ctx_type and old_ctx_id:
+                        ctx_type = self.contexts[old_ctx_id] if old_ctx_id in self.contexts else None
+                    if ctx_type:
+                        verbose.append('%s - %s' % (data['cmd'], ctx_type))
+                    else:
+                        verbose.append(data['cmd'])
+                    if self.args.verbose:
+                        print ' '.join(verbose)
+                    if not changed_context:  # not sure what TODO with it yet
+                        task = self.complete_gpu(stages[-1], data, ctx_type, old_ctx_id)
+                        found_submit = False
+                        for stage in stages:
+                            if stage['cmd'] in ['SubmitQueueKMD', 'WriteStamp']:
+                                found_submit = True
+                                task = self.complete_cpu(stage, data, ctx_type, old_ctx_id, task)
+                                if stages[0]['cmd'] == 'PrepareQueueKMD':
+                                    self.complete_prepare(stages[0], stage, ctx_type, old_ctx_id, task)
+                                break
+                        if not found_submit:
+                            self.complete_cpu(stages[0], data, ctx_type, old_ctx_id, task)
+        for stamp in to_del:
+            del stamps[stamp]
+
+    def complete_gpu(self, submit, complete, ctx_type, ctx_id):
+        task = self.callbacks.process(-1).thread(int(ctx_id, 16))\
+            .task('%s-%s: %s' % (self.map_ring_type(submit['ring_type']), int(submit['channel'], 16), submit['stamp']))\
+            .begin(submit['time'])
+        task.end_overlap(complete['time'])
+        return task
+
+    def complete_cpu(self, submit, complete, ctx_type, ctx_id, gpu):
+        task = self.callbacks.process(submit['pid']).thread(-int(submit['channel'], 16), '%s ring' % self.map_ring_type(submit['ring_type']))\
+            .task('%s-%s: %s' % (ctx_type, int(ctx_id, 16), submit['stamp']))\
+            .begin(submit['time'])
+        task.relate(gpu)
+        task.end_overlap(complete['time'])
+        return task
+
+    def complete_prepare(self, prepare, submit, ctx_type, ctx_id, cpu):
+        task = self.callbacks.process(submit['pid']).thread(prepare['tid'])\
+            .frame('Prepare %s-%s' % (self.map_ring_type(submit['ring_type']), int(submit['channel'], 16)))\
+            .complete(prepare['time'], submit['time'] - prepare['time'], args={'ctx_type': ctx_type, 'ctx_id': int(ctx_id, 16)})
+        return task
+
+    def gpu_call(self, time, cmd, pid, tid, args):
+        if 'PrepareQueueKMD' == cmd:
+            if len(args) == 3:
+                ctx_id, stamp, ctx_type = args
+                ring_type, channel = '0', '0'
+            else:
+                ctx_id, ctx_type, ring_type, channel, stamp = args
+            ctx_type = self.map_context_type(ctx_type)
+            self.contexts[ctx_id] = ctx_type
+            self.append_stage(ring_type, channel, stamp, locals())
+        elif 'SubmitQueueKMD' == cmd:
+            if len(args) == 7:
+                ctx_id, ctx_type, ring_type, channel, stamp, umd_submission_id, umd_call_count = args
+            else:
+                ctx_id, stamp, ctx_type, umd_submission_id, umd_call_count = args
+                ring_type, channel = '0', '0'
+            ctx_type = self.map_context_type(ctx_type)
+            self.contexts[ctx_id] = ctx_type
+            self.append_stage(ring_type, channel, stamp, locals())
         elif 'SubmitToRing' == cmd:
-            id = args[-3] if len(args) == 4 else args[-2]
-            if id.endswith('00000000'):
-                id = id[:-8]
-                if args[0][0] == 'f' and args[-1] != id and id in self.gpu_packets:  # change of id when sending to GPU
-                    self.gpu_transition[args[-1]] = id
-            if int(id, 16) == 0:
-                id = args[-1]
-            if id in self.cpu_packets:
-                return
-            self.cpu_packets[id] = begin_data = {
-                'domain': 'AppleIntelGraphics', 'type': 2,
-                'time': time, 'tid': -tid, 'pid': pid, 'str': id, 'id': int(id, 16),
-                'args': dict((idx, val) for idx, val in enumerate(args))
-            }
-            self.auto_break_gui_packets(begin_data, begin_data['tid'], True)
-            self.callbacks.on_event("task_begin_overlapped", begin_data)
-            if begin_data['tid'] not in self.thread_names:
-                self.thread_names[begin_data['tid']] = ("CPU Queue", begin_data['pid'])
+            if len(args) == 4:
+                ctx_id, ring_type, channel, stamp = args
+            else:
+                ctx_id, stamp, ring_type = args
+                channel = '0'
+            self.append_stage(ring_type, channel, stamp, locals())
         elif 'SubmitBatchBuffer' == cmd:
-            id = args[1]
-            if id in self.cpu_packets:
-                self.cpu_packets[id]['name'] = 'BatchBuffer:' + id
-        elif '2DBlt' == cmd:
-            id = args[1]
-            if id in self.cpu_packets:
-                self.cpu_packets[id]['name'] = '2DBlt:' + id
-        elif '3DBlt' == cmd:
-            id = args[1]
-            if id in self.cpu_packets:
-                self.cpu_packets[id]['name'] = '3DBlt:' + id
+            if len(args) == 4:
+                ctx_id, ring_type, channel, stamp = args
+            else:
+                ctx_id, stamp, ring_type = args
+                channel = '0'
+            self.append_stage(ring_type, channel, stamp, locals())
+        elif 'SubmitExecList' == cmd:
+            ctx_id, ring_type, channel, stamp = args
+            self.append_stage(ring_type, channel, stamp, locals())
         elif 'CompleteExecute' == cmd:
-            id = args[-1]
-            gpu_task_id = id
-            if gpu_task_id not in self.gpu_packets and gpu_task_id in self.gpu_transition:
-                gpu_task_id = self.gpu_transition[id]
-                del self.gpu_transition[id]
-                if gpu_task_id in self.gpu_packets:
-                    self.report_relation(id, self.gpu_packets[gpu_task_id])
-            if id in self.cpu_packets:
-                end_data = self.cpu_packets[id]
-                end_data.update({'time': time, 'type': 3})
-                self.auto_break_gui_packets(end_data, end_data['tid'], False)
-                self.callbacks.on_event("task_end_overlapped", end_data)
-                del self.cpu_packets[id]
-            if gpu_task_id in self.gpu_packets:
-                end_data = self.gpu_packets[gpu_task_id]
-                end_data.update({'time': time, 'type': 3})
-                self.auto_break_gui_packets(end_data, 2 ** 64 + end_data['tid'], False)
-                self.callbacks.on_event("task_end_overlapped", end_data)
-                if id == self.gpu_frame['task']:
-                    self.on_gpu_frame(time, end_data['pid'], end_data['tid'])
-                del self.gpu_packets[gpu_task_id]
-        elif cmd in ['RemoveQueueKMD', 'DidFlip', 'WriteStamp', 'SwCtxDestroy', 'SwCtxCreation', 'CompleteExecList', 'SubmitExecList']:
-            pass
+            if len(args) == 2:
+                ring_type, latest_stamp = args
+                channel = '0'
+            else:
+                ring_type, channel, latest_stamp = args
+            self.complete_stage(ring_type, channel, latest_stamp, locals())
+        elif 'CompleteExecList' == cmd:
+            ctx_id, ring_type, channel, latest_stamp, ctx_run_time = args
+            self.complete_stage(ring_type, channel, latest_stamp, locals())
+        elif 'WriteStamp' == cmd:
+            ctx_id, ring_type, channel, stamp = args
+            self.append_stage(ring_type, channel, stamp, locals())
+        elif 'RemoveQueueKMD' == cmd:
+            if len(args) == 2:
+                ring_type, latest_stamp = args
+                channel = '0'
+            else:
+                ring_type, channel, latest_stamp = args
+            self.complete_stage(ring_type, channel, latest_stamp, locals())
+        elif 'SwCtxCreation' == cmd:
+            ctx_id, ctx_type = args
+            ctx_type = self.map_context_type(ctx_type)
+            self.contexts[ctx_id] = ctx_type
+        elif 'SwCtxDestroy' == cmd:
+            ctx_id, ctx_type = args
+            ctx_type = self.map_context_type(ctx_type)
+            self.contexts[ctx_id] = ctx_type
+        elif 'DidFlip' == cmd:
+            self.callbacks.vsync(time)
+        elif 'BeginExecOnGPU' == cmd:
+            cpu_time, ctx_id, ring_type, channel, stamp = args
+            cpu_time = int(cpu_time, 16)
+            if not cpu_time:
+                print "Warning: zero timestamp: ", cmd, args
+                return
+            thread = self.callbacks.process(-1).thread(int(ctx_id, 16))
+            thread.task_pool[(ring_type, channel, stamp)] = thread.task("ACTUAL").begin(cpu_time, args={
+                'ring': self.map_ring_type(ring_type), 'stamp': stamp, 'channel': int(channel, 16), 'ctx_id': int(ctx_id, 16)
+            })
+        elif 'EndExecOnGPU' == cmd:
+            cpu_time, ctx_id, ring_type, channel, stamp = args
+            cpu_time = int(cpu_time, 16)
+            if not cpu_time:
+                print "Warning: zero timestamp: ", cmd, args
+                return
+            thread = self.callbacks.process(-1).thread(int(ctx_id, 16))
+            if (ring_type, channel, stamp) in thread.task_pool:
+                thread.task_pool[(ring_type, channel, stamp)].end(cpu_time)
+                del thread.task_pool[(ring_type, channel, stamp)]
         else:
             print "Unhandled gpu_call:", cmd
 
@@ -219,6 +331,19 @@ class DTrace(GPUQueue):
         for pid, name in self.pid_names.iteritems():
             self.callbacks.set_process_name(pid, name)
             self.callbacks.set_process_name(-pid, 'Sampling: ' + name)
+
+        for context, name in self.contexts.iteritems():
+            self.callbacks.set_thread_name(-1, int(context, 16), name)
+
+        for pid, proc in self.callbacks.processes.iteritems():
+            name = None
+            for tid, thread in proc.threads.iteritems():
+                if tid in self.pid_names:
+                    name = self.pid_names[tid]
+                    break
+            if name:
+                self.callbacks.set_process_name(pid, name)
+                self.callbacks.set_process_name(-pid, 'Sampling: ' + name)
 
 
 def transform_dtrace(args):
@@ -255,6 +380,9 @@ def transform_dtrace(args):
                         stack.append(line.replace('\t', ' '))
                         continue
                     parts = line.split('\t')
+                    if len(parts) < 4:
+                        print "Warning: weird line:", line
+                        continue
                     if parts[1] in ['ustack', 'kstack', 'jstack']:
                         reading_stack = [parts[1], int(parts[0], 16), parts[2], parts[3].rstrip(':')]
                         continue

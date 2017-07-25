@@ -1,7 +1,7 @@
 import os
 import sys
 import subprocess
-from sea_runtool import Collector
+from sea_runtool import Collector, get_decoders
 
 dtrace_context_switch = r"""
 
@@ -45,7 +45,8 @@ osascript -e 'Tell application "System Events" to display dialog "Password:" def
 """
 
 
-dtrace_metal = r"""
+pid_dtrace_hooks = r"""
+
 pid$target:Metal::entry
 {
     printf(
@@ -74,6 +75,83 @@ pid$target:OpenGL:CGLFlushDrawable:return
     );
 }
 
+/* TODO: move under namespace check
+pid$target::*dtSEAHookScope*:entry
+{
+    printf(
+        "%x\te\t%x\t%x\t%s:%s\t%s\t%d\n",
+        machtimestamp, pid, tid, probemod, copyinstr(arg0), copyinstr(arg1), arg2
+    );
+    printf("%x\tustack\t%x\t%x:", machtimestamp, pid, tid);
+    ustack();
+    printf("\n");
+}
+
+pid$target::*dtSEAHookEndScope*:entry
+{
+    printf(
+        "%x\tr\t%x\t%x\t%s:%s\t%s\n",
+        machtimestamp, pid, tid, probemod, copyinstr(arg0), copyinstr(arg1)
+    );
+}
+
+pid$target::*dtSEAHookArgStr*:entry
+{
+    printf(
+        "%x\targ\t%x\t%x\t%s\t%s\n",
+        machtimestamp, pid, tid, copyinstr(arg0), copyinstr(arg1)
+    );
+}
+
+pid$target::*dtSEAHookArgInt*:entry
+{
+    printf(
+        "%x\targ\t%x\t%x\t%s\t%d\n",
+        machtimestamp, pid, tid, copyinstr(arg0), arg1
+    );
+}
+*/
+
+"""
+
+fbt_dtrace_hooks = r"""
+/* TODO: move under namespace check
+fbt::*dtSEAHookScope*:entry
+{
+    printf(
+        "%x\te\t%x\t%x\t%s:%s\t%s\t%d\n",
+        machtimestamp, pid, tid, stringof(probemod), stringof(arg0), stringof(arg1), arg2
+    );
+    printf("%x\tkstack\t%x\t%x:", machtimestamp, pid, tid);
+    stack();
+    printf("\n");
+}
+
+fbt::*dtSEAHookEndScope*:entry
+{
+    printf(
+        "%x\tr\t%x\t%x\t%s:%s\t%s\n",
+        machtimestamp, pid, tid, stringof(probemod), stringof(arg0), stringof(arg1)
+    );
+}
+
+fbt::*dtSEAHookArgStr*:entry
+{
+    printf(
+        "%x\targ\t%x\t%x\t%s\t%s\n",
+        machtimestamp, pid, tid, stringof(arg0), stringof(arg1)
+    );
+}
+
+fbt::*dtSEAHookArgInt*:entry
+{
+    printf(
+        "%x\targ\t%x\t%x\t%s\t%d\n",
+        machtimestamp, pid, tid, stringof(arg0), arg1
+    );
+}
+*/
+
 """
 
 
@@ -81,8 +159,10 @@ class DTraceCollector(Collector):
 
     def __init__(self, args):
         Collector.__init__(self, args)
+
         self.pid = None
         self.files = []
+
         if 'SUDO_ASKPASS' not in os.environ:
             os.environ['SUDO_ASKPASS'] = self.create_ask_pass()
         if 'DYLD_INSERT_LIBRARIES' in os.environ:
@@ -133,14 +213,11 @@ class DTraceCollector(Collector):
         # launch command line with dtrace script and remember pid
         script = os.path.join(self.args.output, 'script.d')
 
-        (probes, err) = self.execute('sudo -A dtrace -l -m *com.apple.driver.AppleIntel*Graphics*', env=os.environ)
-        if err:
-            return
-
         self.files = [os.path.join(self.args.output, 'data-%s.dtrace' % (self.args.cuts[0] if self.args.cuts else '0'))]
         if os.path.exists(self.files[0]):
             os.remove(self.files[0])
-        cmd = 'sudo -A dtrace -q -o "%s" -s "%s"' % (self.files[0], script)
+
+        cmd = 'sudo -A dtrace -Z -q -o "%s" -s "%s"' % (self.files[0], script)
 
         dtrace_script = []
 
@@ -152,11 +229,22 @@ class DTraceCollector(Collector):
             ]))
 
         dtrace_script.append(dtrace_context_switch)
-        dtrace_script.append(self.gen_gpu_hooks(probes))
+        dtrace_script.append(fbt_dtrace_hooks)
+
+        (probes, err) = self.execute('sudo -A dtrace -l -m *com.apple.driver.AppleIntel*Graphics*', env=os.environ)
+        if probes:
+            dtrace_script.append(self.gen_gpu_hooks(probes))
 
         if self.args.target:
-            dtrace_script.append(dtrace_metal)
+            dtrace_script.append(pid_dtrace_hooks)
             cmd += " -p %s" % self.args.target
+
+        decoders = get_decoders()
+        if 'dtrace' in decoders:
+            for decoder in decoders['dtrace']:
+                hooks = decoder.get_hooks(self.args)
+                if hooks:
+                    dtrace_script.append(hooks)
 
         dtrace_script = '\n'.join(dtrace_script)
 
@@ -170,7 +258,6 @@ class DTraceCollector(Collector):
         self.pid = proc.pid
         self.log(cmd)
         self.log("pid: %d" % proc.pid)
-
 
     @staticmethod
     def get_pid_children(parent):
@@ -202,10 +289,20 @@ class DTraceCollector(Collector):
                 pass
         return self.files
 
+    @classmethod
+    def available(cls):
+        if 'darwin' not in sys.platform:
+            return False
+        (out, err) = cls.execute('csrutil status')
+        if 'disabled' not in out:
+            print 'Please do: "csrutil disable" from Recovery OS terminal to be able using dtrace...'
+            return False
+        return True
+
 
 COLLECTOR_DESCRIPTORS = [{
     'format': 'dtrace',
-    'available': 'darwin' in sys.platform,
+    'available': DTraceCollector.available(),
     'collector': DTraceCollector
 }]
 

@@ -28,6 +28,7 @@ if (WIN32)
         PRE_BUILD
         COMMAND mc -um ${CUR_DIR}/IntelSEAPI.man -h ${PROJECT_BINARY_DIR} -r ${PROJECT_BINARY_DIR}
         DEPENDS ${CUR_DIR}/IntelSEAPI.man
+        MAIN_DEPENDENCY IttNotifyStdSrc.h
         COMMENT "Generating ${PROJECT_BINARY_DIR}/IntelSEAPI.rc ${PROJECT_BINARY_DIR}/IntelSEAPI.h"
     )
 
@@ -35,6 +36,7 @@ if (WIN32)
         PRE_BUILD
         COMMAND mc -km ${CUR_DIR}/IntelSEAPI.man -h ${PROJECT_BINARY_DIR} -r ${PROJECT_BINARY_DIR} -z IntelSEAPI_km
         DEPENDS ${CUR_DIR}/IntelSEAPI.man
+        MAIN_DEPENDENCY IttNotifyStdSrc.h
         COMMENT "Generating ${PROJECT_BINARY_DIR}/IntelSEAPI_km.h"
     )
 

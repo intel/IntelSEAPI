@@ -49,7 +49,10 @@ class ETWXML:
             return res
         if system.has_key('TimeCreated'):
             time_created = system['TimeCreated']
-            res['time'] = time_created.attrib['RawTime']
+            try:
+                res['time'] = time_created.attrib['RawTime']
+            except KeyError:
+                res['time'] = time_created.attrib['SystemTime']
         if system.has_key('Task'):
             task = system['Task']
             res['Task'] = task.text
@@ -147,8 +150,7 @@ class STDSRCReader:
                             print "Failed to decode base64:", args['hdr:EventMessage']
                         """
                 else:
-                    if sys.gettrace():
-                        print "hdr:EventMessage:", args['hdr:EventMessage']
+                    data = args['hdr:EventMessage']
 
             self.reader.on_event(system, data, system)
 
@@ -266,6 +268,8 @@ class ETWXMLHandler(GPUQueue):
         self.images = {}
         self.prev_time = None
         self.statistics = {}
+        self.PerfFreq = None
+        self.etw_header = None
         old_input = args.input
         for sea_folder in glob.glob(os.path.join(self.args.user_input, '*-*')):
             if not os.path.isdir(sea_folder):
@@ -388,8 +392,13 @@ class ETWXMLHandler(GPUQueue):
         if info['EventName'] == 'EventTrace':
             if info['Opcode'] == 'Header':
                 self.PerfFreq = int(data['PerfFreq'])
-                ver = '.'.join(str(num) for num in struct.unpack('BBHL', struct.pack('Q',int(data['Version'])))[:-1])
-                self.callbacks.add_metadata('OS', {'Windows': ver, 'Build': int(data['ProviderVersion'])})
+                self.etw_header = (system, data, info)
+                try:
+                    ver = '.'.join(str(num) for num in struct.unpack('BBHL', struct.pack('Q', int(data['Version'])))[:-1])
+                    self.callbacks.add_metadata('OS', {'Windows': ver, 'Build': int(data['ProviderVersion'])})
+                except:
+                    print "Error: failed to parse OS version"
+
         elif info['EventName'] == 'DiskIo':
             if info['Opcode'] in ['FileDelete', 'FileRundown']:
                 if self.files.has_key(data['FileObject']):
@@ -897,15 +906,14 @@ class ETWXMLHandler(GPUQueue):
                 thread = self.callbacks.process(pid).thread(tid)
                 if track['zone']['last']:
                     thread.marker('task', track['zone']['name']).set(track['zone']['last'])
-        for callback in self.callbacks.callbacks:
-            for adapter, (id, flags) in self.adapters.iteritems():
-                pid = -1 - id
-                name = 'GPU Nodes of Adapter #%s%s:' % (str(id), (' (%s)' % flags) if flags else '')
-                callback("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': pid, 'tid': -1, 'data': name, 'delta': -2})
-                for (adptr, node), name in self.node_info.iteritems():
-                    if adapter != adptr:
-                        continue
-                    callback("metadata_add", {'domain': 'GPU', 'str': '__thread__', 'pid': pid, 'tid': node, 'data': name})
+        for adapter, (id, flags) in self.adapters.iteritems():
+            pid = -1 - id
+            name = 'GPU Nodes of Adapter #%s%s:' % (str(id), (' (%s)' % flags) if flags else '')
+            self.callbacks("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': pid, 'tid': -1, 'data': name, 'delta': -2})
+            for (adptr, node), name in self.node_info.iteritems():
+                if adapter != adptr:
+                    continue
+                self.callbacks("metadata_add", {'domain': 'GPU', 'str': '__thread__', 'pid': pid, 'tid': node, 'data': name})
 
         for id, file in self.files.iteritems():
             if file.has_key('last_access'):  # rest aren't rendered anyways

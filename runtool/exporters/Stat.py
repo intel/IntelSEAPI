@@ -11,6 +11,7 @@ class Stat(GraphCombiner):
         return [self.args.output + ".csv"]
 
     def finish(self):
+        GraphCombiner.finish(self)
         for domain, data in self.per_domain.iteritems():
             for task_name, task_data in data['tasks'].iteritems():
                 time = task_data['time']

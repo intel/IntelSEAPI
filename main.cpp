@@ -58,9 +58,11 @@
 #define INTEL_LIBITTNOTIFY "INTEL_LIBITTNOTIFY" BIT_SUFFIX
 
 #ifdef __APPLE__ //fat binary is produced, so no bitness is suffixed to dylib name
-    #define LIB_ITT_NAME "./IntelSEAPI"
+    #define LIB_ITT_NAME "./libIntelSEAPI"
+#elif _WIN32
+	#define LIB_ITT_NAME "./IntelSEAPI" BIT_SUFFIX
 #else
-    #define LIB_ITT_NAME "./IntelSEAPI" BIT_SUFFIX
+    #define LIB_ITT_NAME "./libIntelSEAPI" BIT_SUFFIX
 #endif
 
 #ifdef _WIN32

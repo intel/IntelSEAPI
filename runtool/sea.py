@@ -18,10 +18,11 @@
 from __future__ import print_function
 import os
 import sys
+import json
 import time
 import platform
 import threading
-from ctypes import cdll, c_char_p, c_void_p, c_ulonglong, c_int, c_double, c_long, c_bool, c_short, c_wchar_p, POINTER, CFUNCTYPE
+from ctypes import cdll, c_char_p, c_void_p, c_ulonglong, c_int, c_double, c_long, c_bool, c_short, c_wchar_p, c_uint32, POINTER, CFUNCTYPE
 
 
 class Dummy:
@@ -43,6 +44,20 @@ class Task:
         self.itt.lib.itt_task_begin(self.itt.domain, self.id, self.parent, self.itt.get_string_id(self.name), 0)
         return self
 
+    def arg(self, name, value):
+        assert self.id
+        try:
+            value = float(value)
+            self.itt.lib.itt_metadata_add(self.itt.domain, self.id, self.itt.get_string_id(name), value)
+        except ValueError:
+            self.itt.lib.itt_metadata_add_str(self.itt.domain, self.id, self.itt.get_string_id(name), str(value))
+        return self
+
+    def blob(self, name, pointer, size):
+        assert self.id
+        self.itt.lib.itt_metadata_add_blob(self.itt.domain, self.id, self.itt.get_string_id(name), pointer, size)
+        return self
+
     def __exit__(self, type, value, traceback):
         self.itt.lib.itt_task_end(self.itt.domain, 0)
         return False
@@ -62,7 +77,7 @@ class Track:
         return False
 
 
-def prepare_environ(args):  # FIXME: avoid using global os.environ!
+def prepare_environ(args, recording=False):  # FIXME: avoid using global os.environ!
     bitness = '32' if '32' in platform.architecture()[0] else '64'
     env_name = 'INTEL_LIBITTNOTIFY' + bitness
     if env_name not in os.environ or 'SEAPI' not in os.environ[env_name]:
@@ -74,7 +89,11 @@ def prepare_environ(args):  # FIXME: avoid using global os.environ!
             dl_name = 'libIntelSEAPI%s.so' % bitness
 
         os.environ[env_name] = os.path.join(args.bindir, dl_name)
-    if 'INTEL_SEA_SAVE_TO' in os.environ:
+    os.environ['PATH'] = os.environ['PATH'] + os.pathsep + args.bindir
+    if recording:
+        if 'INTEL_SEA_SAVE_TO' not in os.environ and args.output:
+            os.environ['INTEL_SEA_SAVE_TO'] = os.path.join(args.output, 'pid')
+    elif 'INTEL_SEA_SAVE_TO' in os.environ:
         del os.environ['INTEL_SEA_SAVE_TO']
     return os.environ
 
@@ -124,6 +143,9 @@ class ITT:
         # void itt_metadata_add_str(void* domain, uint64_t id, void* name, const char* value)
         self.lib.itt_metadata_add_str.argtypes = [c_void_p, c_ulonglong, c_void_p, c_char_p]
 
+        # void itt_metadata_add_blob(void* domain, uint64_t id, void* name, const void* value, uint32_t size)
+        self.lib.itt_metadata_add_blob.argtypes = [c_void_p, c_ulonglong, c_void_p, c_void_p, c_uint32]
+
         # void itt_task_end(void* domain, uint64_t timestamp)
         self.lib.itt_task_end.argtypes = [c_void_p, c_ulonglong]
 
@@ -146,6 +168,10 @@ class ITT:
 
         # uint64_t itt_get_timestamp()
         self.lib.itt_get_timestamp.restype = c_ulonglong
+
+        if hasattr(self.lib, 'get_gpa_version'):
+            # const char* get_gpa_version()
+            self.lib.get_gpa_version.restype = c_char_p
 
         if sys.platform == 'win32':
             # long relog_etl(const char* szInput, const char* szOutput)
@@ -176,6 +202,24 @@ class ITT:
             # bool parse_standard_source(const char* file, get_receiver_t get_receiver, receive_t receive)
             self.lib.parse_standard_source.argtypes = [c_char_p, self.get_receiver_t, self.receive_t]
             self.lib.parse_standard_source.restype = c_bool
+        if hasattr(self.lib, 'mdapi_dump'):
+            # const char* mdapi_dump()
+            self.lib.mdapi_dump.argtypes = [c_uint32]
+            self.lib.mdapi_dump.restype = c_char_p
+
+            # void(uint32_t report, const char* name, double value)
+            self.mdapi_metric_callback_t = CFUNCTYPE(None, c_uint32, c_char_p, c_double)
+
+            # bool(const void* buff, uint32_t size, uint32_t count)
+            self.mdapi_stream_receiver_t = CFUNCTYPE(c_bool, c_void_p, c_uint32, c_uint32)
+
+            # const char * mdapi_stream(const char * szGroupName, const char * szMetricSetSymbolName, unsigned int nsTimerPeriod, uint32_t pid, CMDAPIHandler::TStreamCallback callback)
+            self.lib.mdapi_stream.argtypes = [c_char_p, c_char_p, c_uint32, c_uint32, self.mdapi_stream_receiver_t]
+            self.lib.mdapi_stream.restype = c_char_p
+
+            #const char* mdapi_decode(const char* szGroupName, const char* szMetricSetSymbolName, const void* reportsData, uint32_t size, uint32_t count, CMDAPIHandler::TMetricCallback callback)
+            self.lib.mdapi_decode.argtypes = [c_char_p, c_char_p, c_void_p, c_uint32, c_uint32, self.mdapi_metric_callback_t]
+            self.lib.mdapi_decode.restype = c_char_p
 
         self.domain = self.lib.itt_create_domain(domain)
 
@@ -262,7 +306,7 @@ class ITT:
                 return 0
             receivers.append(receiver)
             return len(receivers)  # Should be: cast(pointer(py_object(receiver)), c_void_p).value, but it doesn't work, so we return index of the array
-        
+
         return self.lib.parse_standard_source(path, self.get_receiver_t(get_receiver), self.receive_t(receive))
 
     def can_parse_standard_source(self):
@@ -294,6 +338,24 @@ class ITT:
             return os.system('sips -s format gif -z %d %d "%s" --out "%s"' % (width, height, from_path, to_path))
         else:
             os.system('convert %s -resize %dx%d %s' % (from_path, width, height, to_path))
+
+    def mdapi_dump(self, level=0xFFFFffff, raw=False):
+        if not hasattr(self.lib, 'mdapi_dump'):
+            return None
+        dump = self.lib.mdapi_dump(level)
+        if raw:
+            return dump
+        return json.loads(dump)
+
+    def mdapi_stream(self, group, metric_set, period_ns, pid, receiver):  # receiver(buff, size, count): return True
+        if not hasattr(self.lib, 'mdapi_stream'):
+            return "Unsupported"
+        return self.lib.mdapi_stream(group, metric_set, period_ns, pid, self.mdapi_stream_receiver_t(receiver))
+
+    def mdapi_decode(self, group, metric_set, buff, size, count, metric_receiver):  # metric_receiver(report, metric_name, value)
+        if not hasattr(self.lib, 'mdapi_decode'):
+            return "Unsupported"
+        return self.lib.mdapi_decode(group, metric_set, buff, size, count, self.mdapi_metric_callback_t(metric_receiver))
 
 
 def get_memory_usage(statics={}):  # in bytes

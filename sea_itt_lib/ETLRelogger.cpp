@@ -110,7 +110,7 @@ protected:
         if (liQPF.QuadPart != PerfFreq)
         {
             hr = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
-            VerbosePrint("Unsupported frequency\n", hr); return hr;
+            VerbosePrint("Unsupported frequency hr = 0x%X", hr); return hr;
         }
         m_llPerfFreq = liQPF.QuadPart;
         return S_OK;//header event gets recorded anyways
