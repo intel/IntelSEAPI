@@ -11,15 +11,21 @@ import imp
 from sea_runtool import default_tree, Callbacks, Progress, get_decoders
 
 IS_AVAILABLE = True
-try:
-    profile = imp.load_source('profile', os.path.join(os.path.dirname(os.path.realpath(__file__)), 'pprof_importer', 'profile.py'))
-    Profile, ValueType = profile.Profile, profile.ValueType
-except (ImportError, AttributeError):
-    IS_AVAILABLE = False
-    #pylint: disable=superfluous-parens
-    print("Warning! Pprof importer is unavailable. Google protobuf library should be installed.")
-    print("To get protobuf follow the link: https://github.com/google/protobuf/tree/master/python")
-    print('\n')
+profile = None
+
+
+def import_profile():
+    try:
+        global profile
+        profile = imp.load_source('profile', os.path.join(os.path.dirname(os.path.realpath(__file__)), 'pprof_importer', 'profile.py'))
+    except (ImportError, AttributeError):
+        global IS_AVAILABLE
+        IS_AVAILABLE = False
+        #pylint: disable=superfluous-parens
+        print("Warning! Pprof importer is unavailable. Google protobuf library should be installed.")
+        print("To get protobuf follow the link: https://github.com/google/protobuf/tree/master/python")
+        print('\n')
+
 
 class PprofHandler(object):
     '''
@@ -175,7 +181,7 @@ class PprofHandler(object):
 
         period_type = profile.PeriodType
         if period_type is None:
-            profile.PeriodType = ValueType()
+            profile.PeriodType = profile.ValueType()
         else:
             period_type.Type = self.get_string(profile.stringTable, period_type.typeX)
             period_type.Unit = self.get_string(profile.stringTable, period_type.unitX)
@@ -187,10 +193,13 @@ def transform_pprof(args):
     :param args: args
     :return: list of callbacks
     '''
+    import_profile()
+    if not IS_AVAILABLE:
+        return []
     tree = default_tree(args)
     tree['ring_buffer'] = True
     args.no_left_overs = True
-    prof = Profile()
+    prof = profile.Profile()
     with Callbacks(args, tree) as callbacks:
         if callbacks.is_empty():
             return callbacks.get_result()
@@ -215,7 +224,7 @@ def transform_pprof(args):
                             elif label.key == "timestamp":
                                 time = label.value[0]
                     handler.handle_record("name", pid, tid, time, duration)
-                    time += duration
+                    time += prof.Period
                     count += 1
                     if not count % 1000:
                         progress.tick(input_file.tell())
