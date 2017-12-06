@@ -43,6 +43,7 @@ except:
 
 ProgressConst = 20000
 
+TIME_SHIFT_FOR_GT = 1000
 
 def global_storage(name):
     __builtins__.setdefault('SEAPI', {})
@@ -1053,7 +1054,7 @@ class Callbacks(TaskCombinerCommon):
         for kind, data in self.tasks_from_samples.iteritems():
             for pid, threads in data.iteritems():
                 for tid, tasks in threads.iteritems():
-                    self.handle_stack(pid, tid, tasks.last_stack_time, [], kind)
+                    self.handle_stack(pid, tid, tasks.last_stack_time + TIME_SHIFT_FOR_GT * len(tasks) + 1, [], kind)
         for function in self.on_finalize_callbacks:
             function(self)
 
@@ -1571,7 +1572,7 @@ class Callbacks(TaskCombinerCommon):
                 thread = self.process(pid).thread(tid)
             for ptr in to_remove:
                 task = tasks[ptr]
-                end_time = time - 1000 * shift
+                end_time = time - TIME_SHIFT_FOR_GT * shift
                 if end_time <= task['begin']:  # this might happen on finalization and with very deep stack
                     continue
                 args = {'module': task['module'].replace('\\', '/')}
@@ -1600,7 +1601,7 @@ class Callbacks(TaskCombinerCommon):
         # Actual adding of tasks:
         shift = 1
         for task in to_add:
-            task['begin'] = time + 1000 * shift
+            task['begin'] = time + TIME_SHIFT_FOR_GT * shift
             tasks[task['ptr']] = task
             shift += 1
 
