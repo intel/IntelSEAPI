@@ -1,3 +1,11 @@
 build_win/
 *.pyc
 *.pyo
+/bin
+/.vs
+/dotnet/.vs/SEAPI/v15
+/dotnet/SEAPI/bin
+/dotnet/SEAPI/obj
+/dotnet/SEAPI_Test/bin
+/dotnet/SEAPI_Test/obj
+/dotnet/SEAPI.sln.DotSettings.user
