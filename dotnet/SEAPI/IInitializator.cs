@@ -3,5 +3,6 @@
     public interface IInitializator
     {
         void Init();
+        INative CreateNative();
     }
 }

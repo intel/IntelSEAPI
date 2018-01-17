@@ -1,12 +1,19 @@
 ﻿using System;
-using System.ComponentModel;
-using System.Runtime.Loader;
 
 namespace SEAPI
 {
-    public class InitializatorFactory
+    public static class IntelSEAPI
     {
-        public IInitializator Create()
+        public static readonly Profiler Profiler;
+
+        static IntelSEAPI()
+        {
+            var initializator = CreateInitializator();
+            initializator.Init();
+            Profiler = new Profiler(initializator.CreateNative());
+        }
+
+        private static IInitializator CreateInitializator()
         {
             switch (Environment.OSVersion.Platform)
             {

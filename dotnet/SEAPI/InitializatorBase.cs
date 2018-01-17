@@ -7,16 +7,17 @@ namespace SEAPI
 {
     internal abstract class InitializatorBase : AssemblyLoadContext, IInitializator
     {
-        public string ArhitecturePostfix { get; } = GetArhitecturePostfix();
+        protected static readonly string Bitness = GetBitness();
 
         public abstract void Init();
+        public abstract INative CreateNative();
 
         protected override Assembly Load(AssemblyName assemblyName)
         {
             return null;
         }
 
-        private static string GetArhitecturePostfix()
+        private static string GetBitness()
         {
             switch (RuntimeInformation.OSArchitecture)
             {
