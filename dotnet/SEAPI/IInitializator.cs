@@ -1,6 +1,6 @@
 ﻿namespace SEAPI
 {
-    public interface IInitializator
+    internal interface IInitializator
     {
         void Init();
         INative CreateNative();

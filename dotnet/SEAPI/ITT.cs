@@ -2,15 +2,30 @@
 
 namespace SEAPI
 {
-    public static class IntelSEAPI
+    public static class ITT
     {
-        public static readonly Profiler Profiler;
+        private static readonly Profiler Profiler;
 
-        static IntelSEAPI()
+        static ITT()
         {
             var initializator = CreateInitializator();
             initializator.Init();
             Profiler = new Profiler(initializator.CreateNative());
+        }
+
+        public static Domain CreateDomain(string name)
+        {
+            return Profiler.CreateDomain(name);
+        }
+
+        public static ulong GetTimeStamp()
+        {
+            return Profiler.GetTimeStamp();
+        }
+
+        public static Track GetTrack(string group, string name)
+        {
+            return Profiler.GetTrack(group, name);
         }
 
         private static IInitializator CreateInitializator()
