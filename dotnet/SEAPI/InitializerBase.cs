@@ -5,7 +5,7 @@ using System.Runtime.Loader;
 
 namespace SEAPI
 {
-    internal abstract class InitializatorBase : AssemblyLoadContext, IInitializator
+    internal abstract class InitializerBase : AssemblyLoadContext, IInitializer
     {
         protected static readonly string Bitness = GetBitness();
 

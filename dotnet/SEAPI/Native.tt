@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 namespace SEAPI
 {
 <#
-        var nativeLibraries = new[] {"IntelSEAPI32", "IntelSEAPI64", "libIntelSEAPI32", "libIntelSEAPI64"};
+        var nativeLibraries = new[] {"IntelSEAPI32", "IntelSEAPI64", "libIntelSEAPI32", "libIntelSEAPI64", "libIntelSEAPI"};
         foreach (var nativeLibrary in nativeLibraries)
         {
 #>
@@ -26,7 +26,7 @@ namespace SEAPI
 		[DllImport(NativeLibraryName, EntryPoint = "itt_create_string")]
 		private static extern IntPtr NativeCreateString(string name);
 
-		public override IntPtr CreateString(string name)
+		protected override IntPtr CreateString(string name)
         {
             return NativeCreateString(name);
         }

@@ -1,20 +1,19 @@
 ﻿using System;
 using System.Threading;
 using SEAPI;
-using Xunit;
 
 namespace SEAPI_Test
 {
-    public class SeapiTests
+    public static class Program
     {
-        private readonly Random _random = new Random();
+        private static readonly Random Random = new Random();
 
-        private void StartTask(Domain domain)
+        private static void StartTask(ITT domain)
         {
             using (domain.GetTask("dotnet_task"))
             {
                 Thread.Sleep(10);
-                if (_random.Next(2) != 0)
+                if (Random.Next(2) != 0)
                 {
                     StartTask(domain);
                 }
@@ -23,8 +22,7 @@ namespace SEAPI_Test
             }
         }
 
-        [Fact]
-        public void Test()
+        public static void Main(string[] args)
         {
             var domain = ITT.CreateDomain("dotnet");
             domain.Marker("Begin");

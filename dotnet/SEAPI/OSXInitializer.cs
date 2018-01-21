@@ -3,9 +3,9 @@ using System.IO;
 
 namespace SEAPI
 {
-    internal class WindowsInitializator : InitializatorBase
+    internal class OSXInitializer : InitializerBase
     {
-        private static string LibraryName { get; } = $"IntelSEAPI{Bitness}.dll";
+        private const string LibraryName = "libIntelSEAPI.dylib";
 
         public override void Init()
         {
@@ -19,17 +19,12 @@ namespace SEAPI
 
         public override INative CreateNative()
         {
-            if (Bitness == "32")
-            {
-                return new IntelSEAPI32Native();
-            }
-
-            return new IntelSEAPI64Native();
+            return new libIntelSEAPINative();
         }
 
         private static bool TryGetFromEnvironment(out string path)
         {
-            path = Environment.GetEnvironmentVariable($"INTEL_LIBITTNOTIFY{Bitness}");
+            path = Environment.GetEnvironmentVariable("DYLD_INSERT_LIBRARIES");
             return !string.IsNullOrWhiteSpace(path) && path.EndsWith(LibraryName) && File.Exists(path);
         }
 
