@@ -1,4 +1,4 @@
-Wellcome to Intel® Single Event API (Intel® SEAPI)!!
+Welcome to Intel® Single Event API (Intel® SEAPI)!
 
 Before reading further please visit wiki to see examples of visualization. https://github.com/01org/IntelSEAPI/wiki
 
