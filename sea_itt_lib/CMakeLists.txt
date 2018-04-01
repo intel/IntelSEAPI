@@ -54,17 +54,27 @@ if (WIN32)
     )
     
 elseif(APPLE)
+    set(INCLUDE_DIRS ${INCLUDE_DIRS} /usr/local/include)
+    link_directories(/usr/local/lib)
+
     set(EXTRA_SOURCE
         DTraceHandler.cpp
         IntelSEAPI.instrument
         sea_itt_lib.mm
     )
+    if (CO_PILOT)
+        set(EXTRA_SOURCE mmv_stats.cpp)
+        set(LINK_LIBS ${LINK_LIBS} pcp_mmv pcp)
+    endif()
 elseif(ANDROID)
     set(EXTRA_SOURCE
         SystraceHandler.cpp
     )
 else()
-    set(EXTRA_SOURCE)
+    if (CO_PILOT)
+        set(EXTRA_SOURCE mmv_stats.cpp)
+        set(LINK_LIBS ${LINK_LIBS} pcp_mmv pcp)
+    endif()
 endif()
 
 
@@ -189,5 +199,5 @@ target_include_directories(sea_itt_lib PUBLIC
     ${PROJECT_BINARY_DIR}
 )
 
-TARGET_LINK_LIBRARIES(sea_itt_lib ittnotify)
+TARGET_LINK_LIBRARIES(sea_itt_lib ittnotify ${LINK_LIBS})
 

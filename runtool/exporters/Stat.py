@@ -1,6 +1,7 @@
 import cgi
 from sea_runtool import GraphCombiner
 
+
 class Stat(GraphCombiner):
     def __init__(self, args, tree):
         GraphCombiner.__init__(self, args, tree)

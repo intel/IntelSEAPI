@@ -45,10 +45,17 @@ ProgressConst = 20000
 
 TIME_SHIFT_FOR_GT = 1000
 
-def global_storage(name):
-    __builtins__.setdefault('SEAPI', {})
-    __builtins__['SEAPI'].setdefault(name, {})
-    return __builtins__['SEAPI'][name]
+def global_storage(name, default={}):
+    if isinstance(__builtins__, dict):
+        __builtins__.setdefault('SEAPI', {})
+        __builtins__['SEAPI'].setdefault(name, default)
+        return __builtins__['SEAPI'][name]
+    else:  # pypy
+        if not hasattr(__builtins__, 'SEAPI'):
+            setattr(__builtins__, 'SEAPI', {})
+        seapi = getattr(__builtins__, 'SEAPI', None)
+        seapi.setdefault(name, default)
+        return seapi[name]
 
 
 def format_time(time):
@@ -99,7 +106,7 @@ def get_extensions(name, multiple=False):
     root = os.path.join(os.path.dirname(os.path.realpath(__file__)), name + 's')
     for extension in glob(os.path.join(root, '*.py')):
         module = imp.load_source(os.path.splitext(os.path.basename(extension))[0], extension)
-        for desc in getattr(module, name.upper() + '_DESCRIPTORS'):
+        for desc in getattr(module, name.upper() + '_DESCRIPTORS', []):
             if desc['available']:
                 if multiple:
                     extensions.setdefault(desc['format'], []).append(desc[name])
@@ -166,10 +173,23 @@ def parse_args(args):
     parser.add_argument("--remove_args", action="store_true", help='Deflates trace by removing arguments')
     parser.add_argument("--rem", help="Comment out: Allows to put everything you don't need")
     parser.add_argument("--no_left_overs", action="store_true", help='Disables automatic prolongation of unfinished events to the end of the trace')
+    parser.add_argument("--counter_set", default='OA.RenderBasic', help='gpu counter set, set into none to disable')
+    parser.add_argument("--memory_limit", type=int, default=0, help='Sets minimal memory counter threshold (in bytes). Helps opening huge memory traces.')
+    parser.add_argument("--gpu_samples", action="store_true")
+    parser.add_argument("--hotspots", action="store_true")
+    parser.add_argument("--no_catapult", action="store_true")
 
     if "!" in args:
         separator = args.index("!")
         parsed_args = parser.parse_args(args[:separator])
+        if parsed_args.input:
+            parser.print_help()
+            print "Error: Input argument (-i) contradicts launch mode"
+            sys.exit(-1)
+        if not parsed_args.output:
+            parser.print_help()
+            print "Error: No output (-o) given in launch mode"
+            sys.exit(-1)
         victim = args[separator + 1:]
         victim[-1] = victim[-1].strip()  # removal of trailing '\r' - when launched from .sh
         handle_args(parsed_args)
@@ -256,7 +276,7 @@ class Remote:
     def execute(self, cmd):
         command = '%s "%s"' % (self.execute_prefix, cmd)
         if self.args.verbose:
-            print command
+            print "command:", command
         out, err = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
         if err:
             print "Error:", err
@@ -372,6 +392,8 @@ def launch(args, victim):
     env["INTEL_SEA_FEATURES"] = os.environ['INTEL_SEA_FEATURES'] if os.environ.has_key('INTEL_SEA_FEATURES') else ""
     env["INTEL_SEA_FEATURES"] += (" " + str(args.format)) if args.format else ""
     env["INTEL_SEA_FEATURES"] += " stacks" if args.stacks else ""
+    env["INTEL_SEA_FEATURES"] += " memcount|memstat" if args.memory else ""
+
     if args.ring:
         env["INTEL_SEA_RING"] = str(args.ring)
 
@@ -418,10 +440,12 @@ def launch(args, victim):
         if os.path.exists(full_victim):
             victim[0] = full_victim
 
-    try:
-        mdapi = MDAPI.MDAPIPump(args, 'OA.RenderBasic', 1000, 0)  # proc.pid
-    except:
-        mdapi = None
+    mdapi = None
+    if not args.gpu_samples:  # gpu_samples are based on Telemetry which is mutually exclusive to MDAPI collection
+        try:
+            mdapi = MDAPI.MDAPIPump(args, args.counter_set, 1000, 0)  # proc.pid
+        except:
+            Collector.log("Failed to init MDAPI: " + traceback.format_exc())
 
     if run_suspended:
         suspended = '(cd "%s"; kill -STOP $$; exec %s )' % (args.dir or '.', ' '.join(victim))
@@ -448,9 +472,12 @@ def launch(args, victim):
             import signal
             os.kill(proc.pid, signal.SIGCONT)
 
-    print "Waiting application to exit..."
-    proc.wait()
-    print "Stopping collectors..."
+    try:
+        print "Waiting application to exit..."
+        proc.wait()
+        print "Stopping collectors..."
+    except KeyboardInterrupt:
+        os.kill(proc.pid, signal.SIGABRT)
 
     if tracer:
         args.trace = tracer.stop()
@@ -466,17 +493,22 @@ def launch(args, victim):
         args.input = "%s-%d" % (args.output, proc.pid)
     else:
         args.input = args.output
+
     return transform_all(args)
 
 
 def transform_all(args):
-    if not args.trace:  # no itt trace
-        args.trace = []
-        importers = get_importers()
-        for ext in importers.iterkeys():
-            for file in glob(os.path.join(args.input, '*.' + ext)):
-                if not any(sub in file for sub in ['.etl.', '.dtrace.', 'merged.']):
-                    args.trace.append(file)
+
+    traces = set(args.trace if args.trace else [])
+
+    importers = get_importers()
+    for ext in importers.iterkeys():
+        for file in glob(os.path.join(args.input, '*.' + ext)):
+            if not any(sub in file for sub in ['.etl.', '.dtrace.', 'merged.']):
+                traces.add(file)
+
+    args.trace = list(traces)
+
     if not args.single:
         multi_out = []
         saved_output = args.output
@@ -487,9 +519,8 @@ def transform_all(args):
                 args.input = folder
                 args.output = saved_output + '.' + os.path.basename(folder)
                 multi_out += transform(args)
-                if multi_out:
-                    args.trace = None
-        else:
+
+        if args.trace:
             traces = args.trace[:]
             args.trace = None
             for trace in traces:
@@ -506,8 +537,10 @@ def transform_all(args):
 
     replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
     for path in output:
-        print os.path.abspath(path).replace(*replacement)
+        print os.path.abspath(path).replace(*replacement), format_bytes(os.path.getsize(path))
 
+    save_domains()
+    print "limits:", Callbacks.get_globals()['limits']
     return output
 
 
@@ -516,6 +549,12 @@ def join_gt_output(args, output):
     if google_traces:
         res = get_exporters()['gt'].join_traces(google_traces, args.output, args)
         output = list(set(output) - set(google_traces)) + [res]
+
+    db_traces = [item for item in output if os.path.splitext(item)[1] == '.db']
+    if db_traces:
+        res = get_exporters()['db'].join_traces(db_traces, args.output, args)
+        output = list(set(output) - set(db_traces)) + [res]
+
     return output
 
 
@@ -661,6 +700,7 @@ class Progress:
         self.message = message
         if verbose_progress:
             print message, "[",
+            sys.stdout.flush()
 
     def __enter__(self):
         return self
@@ -676,6 +716,7 @@ class Progress:
             if verbose_progress:
                 for i in range(show_steps - self.shown_steps):
                     print ".",
+                    sys.stdout.flush()
             self.shown_steps = show_steps
 
     def __exit__(self, type, value, traceback):
@@ -779,11 +820,21 @@ class TaskCombinerCommon:
         self.memory = {}
         self.total_memory = 0
         self.prev_memory = None
+        self.memcounters = {}
 
     def finish(self):
         self.handle_leftovers()
+        self.check_leaks()
+
+    def check_leaks(self):
+        if not self.prev_memory:
+            return
+        args = dict([(size, int(count)) for size, count in self.memory.iteritems() if size and int(count)])
+        self.process(self.prev_memory['pid']).thread(-1).marker('process', 'Memory Leaks (block size, count)').set(self.prev_memory['time'], args)
+
 
     def handle_leftovers(self):
+        self.flush_compressed_counters()
         if self.args.no_left_overs:
             return
         for end in self.no_begin:
@@ -867,8 +918,7 @@ class TaskCombinerCommon:
                 end = data.copy()
                 end['time'] = data['time'] + int(data['delta'])
                 self.time_bounds[1] = max(self.time_bounds[1], end['time'])
-                if not self.handle_special('task', data, end):
-                    self.complete_task('task', data, end)  # for now arguments are not supported in turbo tasks. Once argument is passed, task gets converted to normal.
+                self.complete_task('task', data, end)  # for now arguments are not supported in turbo tasks. Once argument is passed, task gets converted to normal.
             else:
                 get_tasks(None if fn == "task_begin" else data['id']).append(data)
         elif fn == "task_end" or fn == "task_end_overlapped":
@@ -957,12 +1007,22 @@ class TaskCombinerCommon:
                         for parent in stack[:-1]:
                             values = parent.setdefault('memory', {None: 0})
                             values[None] += delta * size
+                    # Total memory:
+                    if not self.args.min_dur or (self.prev_memory is None) or (data['time'] - self.prev_memory['time'] > self.args.min_dur * 10000):
+                        total = data.copy()
+                        total['str'] = "CRT:Memory:Total(bytes)"
+                        total['delta'] = self.total_memory
+                        self.complete_task(fn, total, total)
+                        self.prev_memory = total
                     if self.args.memory == "total":
-                        if (self.prev_memory is None) or ((self.convert_time(data['time']) - self.convert_time(self.prev_memory['time'])) > self.args.min_dur * 10):
-                            data['str'] = "CRT:Memory:Total(bytes)"
-                            data['delta'] = self.total_memory
-                            self.complete_task(fn, data, data)
-                            self.prev_memory = data
+                        return
+                    if self.args.memory_limit > data['delta'] * size:
+                        return
+                    if self.args.min_dur:  # trim counters
+                        cache = self.memcounters.setdefault(data['pid'], {}).setdefault(data['tid'], {}).setdefault(data['str'], {'last': None, 'values': []})
+                        values = cache['values']
+                        self.compress_counter(cache, data)
+                        values.append(data)
                         return
                 if data.has_key('id') and thread['args'].has_key(data['id']):
                     data['args'] = thread['args'][data['id']]
@@ -976,6 +1036,17 @@ class TaskCombinerCommon:
             )
         else:
             assert (not "Unsupported type:" + fn)
+
+    def compress_counter(self, cache, data):
+        values = cache['values']
+        if values and (not data or data['time'] - values[0]['time'] > self.args.min_dur * 10000):
+            length = len(values)
+            avg_value = sum([value['delta'] for value in values]) / length
+            if cache['last'] != avg_value:
+                avg_time = int(sum([value['time'] for value in values]) / length)
+                self.process(values[0]['pid']).thread(values[0]['tid']).counter(values[0]['str']).set_value(avg_time, avg_value)
+                cache['last'] = avg_value
+            cache['values'] = []
 
     def handle_special(self, kind, begin, end):
         if self.sea_decoders:
@@ -992,6 +1063,12 @@ class TaskCombinerCommon:
             common_data['delta'] = sum(counter['values']) / len(counter['values'])
             self.complete_task('counter', common_data, common_data)
 
+    def flush_compressed_counters(self):
+        for pid, threads in self.memcounters.iteritems():
+            for tid, counters in threads.iteritems():
+                for name, counter in counters.iteritems():
+                    self.compress_counter(counter, None)
+
 
 class Callbacks(TaskCombinerCommon):
     event_filter = None
@@ -1000,6 +1077,7 @@ class Callbacks(TaskCombinerCommon):
     def __init__(self, args, tree):
         TaskCombinerCommon.__init__(self, args, tree)
         self.callbacks = []  # while parsing we might have one to many 'listeners' - output format writers
+        self.stack_sniffers = [] # only stack listeners
         self.limits = Callbacks.parse_limits(getattr(self.args, 'limit', None))
         self.allowed_pids = set()
         self.processes = {}
@@ -1021,9 +1099,19 @@ class Callbacks(TaskCombinerCommon):
                 try:
                     instance = decoder(args, self)
                 except RuntimeError:
+                    Collector.log("Failed to init decoder: " + traceback.format_exc())
                     instance = None
                 if instance:
                     self.sea_decoders.append(instance)
+
+        self.globals = self.get_globals()
+
+    @classmethod
+    def get_globals(cls):
+        return global_storage('Callbacks', {'limits': [None, None]})
+
+    def add_stack_sniffer(self, sniffer):
+        self.stack_sniffers.append(sniffer)
 
     @classmethod
     def set_event_filter(cls, filter):
@@ -1057,25 +1145,36 @@ class Callbacks(TaskCombinerCommon):
                     self.handle_stack(pid, tid, tasks.last_stack_time + TIME_SHIFT_FOR_GT * len(tasks) + 1, [], kind)
         for function in self.on_finalize_callbacks:
             function(self)
+        self.finish()
 
     def on_event(self, type, data):
         if self.event_filter:
             type, data, end = self.event_filter(type, data, None)
             if not type:
                 return False
-        if self.check_pid_allowed(data['pid']) and self.check_time_in_limits(data['time']):
-            if self.args.remove_args and 'args' in data:
-                del data['args']
-            self.__call__(type, data)
-            return True
-        else:
+
+        if not self.check_pid_allowed(data['pid']) or not self.check_time_in_limits(data['time']):
             return False
+
+        if not is_domain_enabled(data['domain']):
+            return False
+
+        if data.get('internal_name', None) and not is_domain_enabled('%s.%s' % (data['domain'], data['internal_name'])):
+            return False
+
+        if self.args.remove_args and 'args' in data:
+            del data['args']
+        self.__call__(type, data)
+        return True
 
     def complete_task(self, type, begin, end):
         if self.event_filter:
             type, begin, end = self.event_filter(type, begin, end)
             if not type:
                 return False
+        if self.handle_special(type, begin, end):  # returns True if event is consumed and doesn't require processing
+            return True
+
         if self.check_pid_allowed(begin['pid']) and (self.check_time_in_limits(begin['time']) or (end and self.check_time_in_limits(end['time']))):
             if self.args.remove_args:
                 if 'args' in begin:
@@ -1108,7 +1207,11 @@ class Callbacks(TaskCombinerCommon):
         return False
 
     def check_time_in_limits(self, time):
+        assert time > 0
+        limits = self.globals['limits']
         left, right = self.limits
+        limits[0] = min(time, limits[0]) if limits[0] is not None else time
+        limits[1] = max(time, limits[1]) if limits[1] is not None else time
         if left is not None and time < left:
             return False
         if right is not None and time > right:
@@ -1218,10 +1321,11 @@ class Callbacks(TaskCombinerCommon):
                 self.process.callbacks.set_thread_name(self.process.pid, self.tid, name)
 
             class EventBase:
-                def __init__(self, thread, name, domain):
+                def __init__(self, thread, name, domain, internal_name=None):
                     self.thread = thread
                     self.name = name
                     self.domain = domain
+                    self.internal_name = internal_name
 
             class Counter(EventBase):
                 def __init__(self, *args):
@@ -1231,7 +1335,8 @@ class Callbacks(TaskCombinerCommon):
                     data = {
                         'pid': self.thread.process.pid, 'tid': self.thread.tid,
                         'domain': self.domain, 'str': self.name,
-                        'time': time_stamp, 'delta': value, 'type': 6
+                        'time': time_stamp, 'delta': value, 'type': 6,
+                        'internal_name': self.internal_name
                     }
                     self.thread.process.callbacks.on_event('counter', data)
 
@@ -1243,8 +1348,8 @@ class Callbacks(TaskCombinerCommon):
                     }
                     self.thread.process.callbacks.on_event('counter', data)
 
-            def counter(self, name, domain='sea'):
-                return Callbacks.Process.Thread.Counter(self, name, domain)
+            def counter(self, name, domain='sea', internal_name=None):
+                return Callbacks.Process.Thread.Counter(self, name, domain, internal_name)
 
             class Marker(EventBase):
                 def __init__(self, thread, scope, name, domain):
@@ -1502,19 +1607,21 @@ class Callbacks(TaskCombinerCommon):
         statics['marker'].set(time_stamp, args)
 
     def context_switch(self, time_stamp, cpu, prev_tid, next_tid, prev_name='', next_name='', prev_state='S', prev_prio=0, next_prio=0, statics={}):
-        if not statics:
-            statics['cs'] = None
-            for callback in self.callbacks:
-                if 'ContextSwitch' in dir(callback):
-                    statics['cs'] = callback.ContextSwitch(callback, self.args.input)
-        if not statics['cs']:
-            return
-        statics['cs'].write(
-            time_stamp, cpu,
-            prev_tid, prev_state, next_tid,
-            prev_prio, next_prio,
-            prev_name.replace(' ', '_'), next_name.replace(' ', '_')
-        )
+        for callback in self.callbacks:
+            callback.context_switch(
+                time_stamp, cpu,
+                {
+                    'tid': prev_tid,
+                    'name': prev_name.replace(' ', '_'),
+                    'state': prev_state,
+                    'prio': prev_prio,
+                },
+                {
+                    'tid': next_tid,
+                    'prio': next_prio,
+                    'name': next_name.replace(' ', '_')
+                }
+            )
 
     def set_process_name(self, pid, name, labels=[]):
         self.__call__("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': pid, 'tid': -1, 'delta': pid, 'data': name, 'labels': labels})
@@ -1605,8 +1712,9 @@ class Callbacks(TaskCombinerCommon):
             tasks[task['ptr']] = task
             shift += 1
 
-        for callback in self.callbacks:
+        for callback in self.callbacks + self.stack_sniffers:
             callback.handle_stack({'pid': pid, 'tid': tid, 'time': time}, stack, kind)
+
 
 
 # example:
@@ -2054,7 +2162,10 @@ class TaskCombiner:
         pass
 
     def handle_stack(self, task, stack, name='stack'):
-        return
+        pass
+
+    def context_switch(self, time, cpu, prev, next):
+        pass
 
 
 def to_hex(value):
@@ -2072,6 +2183,40 @@ def get_name(begin):
 
 def subst_env_vars(path):
     return os.path.expandvars(path) if sys.platform == 'win32' else os.path.expanduser(path)
+
+
+def is_domain_enabled(domain, default=True):
+    if not hasattr(is_domain_enabled, 'domains'):
+        is_domain_enabled.domains = global_storage('sea.is_domain_enabled', {})
+        filter = os.environ.get('INTEL_SEA_FILTER')
+        if filter:
+            filter = subst_env_vars(filter)
+            try:
+                with open(filter) as file:
+                    for line in file:
+                        is_domain_enabled.domains[line.strip(' #\n\r').lower()] = not line.startswith('#')
+            except IOError:
+                pass
+    domain = domain.lower()
+    if domain not in is_domain_enabled.domains:
+        is_domain_enabled.domains[domain] = default
+    return is_domain_enabled.domains[domain]
+
+
+def save_domains():
+    if not hasattr(is_domain_enabled, 'domains'):
+        return
+    if not is_domain_enabled.domains:
+        return
+
+    filter = os.environ.get('INTEL_SEA_FILTER')
+    if not filter:
+        return
+
+    filter = subst_env_vars(filter)
+    with open(filter, 'w') as file:
+        for key, value in is_domain_enabled.domains.iteritems():
+            file.write('%s%s\n' % ('#' if not value else '', key))
 
 
 class GraphCombiner(TaskCombiner):
@@ -2150,20 +2295,22 @@ class GraphCombiner(TaskCombiner):
         for tid, orphans in self.per_thread.iteritems():
             last_time = 0
             for orphan in orphans:
-                assert(orphan[1]['time'] > last_time)
+                if (orphan[1]['time'] < last_time):
+                    print "FIXME: orphan[1]['time'] < last_time"
                 last_time = orphan[1]['time']
                 begin = orphan[0]
                 self.add_relation({'label': 'executes', 'from': self.make_id("threads", str(tid)),
                                    'to': self.make_id(begin['domain'], self.get_name_ex(begin)), 'color': 'gray'})
 
-    def make_id(self, domain, name):
+    @staticmethod
+    def make_id(domain, name):
         import re
         res = "%s_%s" % (domain, name)
         return re.sub("[^a-z0-9]", "_", res.lower())
 
     def relation(self, data, head, tail):
         if head and tail:
-            self.add_relation({'label': self.get_name_ex(data['str']), 'from': self.make_id(head['domain'], self.get_name_ex(head['str'])), 'to': self.make_id(tail['domain'], self.get_name_ex(tail['str'])), 'color': 'red'})
+            self.add_relation({'label': self.get_name_ex(data), 'from': self.make_id(head['domain'], self.get_name_ex(head)), 'to': self.make_id(tail['domain'], self.get_name_ex(tail)), 'color': 'red'})
 
     def add_relation(self, relation):
         key = frozenset(relation.iteritems())
@@ -2186,6 +2333,7 @@ class GraphCombiner(TaskCombiner):
             parent = frame.copy()
             parent.update({'name': name})
 
+
 class Collector:
     output = sys.stdout
 
@@ -2205,7 +2353,7 @@ class Collector:
             cls.output.write(msg + '\n')
 
     @classmethod
-    def execute(cls, cmd, **kwargs):
+    def execute(cls, cmd, log=True, **kwargs):
         start_time = time.time()
         if 'stdout' not in kwargs:
             kwargs['stdout'] = subprocess.PIPE
@@ -2220,7 +2368,8 @@ class Collector:
         cls.log("Environment: %s" % json.dumps(env.data, sort_keys=True, indent=4, separators=(',', ': ')))
         """
         (out, err) = subprocess.Popen(cmd, shell=True, **kwargs).communicate()
-        cls.log("\ncmd:\t%s:\nout:\t%s\nerr:\t%s\ntime: %s" % (cmd, str(out).strip(), str(err).strip(), str(timedelta(seconds=(time.time() - start_time)))), err)
+        if log:
+            cls.log("\ncmd:\t%s:\nout:\t%s\nerr:\t%s\ntime: %s" % (cmd, str(out).strip(), str(err).strip(), str(timedelta(seconds=(time.time() - start_time)))), err)
         return out, err
 
     @classmethod
@@ -2255,6 +2404,7 @@ class Collector:
             if line:
                 instances.append(line)
         return instances
+
 
 if __name__ == "__main__":
     start_time = time.time()

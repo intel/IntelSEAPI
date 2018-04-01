@@ -1,7 +1,8 @@
 import os
 import sys
+import glob
 import codecs
-from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_exporters, get_decoders
+from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_exporters, get_decoders, get_importers, format_bytes
 sys.path.append(os.path.realpath(os.path.dirname(__file__)))  # weird CentOS behaviour workaround
 from etw import GPUQueue
 
@@ -32,6 +33,31 @@ class DTrace(GPUQueue):
             for decoder in decoders['dtrace']:
                 self.decoders.append(decoder(args, callbacks))
 
+        self.read_system_info()
+
+    def read_system_info(self):
+        path = os.path.join(self.args.user_input, 'sysinfo.txt')
+        if not os.path.exists(path):
+            return
+        sys_info = {}
+        with open(path) as file:
+            for line in file:
+                if not line.strip():
+                    continue
+                key, value = line.split(":", 1)
+                subkeys = key.split(".")
+                current = sys_info
+                for subkey in subkeys:
+                    prev = current
+                    current = current.setdefault(subkey, {})
+                value = value.strip()
+                try:
+                    value = eval(value)
+                except:
+                    pass
+                prev[subkey] = value
+        self.callbacks.add_metadata('SysInfo', sys_info)
+
     def add_tid_name(self, tid, name):
         if tid == 0:
             return
@@ -57,12 +83,11 @@ class DTrace(GPUQueue):
                 next_tid = '0'
             prev_tid = int(prev_tid, 16)
             next_tid = int(next_tid, 16)
-            self.cs.write(
-                time=time, cpu=int(cpu, 16),
+
+            self.callbacks.context_switch(time, int(cpu, 16),
                 prev_tid=prev_tid, prev_state='S', next_tid=next_tid,
                 prev_prio=int(prev_prio, 16), next_prio=int(next_prio, 16),
-                prev_name=prev_name.replace(' ', '_'), next_name=next_name.replace(' ', '_')
-            )
+                prev_name=prev_name.replace(' ', '_'), next_name=next_name.replace(' ', '_'))
             self.add_tid_name(prev_tid, prev_name)
             self.add_tid_name(next_tid, next_name)
         elif cmd.startswith('dtHook'):
@@ -96,7 +121,7 @@ class DTrace(GPUQueue):
         for frame in stack:
             if '`' in frame:
                 module, name = frame.split('`', 1)
-                parsed.append({'ptr': hash(name), 'module': module, 'str': name})
+                parsed.append({'ptr': hash(name), 'module': module.strip(), 'str': name.strip()})
             else:
                 parsed.append({'ptr': int(frame, 16), 'module': '', 'str': ''})
         self.callbacks.handle_stack(pid, tid, time, parsed, kind)
@@ -171,7 +196,7 @@ class DTrace(GPUQueue):
         stamps = self.event_tracker.setdefault((ring_type, channel), {})
         latest_stamp = int(latest_stamp, 16)
         to_del = set(stamp for stamp in stamps.iterkeys() if stamp <= latest_stamp)
-        if len(to_del) < 100:  # in old driver with GuC the CompleteExecute might be called so rar that it is not reliable at all
+        if len(to_del) < 100:  # in old driver the CompleteExecute might be called so rare that it is not reliable at all
             for stamp, stages in stamps.iteritems():
                 if stamp <= latest_stamp:
                     verbose = ['%s(%s) %d:' % (ring_type, channel, stamp)]
@@ -194,7 +219,7 @@ class DTrace(GPUQueue):
                     else:
                         verbose.append(data['cmd'])
                     if self.args.verbose:
-                        print ' '.join(verbose)
+                        print 'verbose:', ' '.join(verbose)
                     if not changed_context:  # not sure what TODO with it yet
                         task = self.complete_gpu(stages[-1], data, ctx_type, old_ctx_id)
                         found_submit = False
@@ -212,14 +237,14 @@ class DTrace(GPUQueue):
 
     def complete_gpu(self, submit, complete, ctx_type, ctx_id):
         task = self.callbacks.process(-1).thread(int(ctx_id, 16))\
-            .task('%s-%s: %s' % (self.map_ring_type(submit['ring_type']), int(submit['channel'], 16), submit['stamp']))\
+            .task('%s-%s: %s' % (self.map_ring_type(submit['ring_type']), int(submit['channel'], 16), submit['stamp']), 'dth')\
             .begin(submit['time'])
         task.end_overlap(complete['time'])
         return task
 
     def complete_cpu(self, submit, complete, ctx_type, ctx_id, gpu):
         task = self.callbacks.process(submit['pid']).thread(-int(submit['channel'], 16), '%s ring' % self.map_ring_type(submit['ring_type']))\
-            .task('%s-%s: %s' % (ctx_type, int(ctx_id, 16), submit['stamp']))\
+            .task('%s-%s: %s' % (ctx_type, int(ctx_id, 16), submit['stamp']), 'dth')\
             .begin(submit['time'])
         task.relate(gpu)
         task.end_overlap(complete['time'])
@@ -301,17 +326,20 @@ class DTrace(GPUQueue):
             cpu_time, ctx_id, ring_type, channel, stamp = args
             cpu_time = int(cpu_time, 16)
             if not cpu_time:
-                print "Warning: zero timestamp: ", cmd, args
+                if self.args.debug:
+                    print "Warning: zero timestamp: ", cmd, args
                 return
             thread = self.callbacks.process(-1).thread(int(ctx_id, 16))
-            thread.task_pool[(ring_type, channel, stamp)] = thread.task("ACTUAL").begin(cpu_time, args={
-                'ring': self.map_ring_type(ring_type), 'stamp': stamp, 'channel': int(channel, 16), 'ctx_id': int(ctx_id, 16)
+            ring = self.map_ring_type(ring_type)
+            thread.task_pool[(ring_type, channel, stamp)] = thread.task("GPU:" + ring, 'dth').begin(cpu_time, args={
+                'ring': ring, 'stamp': stamp, 'channel': int(channel, 16), 'ctx_id': int(ctx_id, 16)
             })
         elif 'EndExecOnGPU' == cmd:
             cpu_time, ctx_id, ring_type, channel, stamp = args
             cpu_time = int(cpu_time, 16)
             if not cpu_time:
-                print "Warning: zero timestamp: ", cmd, args
+                if self.args.debug:
+                    print "Warning: zero timestamp: ", cmd, args
                 return
             thread = self.callbacks.process(-1).thread(int(ctx_id, 16))
             if (ring_type, channel, stamp) in thread.task_pool:
@@ -355,7 +383,8 @@ def transform_dtrace(args):
         if callbacks.is_empty():
             return callbacks.get_result()
         dtrace = DTrace(args, gt, callbacks)
-        with Progress(os.path.getsize(args.input), 50, "Parsing: " + os.path.basename(args.input)) as progress:
+        size = os.path.getsize(args.input)
+        with Progress(size, 50, "Parsing: %s (%s)" % (os.path.basename(args.input), format_bytes(size))) as progress:
             count = 0
             with codecs.open(args.input, 'r', 'utf-8', errors='ignore') as file:
                 reading_stack = None

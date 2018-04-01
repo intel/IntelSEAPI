@@ -1,4 +1,4 @@
-#   Intel® Single Event API
+﻿#   Intel® Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
 #   Copyright (c) 2015, Intel Corporation
@@ -21,6 +21,7 @@ project(IntelSEAPI)
 
 set(CMAKE_MACOSX_RPATH 1)
 OPTION(JDK "Enable Java build")
+OPTION(CO_PILOT "Enable co-pilot build")
 OPTION(FORCE_32 "Force a 32bit compile on 64bit" OFF)
 
 if (ANDROID_ARCH_NAME MATCHES "arm\\.*")

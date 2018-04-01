@@ -43,6 +43,11 @@ class GoogleTrace(TaskCombiner):
             ftrace = "%s-%d [%03d] .... %.6f: sched_switch: prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s ==> next_comm=%s next_pid=%d next_prio=%d\n" % args
             self.ftrace.write(ftrace)
 
+    def context_switch(self, time, cpu, prev, next):
+        if not self.cs:
+            self.cs = GoogleTrace.ContextSwitch(self, self.args.input)
+        self.cs.write(time, cpu, prev['tid'], prev['state'], next['tid'], prev['prio'], next['prio'], prev['name'], next['name'])
+
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, args, tree)
         self.size_keeper = None
@@ -54,28 +59,35 @@ class GoogleTrace(TaskCombiner):
         self.last_task = None
         self.metadata = {}
         self.last_relation_id = 0
+        self.cs = None
         if self.args.trace:
+            handled = []
             for trace in self.args.trace:
                 if not os.path.exists(trace):
                     print "Error: File not found:", trace
                     continue
                 if trace.endswith(".etl"):
                     self.handle_etw_trace(trace)
+                    handled.append(trace)
                 elif trace.endswith(".ftrace"):
                     self.handle_ftrace(trace)
+                    handled.append(trace)
                 elif trace.endswith(".dtrace"):
                     self.handle_dtrace(trace)
+                    handled.append(trace)
                 elif trace.endswith(".perf"):
                     self.handle_perf(trace)
+                    handled.append(trace)
                 else:
                     print "Error: unsupported extension:", trace
+                args.trace = [trace for trace in args.trace if trace not in handled]
         self.start_new_trace()
 
     def start_new_trace(self):
         self.targets.append("%s-%d.json" % (self.args.output, self.trace_number))
         self.trace_number += 1
         self.file = codecs.open(self.targets[-1], "wb+", 'utf-8')
-        self.file.write('{\n"traceEvents": [\n')
+        self.file.write('{\n"traceEvents": [\n\n')  # second \n is for the rare case when there are no events, and finish cuts last two symbols
 
         for key, value in self.tree["threads"].iteritems():
             pid_tid = key.split(',')
@@ -275,6 +287,21 @@ class GoogleTrace(TaskCombiner):
             pass
         return '"%s"' % unicode(arg).encode('ascii', 'ignore').strip().replace("\\", "\\\\").replace('"', '\\"').replace('\n', '\\n')
 
+    def format_args(self, arg):  # this function must add quotes if value is string, and not number/float, do this recursively for dictionary
+        if type(arg) == type({}):
+            return dict([(key, self.format_args(value)) for key, value in arg.iteritems()])
+        try:
+            val = float(arg)
+            if float('inf') != val:
+                if val.is_integer():
+                    return int(val)
+                else:
+                    return val
+        except:
+            pass
+        return arg.strip()
+
+
     Phase = {'task': 'X', 'counter': 'C', 'marker': 'i', 'object_new': 'N', 'object_snapshot': 'O', 'object_delete': 'D', 'frame': 'X'}
 
     def complete_task(self, type, begin, end):
@@ -300,7 +327,7 @@ class GoogleTrace(TaskCombiner):
         if not res:
             return
         if type in ['task', 'counter'] and 'data' in begin and 'str' in begin:  # FIXME: move closer to the place where stack is demanded
-            self.handle_stack(begin, resolve_stack(self.args, self.tree, begin['data']), begin['str'])
+            self.handle_stack(begin, resolve_stack(self.args, self.tree, begin['data']), '%s:%s' % (begin['domain'], type))
         if self.args.debug and begin['type'] != 7:
             res = "".join(res)
             try:
@@ -309,6 +336,7 @@ class GoogleTrace(TaskCombiner):
                 import traceback
                 print "\n" + exc.message + ":\n" + res + "\n"
                 traceback.print_stack()
+                self.format_task(GoogleTrace.Phase[type], type, begin, end)
             res += ',\n'
         else:
             res = "".join(res + [',\n'])
@@ -433,7 +461,7 @@ class GoogleTrace(TaskCombiner):
             args['CRT:Memory(size,count)'] = breakdown
         if args:
             res.append(', "args":')
-            res.append(self.format_value(args))
+            res.append(json.dumps(self.format_args(args), ensure_ascii=False))
         res.append('}')
         return res
 
@@ -478,6 +506,8 @@ class GoogleTrace(TaskCombiner):
 
     @staticmethod
     def get_catapult_path(args):
+        if args.no_catapult:
+            return None
         if 'INTEL_SEA_CATAPULT' in os.environ and os.path.exists(os.environ['INTEL_SEA_CATAPULT']):
             return os.environ['INTEL_SEA_CATAPULT']
         else:

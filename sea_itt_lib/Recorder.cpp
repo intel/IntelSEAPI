@@ -87,7 +87,7 @@ size_t CRecorder::CheckCapacity(size_t size)
     size_t nWroteBytes = (char*)m_pCurPos - (char*)m_memmap->GetPtr();
     if (nWroteBytes + size > m_memmap->GetSize())
     {
-        m_pCurPos = m_memmap->Remap(ChunkSize, m_nWroteTotal);
+        m_pCurPos = m_memmap->Remap((std::max)(ChunkSize, size), m_nWroteTotal);
 #ifdef TURBO_MODE
         sea::GetThreadRecord()->nMemMoveCounter += 1;
 #endif
@@ -641,7 +641,10 @@ bool InitMemStat()
 
 bool WriteMemStat(const void* buff, size_t size)
 {
-    return -1 != write(g_mem_fd, buff, (unsigned int)size);
+    if (g_mem_fd > -1)
+        return -1 != write(g_mem_fd, buff, (unsigned int)size);
+    else
+        return false;
 }
 
 } //namespace sea

@@ -108,11 +108,17 @@ if sys.platform == 'win32':
 
 
 def locate_exact(what):
-    items = subprocess.check_output(['locate', what]).decode("utf-8").split('\n')
+    try:
+        items = subprocess.check_output(['locate', what]).decode("utf-8").split('\n')
+    except Exception:
+        return []
     return [item for item in items if item.endswith(what)]
 
 def find_in(locations, what):
-    items = subprocess.check_output(['find'] + locations + ['-name', what]).decode("utf-8").split('\n')
+    try:
+        items = subprocess.check_output(['find'] + locations + ['-name', what]).decode("utf-8").split('\n')
+    except Exception:
+        return []
     return [item for item in items if item.endswith(what)]
 
 def GetJDKPath():
@@ -227,6 +233,9 @@ def main():
     jdk_path = GetJDKPath() if not args.no_java else None
     print("Found JDK:", jdk_path)
 
+    perf_co_pilot = find_in(['/usr/lib', '/usr/local/lib'], 'libpcp_mmv.a') if sys.platform != 'win32' else None
+    print("Found co-pilot:", perf_co_pilot)
+
     work_dir = os.getcwd()
     print(work_dir)
     if args.clean:
@@ -255,7 +264,7 @@ def main():
             else:
                 abi = 'x86' if bits == '32' else 'x86_64'
             if os.environ.has_key('ANDROID_NDK'):
-                run_shell('cmake "%s" -G"%s" %s' % (work_dir, ("Ninja" if sys.platform == 'win32' else "Unix Makefiles"), " ".join([
+                run_shell('%s "%s" -G"%s" %s' % (cmake, work_dir, ("Ninja" if sys.platform == 'win32' else "Unix Makefiles"), " ".join([
                     ("-DFORCE_32=ON" if bits == '32' else ""),
                     ("-DCMAKE_BUILD_TYPE=Debug" if args.debug else ""),
                     ("-DCMAKE_TOOLCHAIN_FILE=./android.toolchain.cmake"),
@@ -263,9 +272,10 @@ def main():
                     ("-DCMAKE_BUILD_TYPE=%s" % ("Debug" if args.debug else "Release")),
                     ('-DANDROID_ABI="%s"' % abi),
                     (('-DJDK="%s"' % jdk_path) if jdk_path else ""),
+                    ('-DCO_PILOT=1' if perf_co_pilot else ""),
                     ('-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON' if args.verbose else '')
                 ])))
-                run_shell('cmake --build .')
+                run_shell('%s --build .' % cmake)
             else:
                 print("Set ANDROID_NDK environment to build Android!")
             continue
@@ -281,6 +291,7 @@ def main():
             ("-DCMAKE_BUILD_TYPE=Debug" if args.debug else ""),
             ("-DYOCTO=1" if yocto else ""),
             (('-DJDK="%s"' % jdk_path) if jdk_path else ""),
+            ('-DCO_PILOT=1' if perf_co_pilot else ""),
             ('-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON' if args.verbose else '')
         ])))
         if sys.platform == 'win32':

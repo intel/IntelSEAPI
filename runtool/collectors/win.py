@@ -8,7 +8,7 @@ import platform
 import traceback
 import subprocess
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
-from sea_runtool import Collector, subst_env_vars
+from sea_runtool import Collector, is_domain_enabled
 import sea
 
 
@@ -204,22 +204,6 @@ class GPUViewCollector(Collector):
     @classmethod
     def launch(cls, args):
         cls.merge(GPUViewCollector.detect(), args[0], args[1], True)
-
-
-def is_domain_enabled(domain, default=True):
-    filter = os.environ.get('INTEL_SEA_FILTER')
-    if not filter:
-        return default
-    filter = subst_env_vars(filter)
-    try:
-        with open(filter) as file:
-            for line in file:
-                enabled = not line.startswith('#')
-                if domain == line.strip(' #\n\r'):
-                    return enabled
-    except IOError:
-        pass
-    return default
 
 
 def is_older_win7():

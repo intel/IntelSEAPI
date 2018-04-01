@@ -211,7 +211,7 @@ class ITT:
             self.mdapi_metric_callback_t = CFUNCTYPE(None, c_uint32, c_char_p, c_double)
 
             # bool(const void* buff, uint32_t size, uint32_t count)
-            self.mdapi_stream_receiver_t = CFUNCTYPE(c_bool, c_void_p, c_uint32, c_uint32)
+            self.mdapi_stream_receiver_t = CFUNCTYPE(c_bool, c_void_p, c_uint32, c_uint32, c_ulonglong, c_ulonglong)
 
             # const char * mdapi_stream(const char * szGroupName, const char * szMetricSetSymbolName, unsigned int nsTimerPeriod, uint32_t pid, CMDAPIHandler::TStreamCallback callback)
             self.lib.mdapi_stream.argtypes = [c_char_p, c_char_p, c_uint32, c_uint32, self.mdapi_stream_receiver_t]

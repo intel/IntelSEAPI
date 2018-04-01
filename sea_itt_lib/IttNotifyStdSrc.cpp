@@ -1375,7 +1375,7 @@ public:
         }
         if (bMemCount)
         {
-            Counter(pHeapFunction->pDomain, block.first, double(block.second));
+            Counter(pHeapFunction->pDomain, block.first, double(block.second)); //report current count for this size
         }
     }
 

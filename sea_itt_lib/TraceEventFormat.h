@@ -87,7 +87,7 @@ public:
     {
 #ifdef _WIN32
         return SHiResClock::now64(); //in nanoseconds
-#elif defined(__ANDROID__)
+#elif defined(__ANDROID__) || defined(__linux__)
         static struct timespec res = {};
         if (!res.tv_nsec && !res.tv_sec)
         {
@@ -101,7 +101,7 @@ public:
         struct timespec ts = {};
         clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
         return uint64_t((1000000000. * ts.tv_sec + ts.tv_nsec) / (1000000000. * res.tv_sec + res.tv_nsec));
-#else
+#else // FIXME: use mach_absolute_time for APPLE
         using namespace std::chrono;
         return (uint64_t)duration_cast<nanoseconds>(SHiResClock::now().time_since_epoch()).count();
 #endif

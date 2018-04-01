@@ -21,7 +21,12 @@ class GraphViz(GraphCombiner):
             # counters
             for counter_name, counter_data in data['counters'].iteritems():
                 id = self.make_id(domain, counter_name)
-                self.file.write('%s [label="{COUNTER: %s|min=%g|max=%g|avg=%g}"];\n' % (id, cgi.escape(counter_name), min(counter_data), max(counter_data), sum(counter_data) / len(counter_data)))
+                self.file.write(
+                    '%s [label="{COUNTER: %s|min=%s|max=%s|avg=%s}"];\n' % (
+                    id, cgi.escape(counter_name),
+                    format_time(min(counter_data)), format_time(max(counter_data)),
+                    format_time(sum(counter_data) / len(counter_data)))
+                )
                 cluster.append("%s;" % (id))
             # tasks
             for task_name, task_data in data['tasks'].iteritems():
