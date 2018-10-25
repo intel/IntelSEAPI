@@ -22,7 +22,7 @@ SET(CUR_DIR "${PROJECT_SOURCE_DIR}/sea_itt_lib")
 set(INCLUDE_DIRS . ..)
 
 
-if (WIN32)
+if(${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
 
     add_custom_command(OUTPUT "${PROJECT_BINARY_DIR}/IntelSEAPI.rc" "${PROJECT_BINARY_DIR}/IntelSEAPI.h"
         PRE_BUILD
@@ -53,7 +53,7 @@ if (WIN32)
         register.bat
     )
     
-elseif(APPLE)
+elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
     set(INCLUDE_DIRS ${INCLUDE_DIRS} /usr/local/include)
     link_directories(/usr/local/lib)
 
@@ -66,7 +66,7 @@ elseif(APPLE)
         set(EXTRA_SOURCE mmv_stats.cpp)
         set(LINK_LIBS ${LINK_LIBS} pcp_mmv pcp)
     endif()
-elseif(ANDROID)
+elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Android")
     set(EXTRA_SOURCE
         SystraceHandler.cpp
     )
@@ -80,11 +80,11 @@ endif()
 
 if(RAD_TELEMETRY_DIR)
     set(INCLUDE_DIRS ${INCLUDE_DIRS} ${RAD_TELEMETRY_DIR}/include)
-    if(APPLE)
+    if(${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
         set(LINK_LIBS ${LINK_LIBS} ${RAD_TELEMETRY_DIR}/lib/librad_tm_mac_x64_link.a)
         set(LINK_LIBS ${LINK_LIBS} ${RAD_TELEMETRY_DIR}/lib/librad_tm_mac_x86_link.a)
         set(EXTRA_SOURCE ${EXTRA_SOURCE} RadTelemetry.cpp)
-    elseif (WIN32)
+    elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
         set(RAD_LIB_NAME "rad_tm_win")
         if (ARCH_64)
             set(RAD_LIB_NAME "${RAD_LIB_NAME}64")
@@ -131,11 +131,11 @@ if(JDK)
         ${PROJECT_SOURCE_DIR}/java/IntelSEAPI.java
     )
 
-    if (WIN32)
+    if(${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
         set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/win32)
-    elseif(APPLE)
+    elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
         set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK}/include ${JDK}/include/darwin ${JDK}/Headers)
-    elseif(NOT ANDROID)
+    elseif(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "ANDROID")
         set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK} ${JDK}/include ${JDK}/include/linux)
     endif()
 
@@ -155,20 +155,14 @@ add_library(sea_itt_lib SHARED
 )
 
 SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES PREFIX "")
-if(APPLE)
-    SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME libIntelSEAPI)
-elseif (WIN32)
+if(${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
     if(ARCH_64)
         SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME IntelSEAPI64)
     else()
         SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME IntelSEAPI32)
     endif()
 else()
-    if(ARCH_64)
-        SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME libIntelSEAPI64)
-    else()
-        SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME libIntelSEAPI32)
-    endif()
+    SET_TARGET_PROPERTIES(sea_itt_lib PROPERTIES OUTPUT_NAME libIntelSEAPI)
 endif()
 
 if (ARCH_64)
@@ -177,15 +171,15 @@ else()
     set(METRICSFRAMEWORK_LIBRARY "x86")
 endif()
 
-if (WIN32)
+if(${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
     TARGET_LINK_LIBRARIES(sea_itt_lib
         ws2_32.lib Shlwapi.lib Dbghelp.lib
     )
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi") #in release as well
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG") #in release as well
-elseif (APPLE)
+elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++11 -g -fPIC -framework Cocoa")
-elseif (ANDROID)
+elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Android")
     TARGET_LINK_LIBRARIES(sea_itt_lib log)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -g -fPIC -pthread")
 else()

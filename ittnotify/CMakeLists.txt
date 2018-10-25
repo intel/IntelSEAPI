@@ -26,7 +26,7 @@ file(GLOB ITT_SRCS "src/ittnotify/*.c" "src/ittnotify/*.h")
 
 add_library(ittnotify STATIC ${ITT_SRCS} ${ITT_PUBLIC_HDRS})
 
-if(APPLE)
+if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "WINDOWS")
     SET_TARGET_PROPERTIES(ittnotify PROPERTIES OUTPUT_NAME ittnotify)
 else()
     if(ARCH_64)
@@ -38,12 +38,12 @@ endif()
 
 target_include_directories(ittnotify PUBLIC ./src/ittnotify)
 
-if (NOT WIN32)
+if (NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
     TARGET_LINK_LIBRARIES(ittnotify dl)
 endif()
 
-if (ANDROID)
+if (${CMAKE_SYSTEM_NAME} STREQUAL "Android")
     target_link_libraries(ittnotify log)
 endif()
 

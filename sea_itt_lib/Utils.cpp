@@ -27,7 +27,7 @@
     #include <dlfcn.h>
 
     #ifndef __ANDROID__
-        #include <execinfo.h>
+        //#include <execinfo.h>
     #endif
 
 #endif
@@ -110,7 +110,8 @@ size_t GetStack(TStack& stack)
     static FCaptureStackBackTrace CaptureStackBackTrace = (FCaptureStackBackTrace)(GetProcAddress(LoadLibraryA("kernel32.dll"), "RtlCaptureStackBackTrace"));
     return CaptureStackBackTrace ? CaptureStackBackTrace(0, StackSize, stack, NULL) : 0;
 #else
-    return backtrace(stack, StackSize);
+    //return backtrace(stack, StackSize);
+	return 0;
 #endif
 }
 
@@ -119,21 +120,22 @@ std::string GetStackString()
 #ifdef _WIN32
     return std::string();
 #else
-    TStack stack = {};
-    size_t size = GetStack(stack);
-
-    char **bt_syms = backtrace_symbols(stack, size);
-    if (!bt_syms)
-        return std::string();
-    std::string res;
-    for (int i = 2; i < size; i++) {
-        if (res.size())
-            res += "<-";
-        res += bt_syms[i];
-    }
-
-    free(bt_syms);
-    return res;
+    // TStack stack = {};
+    // size_t size = GetStack(stack);
+    //
+    // char **bt_syms = backtrace_symbols(stack, size);
+    // if (!bt_syms)
+    //     return std::string();
+    // std::string res;
+    // for (int i = 2; i < size; i++) {
+    //     if (res.size())
+    //         res += "<-";
+    //     res += bt_syms[i];
+    // }
+    //
+    // free(bt_syms);
+    // return res;
+    return std::string();
 #endif
 }
 

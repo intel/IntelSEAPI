@@ -39,12 +39,12 @@ endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-D_DEBUG)
-    if (NOT WIN32)
+	if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
     endif()
 else()
-    if (NOT WIN32)
+	if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2")
     endif()
@@ -91,7 +91,7 @@ add_executable(IntelSEAPI
     README.txt
 )
 
-if(APPLE)
+if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
     SET_TARGET_PROPERTIES(IntelSEAPI PROPERTIES OUTPUT_NAME TestIntelSEAPI)
 else()
     if(ARCH_64)
@@ -106,8 +106,7 @@ if (EXISTS "${PROJECT_SOURCE_DIR}/RadTelemetry")
     set (RAD_TELEMETRY_DIR ${PROJECT_SOURCE_DIR}/RadTelemetry)
 endif()
 
-
-if (WIN32)
+if(${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
     TARGET_LINK_LIBRARIES(IntelSEAPI)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi /MP")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /MP")
@@ -124,13 +123,13 @@ if (WIN32)
 
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG") #in release as well
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG") #in release as well
-elseif (APPLE)
+elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
     TARGET_LINK_LIBRARIES(IntelSEAPI dl)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++11 -fPIC -Wno-unused-parameter -fstack-protector-strong -fPIE -O2 -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fPIE -Wl")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fPIE -Wl")
     set(CMAKE_OSX_ARCHITECTURES "i386;x86_64")
-elseif (ANDROID_NDK)
+elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Android")
     TARGET_LINK_LIBRARIES(IntelSEAPI dl)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fPIE -pthread -fstack-protector-strong -fPIE -O2 -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fPIE -pie -Wl,--no-undefined -z noexecstack -z relro -z now")
@@ -142,12 +141,12 @@ else()
     TARGET_LINK_LIBRARIES(IntelSEAPI dl)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fPIC -pthread -fstack-protector-strong -fPIE -O2 -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pie -Wl,--no-undefined -z noexecstack -z relro -z now")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fPIE -pie -Wl,--no-undefined -z noexecstack -z relro -z now")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-undefined -z noexecstack -z relro -z now")
 endif()
 
 add_subdirectory(ittnotify)
 add_subdirectory(sea_itt_lib)
-if (WIN32)
+if(${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
     if(NOT ARCH_64 AND CMAKE_BUILD_TYPE STREQUAL "Debug") #Compiler Automated Instrumentation
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Gh /GH")
     endif()
@@ -230,7 +229,7 @@ if (EXISTS "${PROJECT_SOURCE_DIR}/catapult.zip")
     )
 endif()
 
-if (WIN32)
+if(${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
     InstallWildCard("${SEA_PROJECT_BIN}/*ittnotify*.lib" "lib")
     InstallWildCard("${SEA_PROJECT_BIN}/*.dll" "bin")
     InstallWildCard("${SEA_PROJECT_BIN}/*.exe" "bin")
@@ -269,7 +268,7 @@ else()
 
     InstallWildCard("${SEA_PROJECT_BIN}/*ittnotify*.a" "lib")
 
-    if(APPLE)
+    if(${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
         install(
             FILES
                 "${PROJECT_SOURCE_DIR}/sea_itt_lib/IntelSEAPI.instrument"
