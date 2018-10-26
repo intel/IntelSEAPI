@@ -77,16 +77,16 @@
 
 #include "disable_warnings.h"
 
-static const char api_version[] = API_VERSION "\0\n@(#) $Revision: 481659 $\n";
+extern const char api_version[] = API_VERSION "\0\n@(#) $Revision: 481659 $\n";
 
 #define _N_(n) ITT_JOIN(INTEL_ITTNOTIFY_PREFIX,n)
 
 #if ITT_OS==ITT_OS_WIN
-static const char* ittnotify_lib_name = "libittnotify.dll";
+extern const char* ittnotify_lib_name = "libittnotify.dll";
 #elif ITT_OS==ITT_OS_LINUX || ITT_OS==ITT_OS_FREEBSD || ITT_OS==ITT_OS_OPENBSD
-static const char* ittnotify_lib_name = "libittnotify.so";
+extern const char* ittnotify_lib_name = "libittnotify.so";
 #elif ITT_OS==ITT_OS_MAC
-static const char* ittnotify_lib_name = "libittnotify.dylib";
+extern const char* ittnotify_lib_name = "libittnotify.dylib";
 #else
 #error Unsupported or unknown OS.
 #endif
@@ -159,7 +159,7 @@ typedef int (__itt_init_ittlib_t)(const char*, __itt_group_id);
 /* this define used to control initialization function name. */
 #ifndef __itt_init_ittlib_name
 ITT_EXTERN_C int _N_(init_ittlib)(const char*, __itt_group_id);
-static __itt_init_ittlib_t* __itt_init_ittlib_ptr = _N_(init_ittlib);
+extern __itt_init_ittlib_t* __itt_init_ittlib_ptr = _N_(init_ittlib);
 #define __itt_init_ittlib_name __itt_init_ittlib_ptr
 #endif /* __itt_init_ittlib_name */
 
@@ -168,7 +168,7 @@ typedef void (__itt_fini_ittlib_t)(void);
 /* this define used to control finalization function name. */
 #ifndef __itt_fini_ittlib_name
 ITT_EXTERN_C void _N_(fini_ittlib)(void);
-static __itt_fini_ittlib_t* __itt_fini_ittlib_ptr = _N_(fini_ittlib);
+extern __itt_fini_ittlib_t* __itt_fini_ittlib_ptr = _N_(fini_ittlib);
 #define __itt_fini_ittlib_name __itt_fini_ittlib_ptr
 #endif /* __itt_fini_ittlib_name */
 
@@ -176,10 +176,10 @@ static __itt_fini_ittlib_t* __itt_fini_ittlib_ptr = _N_(fini_ittlib);
 #undef ITT_STUBV
 #undef ITT_STUB
 #define ITT_STUB(api,type,name,args,params,ptr,group,format)   \
-static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
+extern type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
 typedef type api ITT_JOIN(_N_(name),_t) args;                  \
 ITT_EXTERN_C_BEGIN ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); ITT_EXTERN_C_END \
-static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
+extern type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
 {                                                              \
     __itt_init_ittlib_name(NULL, __itt_group_all);             \
     if (ITTNOTIFY_NAME(name) && ITTNOTIFY_NAME(name) != ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init))) \
@@ -189,10 +189,10 @@ static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
 }
 
 #define ITT_STUBV(api,type,name,args,params,ptr,group,format)  \
-static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
+extern type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
 typedef type api ITT_JOIN(_N_(name),_t) args;                  \
 ITT_EXTERN_C_BEGIN ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); ITT_EXTERN_C_END \
-static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
+extern type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
 {                                                              \
     __itt_init_ittlib_name(NULL, __itt_group_all);             \
     if (ITTNOTIFY_NAME(name) && ITTNOTIFY_NAME(name) != ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init))) \
@@ -207,12 +207,12 @@ static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args \
 #undef ITT_STUB
 #undef ITT_STUBV
 #define ITT_STUB(api,type,name,args,params,ptr,group,format)   \
-static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
+extern type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
 typedef type api ITT_JOIN(_N_(name),_t) args;                  \
 ITT_EXTERN_C_BEGIN ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); ITT_EXTERN_C_END
 
 #define ITT_STUBV(api,type,name,args,params,ptr,group,format)  \
-static type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
+extern type api ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)) args;\
 typedef type api ITT_JOIN(_N_(name),_t) args;                  \
 ITT_EXTERN_C_BEGIN ITT_JOIN(_N_(name),_t)* ITTNOTIFY_NAME(name) = ITT_VERSIONIZE(ITT_JOIN(_N_(name),_init)); ITT_EXTERN_C_END
 
@@ -230,7 +230,7 @@ typedef struct ___itt_group_alias
     __itt_group_id groups;
 } __itt_group_alias;
 
-static __itt_group_alias group_alias[] = {
+extern __itt_group_alias group_alias[] = {
     { "KMP_FOR_TPROFILE", (__itt_group_id)(__itt_group_control | __itt_group_thread | __itt_group_sync  | __itt_group_mark) },
     { "KMP_FOR_TCHECK",   (__itt_group_id)(__itt_group_control | __itt_group_thread | __itt_group_sync  | __itt_group_fsync | __itt_group_mark | __itt_group_suppress) },
     { NULL,               (__itt_group_none) },
@@ -244,7 +244,7 @@ static __itt_group_alias group_alias[] = {
 #pragma warning(disable: 4054) /* warning C4054: 'type cast' : from function pointer 'XXX' to data pointer 'void *' */
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 
-static __itt_api_info api_list[] = {
+extern __itt_api_info api_list[] = {
 /* Define functions with static implementation */
 #undef ITT_STUB
 #undef ITT_STUBV
@@ -266,7 +266,7 @@ static __itt_api_info api_list[] = {
 #pragma warning(pop)
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 
-static const char dll_path[PATH_MAX] = { 0 };
+extern const char dll_path[PATH_MAX] = { 0 };
 
 /* static part descriptor which handles. all notification api attributes. */
 __itt_global _N_(_ittapi_global) = {
@@ -302,7 +302,7 @@ ITT_EXTERN_C void _N_(error_handler)(__itt_error_code, va_list args);
 #pragma warning(disable: 4055) /* warning C4055: 'type cast' : from data pointer 'void *' to function pointer 'XXX' */
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 
-static void __itt_report_error(__itt_error_code code, ...)
+extern void __itt_report_error(__itt_error_code code, ...)
 {
     va_list args;
     va_start(args, code);
@@ -322,7 +322,7 @@ static void __itt_report_error(__itt_error_code code, ...)
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
-static __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_createW),_init))(const wchar_t* name)
+extern __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_createW),_init))(const wchar_t* name)
 {
     __itt_domain *h_tail = NULL, *h = NULL;
 
@@ -352,9 +352,9 @@ static __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_createW),_init))(
     return h;
 }
 
-static __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_createA),_init))(const char* name)
+extern __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_createA),_init))(const char* name)
 #else  /* ITT_PLATFORM!=ITT_PLATFORM_WIN */
-static __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_create),_init))(const char* name)
+extern __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_create),_init))(const char* name)
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 {
     __itt_domain *h_tail = NULL, *h = NULL;
@@ -394,7 +394,7 @@ static __itt_domain* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(domain_create),_init))(c
 }
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
-static __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_createW),_init))(const wchar_t* name)
+extern __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_createW),_init))(const wchar_t* name)
 {
     __itt_string_handle *h_tail = NULL, *h = NULL;
 
@@ -424,9 +424,9 @@ static __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_cre
     return h;
 }
 
-static __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_createA),_init))(const char* name)
+extern __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_createA),_init))(const char* name)
 #else  /* ITT_PLATFORM!=ITT_PLATFORM_WIN */
-static __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_create),_init))(const char* name)
+extern __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_create),_init))(const char* name)
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 {
     __itt_string_handle *h_tail = NULL, *h = NULL;
@@ -466,7 +466,7 @@ static __itt_string_handle* ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(string_handle_cre
 }
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
-static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_createW),_init))(const wchar_t *name, const wchar_t *domain)
+extern __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_createW),_init))(const wchar_t *name, const wchar_t *domain)
 {
     __itt_counter_info_t *h_tail = NULL, *h = NULL;
     __itt_metadata_type type = __itt_metadata_u64;
@@ -499,9 +499,9 @@ static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_createW),_init))
     return (__itt_counter)h;
 }
 
-static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_createA),_init))(const char *name, const char *domain)
+extern __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_createA),_init))(const char *name, const char *domain)
 #else  /* ITT_PLATFORM!=ITT_PLATFORM_WIN */
-static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create),_init))(const char *name, const char *domain)
+extern __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create),_init))(const char *name, const char *domain)
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 {
     __itt_counter_info_t *h_tail = NULL, *h = NULL;
@@ -543,7 +543,7 @@ static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create),_init))(
 }
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
-static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typedW),_init))(const wchar_t *name, const wchar_t *domain, __itt_metadata_type type)
+extern __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typedW),_init))(const wchar_t *name, const wchar_t *domain, __itt_metadata_type type)
 {
     __itt_counter_info_t *h_tail = NULL, *h = NULL;
 
@@ -575,9 +575,9 @@ static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typedW),_
     return (__itt_counter)h;
 }
 
-static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typedA),_init))(const char *name, const char *domain, __itt_metadata_type type)
+extern __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typedA),_init))(const char *name, const char *domain, __itt_metadata_type type)
 #else  /* ITT_PLATFORM!=ITT_PLATFORM_WIN */
-static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typed),_init))(const char *name, const char *domain, __itt_metadata_type type)
+extern __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typed),_init))(const char *name, const char *domain, __itt_metadata_type type)
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 {
     __itt_counter_info_t *h_tail = NULL, *h = NULL;
@@ -619,7 +619,7 @@ static __itt_counter ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(counter_create_typed),_i
 
 /* -------------------------------------------------------------------------- */
 
-static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(pause),_init))(void)
+extern void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(pause),_init))(void)
 {
     if (!_N_(_ittapi_global).api_initialized && _N_(_ittapi_global).thread_list == NULL)
     {
@@ -635,7 +635,7 @@ static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(pause),_init))(void)
     }
 }
 
-static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(resume),_init))(void)
+extern void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(resume),_init))(void)
 {
     if (!_N_(_ittapi_global).api_initialized && _N_(_ittapi_global).thread_list == NULL)
     {
@@ -652,7 +652,7 @@ static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(resume),_init))(void)
 }
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
-static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_nameW),_init))(const wchar_t* name)
+extern void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_nameW),_init))(const wchar_t* name)
 {
     if (!_N_(_ittapi_global).api_initialized && _N_(_ittapi_global).thread_list == NULL)
     {
@@ -664,16 +664,16 @@ static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_nameW),_init))(const w
     }
 }
 
-static int ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thr_name_setW),_init))(const wchar_t* name, int namelen)
+extern int ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thr_name_setW),_init))(const wchar_t* name, int namelen)
 {
     (void)namelen;
     ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_nameW),_init))(name);
     return 0;
 }
 
-static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_nameA),_init))(const char* name)
+extern void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_nameA),_init))(const char* name)
 #else  /* ITT_PLATFORM==ITT_PLATFORM_WIN */
-static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_name),_init))(const char* name)
+extern void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_name),_init))(const char* name)
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 {
     if (!_N_(_ittapi_global).api_initialized && _N_(_ittapi_global).thread_list == NULL)
@@ -694,14 +694,14 @@ static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_name),_init))(const ch
 }
 
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
-static int ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thr_name_setA),_init))(const char* name, int namelen)
+extern int ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thr_name_setA),_init))(const char* name, int namelen)
 {
     (void)namelen;
     ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_nameA),_init))(name);
     return 0;
 }
 #else  /* ITT_PLATFORM==ITT_PLATFORM_WIN */
-static int ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thr_name_set),_init))(const char* name, int namelen)
+extern int ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thr_name_set),_init))(const char* name, int namelen)
 {
     (void)namelen;
     ITT_VERSIONIZE(ITT_JOIN(_N_(thread_set_name),_init))(name);
@@ -709,7 +709,7 @@ static int ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thr_name_set),_init))(const char* 
 }
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
 
-static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_ignore),_init))(void)
+extern void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_ignore),_init))(void)
 {
     if (!_N_(_ittapi_global).api_initialized && _N_(_ittapi_global).thread_list == NULL)
     {
@@ -721,12 +721,12 @@ static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thread_ignore),_init))(void)
     }
 }
 
-static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thr_ignore),_init))(void)
+extern void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(thr_ignore),_init))(void)
 {
     ITT_VERSIONIZE(ITT_JOIN(_N_(thread_ignore),_init))();
 }
 
-static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(enable_attach),_init))(void)
+extern void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(enable_attach),_init))(void)
 {
 #ifdef __ANDROID__
     /*
@@ -739,7 +739,7 @@ static void ITTAPI ITT_VERSIONIZE(ITT_JOIN(_N_(enable_attach),_init))(void)
 
 /* -------------------------------------------------------------------------- */
 
-static const char* __itt_fsplit(const char* s, const char* sep, const char** out, int* len)
+extern const char* __itt_fsplit(const char* s, const char* sep, const char** out, int* len)
 {
     int i;
     int j;
@@ -800,7 +800,7 @@ static const char* __itt_fsplit(const char* s, const char* sep, const char** out
  * This was done to avoid dynamic allocation for few calls.
  * Actually we need this function only four times.
  */
-static const char* __itt_get_env_var(const char* name)
+extern const char* __itt_get_env_var(const char* name)
 {
 #define MAX_ENV_VALUE_SIZE 4086
     static char  env_buff[MAX_ENV_VALUE_SIZE];
@@ -851,7 +851,7 @@ static const char* __itt_get_env_var(const char* name)
     return NULL;
 }
 
-static const char* __itt_get_lib_name(void)
+extern const char* __itt_get_lib_name(void)
 {
     const char* lib_name = __itt_get_env_var(ITT_TO_STR(LIB_VAR_NAME));
 
@@ -974,7 +974,7 @@ static const char* __itt_get_lib_name(void)
 /* Avoid clashes with std::min, reported by tbb team */
 #define __itt_min(a,b) (a) < (b) ? (a) : (b)
 
-static __itt_group_id __itt_get_groups(void)
+extern __itt_group_id __itt_get_groups(void)
 {
     register int i;
     __itt_group_id res = __itt_group_none;
@@ -1023,7 +1023,7 @@ static __itt_group_id __itt_get_groups(void)
 
 #undef __itt_min
 
-static int __itt_lib_version(lib_t lib)
+extern int __itt_lib_version(lib_t lib)
 {
     if (lib == NULL)
         return 0;
@@ -1035,7 +1035,7 @@ static int __itt_lib_version(lib_t lib)
 }
 
 /* It's not used right now! Comment it out to avoid warnings.
-static void __itt_reinit_all_pointers(void)
+extern void __itt_reinit_all_pointers(void)
 {
     register int i;
     // Fill all pointers with initial stubs
@@ -1044,7 +1044,7 @@ static void __itt_reinit_all_pointers(void)
 }
 */
 
-static void __itt_nullify_all_pointers(void)
+extern void __itt_nullify_all_pointers(void)
 {
     register int i;
     /* Nulify all pointers except domain_create, string_handle_create  and counter_create */
