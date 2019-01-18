@@ -1,3 +1,8 @@
+from __future__ import print_function
+import os
+import sys
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+from python_compatibility_layer import xrange
 
 TRACK_INDEX, TRACK_NAME = -1, 'GPU'
 
@@ -173,7 +178,7 @@ class Adreno:
         elif name in ['kgsl_mem_timestamp_queue', 'kgsl_mem_timestamp_free']:
             pass
         else:
-            print name
+            print(name)
 
     def finalize(self):
         pass

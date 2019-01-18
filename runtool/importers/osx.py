@@ -1,3 +1,4 @@
+from __future__ import print_function
 import os
 import sys
 import glob
@@ -6,6 +7,8 @@ from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_exp
 sys.path.append(os.path.realpath(os.path.dirname(__file__)))  # weird CentOS behaviour workaround
 from etw import GPUQueue
 
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+from python_compatibility_layer import iteritems
 
 class DTrace(GPUQueue):
     def __init__(self, args, gt, callbacks):
@@ -109,7 +112,7 @@ class DTrace(GPUQueue):
                 for decoder in self.decoders:
                     decoder.handle_record(time, pid, tid, cmd, args[2:])
             else:
-                print "unsupported cmd:", cmd, args
+                print("unsupported cmd:", cmd, args)
 
     def handle_stack(self, kind, time, pid, tid, stack):
         pid = int(pid, 16)
@@ -153,7 +156,7 @@ class DTrace(GPUQueue):
         if thread.task_stack:
             thread.task_stack[-1].add_args({name: value})
         else:
-            print "Orphan arg:", name, value
+            print("Orphan arg:", name, value)
 
     def submit_prepare(self, time, id, pid, tid, args):
         if id not in self.prepares:
@@ -195,9 +198,9 @@ class DTrace(GPUQueue):
     def complete_stage(self, ring_type, channel, latest_stamp, data):
         stamps = self.event_tracker.setdefault((ring_type, channel), {})
         latest_stamp = int(latest_stamp, 16)
-        to_del = set(stamp for stamp in stamps.iterkeys() if stamp <= latest_stamp)
+        to_del = set(stamp for stamp in stamps if stamp <= latest_stamp)
         if len(to_del) < 100:  # in old driver the CompleteExecute might be called so rare that it is not reliable at all
-            for stamp, stages in stamps.iteritems():
+            for (stamp, stages) in iteritems(stamps):
                 if stamp <= latest_stamp:
                     verbose = ['%s(%s) %d:' % (ring_type, channel, stamp)]
                     ctx_type = None
@@ -219,7 +222,7 @@ class DTrace(GPUQueue):
                     else:
                         verbose.append(data['cmd'])
                     if self.args.verbose:
-                        print 'verbose:', ' '.join(verbose)
+                        print('verbose:', ' '.join(verbose))
                     if not changed_context:  # not sure what TODO with it yet
                         task = self.complete_gpu(stages[-1], data, ctx_type, old_ctx_id)
                         found_submit = False
@@ -327,7 +330,7 @@ class DTrace(GPUQueue):
             cpu_time = int(cpu_time, 16)
             if not cpu_time:
                 if self.args.debug:
-                    print "Warning: zero timestamp: ", cmd, args
+                    print("Warning: zero timestamp: ", cmd, args)
                 return
             thread = self.callbacks.process(-1).thread(int(ctx_id, 16))
             ring = self.map_ring_type(ring_type)
@@ -339,33 +342,33 @@ class DTrace(GPUQueue):
             cpu_time = int(cpu_time, 16)
             if not cpu_time:
                 if self.args.debug:
-                    print "Warning: zero timestamp: ", cmd, args
+                    print("Warning: zero timestamp: ", cmd, args)
                 return
             thread = self.callbacks.process(-1).thread(int(ctx_id, 16))
             if (ring_type, channel, stamp) in thread.task_pool:
                 thread.task_pool[(ring_type, channel, stamp)].end(cpu_time)
                 del thread.task_pool[(ring_type, channel, stamp)]
         else:
-            print "Unhandled gpu_call:", cmd
+            print("Unhandled gpu_call:", cmd)
 
     def on_gpu_frame(self, time, pid, tid):
         self.callbacks.on_event("marker", {'pid': pid, 'tid': tid, 'domain': 'gits', 'time': time, 'str': "GPU Frame", 'type': 5, 'data': 'task'})
 
     def finalize(self):
-        for tid, (name, pid) in self.thread_names.iteritems():
+        for (tid, (name, pid)) in iteritems(self.thread_names):
             for callback in self.callbacks.callbacks:
                 thread_name = name.replace('\\"', '').replace('"', '')
                 callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (%d)' % (thread_name, tid)})
-        for pid, name in self.pid_names.iteritems():
+        for (pid, name) in iteritems(self.pid_names):
             self.callbacks.set_process_name(pid, name)
             self.callbacks.set_process_name(-pid, 'Sampling: ' + name)
 
-        for context, name in self.contexts.iteritems():
+        for (context, name) in iteritems(self.contexts):
             self.callbacks.set_thread_name(-1, int(context, 16), name)
 
-        for pid, proc in self.callbacks.processes.iteritems():
+        for (pid, proc) in iteritems(self.callbacks.processes):
             name = None
-            for tid, thread in proc.threads.iteritems():
+            for (tid, thread) in iteritems(proc.threads):
                 if tid in self.pid_names:
                     name = self.pid_names[tid]
                     break
@@ -410,7 +413,7 @@ def transform_dtrace(args):
                         continue
                     parts = line.split('\t')
                     if len(parts) < 4:
-                        print "Warning: weird line:", line
+                        print("Warning: weird line:", line)
                         continue
                     if parts[1] in ['ustack', 'kstack', 'jstack']:
                         reading_stack = [parts[1], int(parts[0], 16), parts[2], parts[3].rstrip(':')]

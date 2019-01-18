@@ -33,7 +33,7 @@ class Android(Collector):
             version = parts[parts.index('version') + 1]
             systraces.append((version, adb))
         if systraces:
-            sorted_by_version = sorted(systraces, key=lambda(ver, _): [int(item) for item in ver.split('.')], reverse=True)
+            sorted_by_version = sorted(systraces, key=lambda ver__: [int(item) for item in ver__[0].split('.')], reverse=True)
             return '"%s"' % sorted_by_version[0][1]
         else:
             return None

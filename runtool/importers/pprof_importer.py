@@ -10,6 +10,9 @@ import imp
 
 from sea_runtool import default_tree, Callbacks, Progress, get_decoders
 
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+from python_compatibility_layer import iteritems
+
 IS_AVAILABLE = True
 profile = None
 
@@ -161,14 +164,14 @@ class PprofHandler(object):
                     num_labels[key].append(label.numX)
 
             if len(labels) > 0:
-                for key, value in labels.iteritems():
+                for (key, value) in iteritems(labels):
                     label = sample.Label.add()
                     label.key = key
                     for val in value:
                         label.value.append(val)
 
             if len(num_labels) > 0:
-                for key, value in num_labels.iteritems():
+                for (key, value) in iteritems(num_labels):
                     label = sample.NumLabel.add()
                     label.key = key
                     for val in value:

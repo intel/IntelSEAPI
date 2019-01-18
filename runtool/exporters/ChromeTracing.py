@@ -1,3 +1,4 @@
+from __future__ import print_function
 import os
 import sys
 #sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))  # uncomment for debugging single file
@@ -14,6 +15,8 @@ from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressC
 MAX_GT_SIZE = 50 * 1024 * 1024
 GT_FLOAT_TIME = True
 
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+from python_compatibility_layer import unicode, iteritems, itervalues
 
 class GoogleTrace(TaskCombiner):
 
@@ -64,7 +67,7 @@ class GoogleTrace(TaskCombiner):
             handled = []
             for trace in self.args.trace:
                 if not os.path.exists(trace):
-                    print "Error: File not found:", trace
+                    print("Error: File not found:", trace)
                     continue
                 if trace.endswith(".etl"):
                     self.handle_etw_trace(trace)
@@ -79,7 +82,7 @@ class GoogleTrace(TaskCombiner):
                     self.handle_perf(trace)
                     handled.append(trace)
                 else:
-                    print "Error: unsupported extension:", trace
+                    print("Error: unsupported extension:", trace)
                 args.trace = [trace for trace in args.trace if trace not in handled]
         self.start_new_trace()
 
@@ -89,7 +92,7 @@ class GoogleTrace(TaskCombiner):
         self.file = codecs.open(self.targets[-1], "wb+", 'utf-8')
         self.file.write('{\n"traceEvents": [\n\n')  # second \n is for the rare case when there are no events, and finish cuts last two symbols
 
-        for key, value in self.tree["threads"].iteritems():
+        for (key, value) in iteritems(self.tree["threads"]):
             pid_tid = key.split(',')
             self.file.write(
                 '{"name": "thread_name", "ph":"M", "pid":%s, "tid":%s, "args": {"name":"%s(%s)"}},\n' % (pid_tid[0], pid_tid[1], value, pid_tid[1])
@@ -216,7 +219,7 @@ class GoogleTrace(TaskCombiner):
             source_scale_start = time_sync[index - 1][Source] + int(diff[Source] * 0.75)  # to keep the precision
             target_scale_start = (time_sync[index - 1][Target] + (diff[Target] * 0.25)) * 1000000.  # multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
 
-            print "Timelines correlation precision is +- %f us" % (diff[Target] / 2. * 1000000.)
+            print("Timelines correlation precision is +- %f us" % (diff[Target] / 2. * 1000000.))
         else:
             source_scale_start = time_sync[0][Source]
             target_scale_start = time_sync[0][Target] * 1000000.  # multiplying by 1000000. to have time in microseconds (ftrace/target time was in seconds)
@@ -240,7 +243,7 @@ class GoogleTrace(TaskCombiner):
                 self.file.write(
                     '{"name": "process_labels", "ph":"M", "pid":%d, "tid":%s, "args": {"labels":"%s"}},\n' % (data['pid'], data['tid'], ','.join(data['labels']))
                 )
-            if data['tid'] >= 0 and not self.tree['threads'].has_key('%d,%d' % (data['pid'], data['tid'])):  # marking the main thread
+            if data['tid'] >= 0 and '%d,%d' % (data['pid'], data['tid']) not in self.tree['threads']:  # marking the main thread
                 self.file.write(
                     '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], "<main>")
                 )
@@ -268,14 +271,14 @@ class GoogleTrace(TaskCombiner):
             template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%.3f, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
         else:
             template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%d, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
-        if not data.has_key('str'):
+        if 'str' not in data:
             data['str'] = "unknown"
         self.file.write(template % ("s", items[0]['pid'], items[0]['tid'], self.convert_time(items[0]['time']), relation_id, data['str'], data['domain']))
         self.file.write(template % ("f", items[1]['pid'], items[1]['tid'], self.convert_time(items[1]['time'] - 1), relation_id, data['str'], data['domain']))
 
     def format_value(self, arg):  # this function must add quotes if value is string, and not number/float, do this recursively for dictionary
         if type(arg) == type({}):
-            return "{" + ", ".join(['"%s":%s' % (key, self.format_value(value)) for key, value in arg.iteritems()]) + "}"
+            return "{" + ", ".join(['"%s":%s' % (key, self.format_value(value)) for (key, value) in iteritems(arg)]) + "}"
         try:
             val = float(arg)
             if float('inf') != val:
@@ -289,7 +292,7 @@ class GoogleTrace(TaskCombiner):
 
     def format_args(self, arg):  # this function must add quotes if value is string, and not number/float, do this recursively for dictionary
         if type(arg) == type({}):
-            return dict([(key, self.format_args(value)) for key, value in arg.iteritems()])
+            return dict([(key, self.format_args(value)) for (key, value) in iteritems(arg)])
         try:
             val = float(arg)
             if float('inf') != val:
@@ -309,7 +312,7 @@ class GoogleTrace(TaskCombiner):
             if self.last_task == (type, begin, end):
                 return
             self.last_task = (type, begin, end)
-        assert (GoogleTrace.Phase.has_key(type))
+        assert (type in GoogleTrace.Phase)
         if begin['type'] == 7:  # frame_begin
             if 'id' not in begin:
                 begin['id'] = id(begin)  # Async events are groupped by cat & id
@@ -334,7 +337,7 @@ class GoogleTrace(TaskCombiner):
                 json.loads(res)
             except Exception as exc:
                 import traceback
-                print "\n" + exc.message + ":\n" + res + "\n"
+                print("\n" + exc.message + ":\n" + res + "\n")
                 traceback.print_stack()
                 self.format_task(GoogleTrace.Phase[type], type, begin, end)
             res += ',\n'
@@ -383,7 +386,7 @@ class GoogleTrace(TaskCombiner):
         res = []
         res.append('{"ph":"%s"' % phase)
         res.append(', "pid":%(pid)d' % begin)
-        if begin.has_key('tid'):
+        if 'tid' in begin:
             res.append(', "tid":%(tid)d' % begin)
         if GT_FLOAT_TIME:
             res.append(', "ts":%.3f' % (self.convert_time(begin['time'])))
@@ -448,7 +451,7 @@ class GoogleTrace(TaskCombiner):
             total = 0
             breakdown = {}
             children = 0
-            for size, values in begin['memory'].iteritems():
+            for (size, values) in iteritems(begin['memory']):
                 if size is None:  # special case for children attribution
                     children = values
                 else:
@@ -467,8 +470,8 @@ class GoogleTrace(TaskCombiner):
 
     def handle_leftovers(self):
         TaskCombiner.handle_leftovers(self)
-        for counters in self.counters.itervalues():  # workaround: google trace forgets counter last value
-            for counter in counters.itervalues():
+        for counters in itervalues(self.counters):  # workaround: google trace forgets counter last value
+            for counter in itervalues(counters):
                 counter['time'] += 1  # so, we repeat it on the end of the trace
                 self.complete_task("counter", counter, counter)
 
@@ -481,7 +484,7 @@ class GoogleTrace(TaskCombiner):
         if not intermediate:
             if self.samples:
                 self.file.write('], "stackFrames": {\n')
-                for id, frame in self.frames.iteritems():
+                for (id, frame) in iteritems(self.frames):
                     self.file.write('"%s": %s,\n' % (id, json.dumps(frame)))
                 if self.frames:  # deleting last two symbols from the file as we can't leave comma at the end due to json restrictions
                     self.remove_last(2)
@@ -494,7 +497,7 @@ class GoogleTrace(TaskCombiner):
                 self.frames = {}
             if self.metadata:
                 self.file.write('\n],\n')
-                for key, value in self.metadata.iteritems():
+                for (key, value) in iteritems(self.metadata):
                     self.file.write('"%s": %s,\n' % (key, json.dumps(value[0] if len(value) == 1 else value)))
                 self.remove_last(2)  # remove trailing ,\n
                 self.file.write('\n}')
@@ -516,7 +519,7 @@ class GoogleTrace(TaskCombiner):
                 return path
             zip_path = os.path.join(args.bindir, 'catapult.zip')
             if os.path.exists(zip_path):
-                print "Extracting catapult..."
+                print("Extracting catapult...")
                 from zipfile import PyZipFile
                 pzf = PyZipFile(zip_path)
                 pzf.extractall(args.bindir)

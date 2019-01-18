@@ -39,7 +39,7 @@ def transform_log(args):
                         if len(parts) != 5:
                             continue
                         if not parts[0].startswith('Timestamp'):
-                            print "Error: this log format is not supported. Expected log from OSX's 'log stream'"
+                            print("Error: this log format is not supported. Expected log from OSX's 'log stream'")
                         header = parts
                         continue
                     else:
