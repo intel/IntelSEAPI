@@ -37,7 +37,7 @@ class ETWXML:
                         elem.clear()
                     level -= 1
         except ET.ParseError as exc:
-            print("\nError: Bad XML file: %s\n", file)
+            print("\nError: Bad XML file: %s\n" % file)
             print(exc.message)
 
     def as_dict(self, elem):

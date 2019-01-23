@@ -242,7 +242,7 @@ class GoogleTrace(TaskCombiner):
                 self.file.write(
                     '{"name": "process_labels", "ph":"M", "pid":%d, "tid":%s, "args": {"labels":"%s"}},\n' % (data['pid'], data['tid'], ','.join(data['labels']))
                 )
-            if data['tid'] >= 0 and '%d,%d' % (data['pid'], data['tid']) not in self.tree['threads']:  # marking the main thread
+            if data['tid'] >= 0 and ('%d,%d' % (data['pid'], data['tid'])) not in self.tree['threads']:  # marking the main thread
                 self.file.write(
                     '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], "<main>")
                 )

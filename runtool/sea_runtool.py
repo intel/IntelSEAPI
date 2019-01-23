@@ -1731,7 +1731,7 @@ class Callbacks(TaskCombinerCommon):
 #   task.end(%timestamp%)
 
 
-class FileWrapper(object):
+class FileWrapper():
     def __init__(self, path, args, tree, domain, tid):
         self.args = args
         self.tree = tree
@@ -1743,6 +1743,9 @@ class FileWrapper(object):
 
     def __del__(self):
         self.file.close()
+
+    def next(self):
+        self.__next__()
 
     def __next__(self):
         self.record = self.read()
