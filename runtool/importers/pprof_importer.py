@@ -9,8 +9,6 @@ import gzip
 import imp
 
 from sea_runtool import default_tree, Callbacks, Progress, get_decoders
-
-sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from python_compatibility_layer import iteritems
 
 IS_AVAILABLE = True

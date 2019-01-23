@@ -16,8 +16,8 @@
 # ********************************************************************************************************************************************************************************************************************************************************************************************
 from __future__ import print_function
 import os
-import sys
 import imp
+import sys
 import time
 import shutil
 import struct
@@ -28,6 +28,7 @@ import binascii
 import traceback
 import subprocess
 from glob import glob
+from python_compatibility_layer import iteritems, itervalues, xrange
 
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), 'decoders')))
 try:
@@ -35,8 +36,6 @@ try:
 except:
     pass
 
-sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
-from python_compatibility_layer import iteritems, itervalues, xrange
 
 try:
     sys.setdefaultencoding("utf-8")

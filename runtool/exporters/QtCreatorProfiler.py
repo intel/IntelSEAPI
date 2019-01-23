@@ -1,10 +1,6 @@
 from __future__ import print_function
 import cgi
 from sea_runtool import TaskCombiner, get_name, to_hex
-
-import os
-import sys
-sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from python_compatibility_layer import iteritems
 #https://github.com/danimo/qt-creator/blob/master/src/plugins/qmlprofiler/qmlprofilertracefile.cpp
 #https://github.com/danimo/qt-creator/blob/master/src/plugins/qmlprofiler/qv8profilerdatamodel.cpp

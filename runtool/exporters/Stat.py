@@ -1,9 +1,5 @@
 import cgi
 from sea_runtool import GraphCombiner
-
-import os
-import sys
-sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from python_compatibility_layer import iteritems
 
 class Stat(GraphCombiner):

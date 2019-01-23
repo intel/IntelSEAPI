@@ -1,8 +1,6 @@
 from __future__ import print_function
-import os
 import sys
 import socket
-sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from python_compatibility_layer import basestring, iteritems
 
 def resolve_host(ip):

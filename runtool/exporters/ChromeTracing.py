@@ -11,12 +11,11 @@ import tempfile
 import subprocess
 from datetime import datetime
 from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst, get_importers
+from python_compatibility_layer import unicode, iteritems, itervalues
 
 MAX_GT_SIZE = 50 * 1024 * 1024
 GT_FLOAT_TIME = True
 
-sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
-from python_compatibility_layer import unicode, iteritems, itervalues
 
 class GoogleTrace(TaskCombiner):
 

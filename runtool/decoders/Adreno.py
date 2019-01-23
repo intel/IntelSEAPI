@@ -1,7 +1,4 @@
 from __future__ import print_function
-import os
-import sys
-sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from python_compatibility_layer import xrange
 
 TRACK_INDEX, TRACK_NAME = -1, 'GPU'

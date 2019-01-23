@@ -6,8 +6,6 @@ import codecs
 from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, get_exporters, get_decoders, get_importers, format_bytes
 sys.path.append(os.path.realpath(os.path.dirname(__file__)))  # weird CentOS behaviour workaround
 from etw import GPUQueue
-
-sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from python_compatibility_layer import iteritems
 
 class DTrace(GPUQueue):
