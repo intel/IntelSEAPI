@@ -1,6 +1,7 @@
+from __future__ import print_function
 import os
 from sea_runtool import default_tree, Callbacks, Progress, TaskCombiner, ProgressConst, TaskTypes, format_bytes
-
+from python_compatibility_layer import iteritems
 
 class Parser:
     def __init__(self, args, callbacks):
@@ -137,7 +138,7 @@ class Parser:
         elif self.current['name'] == 'THSEND':
             pass
         else:
-            print self.current['name']
+            print(self.current['name'])
             assert False
 
     def on_ker_call(self):
@@ -173,10 +174,10 @@ class Parser:
         self.handle_event()
         self.current = {}
         for callback in self.callbacks.callbacks:
-            for pid, proc_data in self.proc_map.iteritems():
+            for (pid, proc_data) in iteritems(self.proc_map):
                 proc_name = proc_data['name'].replace('\\"', '').replace('"', '')
                 callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': pid, 'tid': -1, 'data': proc_name})
-                for tid, thread_data in proc_data['threads'].iteritems():
+                for (tid, thread_data) in iteritems(proc_data['threads']):
                     thread_name = thread_data['name'].replace('\\"', '').replace('"', '')
                     callback("metadata_add", {'domain': 'IntelSEAPI', 'str': '__thread__', 'pid': pid, 'tid': tid, 'data': '%s (tid %d)' % (thread_name, tid)})
 

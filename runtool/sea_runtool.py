@@ -14,7 +14,7 @@
 #   HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 # ********************************************************************************************************************************************************************************************************************************************************************************************
-
+from __future__ import print_function
 import os
 import imp
 import sys
@@ -28,6 +28,7 @@ import binascii
 import traceback
 import subprocess
 from glob import glob
+from python_compatibility_layer import iteritems, itervalues, xrange
 
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), 'decoders')))
 try:
@@ -135,7 +136,7 @@ def get_decoders():
 def parse_args(args):
     import argparse
     parser = argparse.ArgumentParser(epilog="After this command line add ! followed by command line of your program")
-    format_choices = ["mfc", "mfp"] + list(get_exporters().iterkeys())
+    format_choices = ["mfc", "mfp"] + list(get_exporters())
     if sys.platform == 'win32':
         format_choices.append("etw")
     elif sys.platform == 'darwin':
@@ -167,7 +168,7 @@ def parse_args(args):
     parser.add_argument("--debug", action="store_true", help='Internal: validation')
     parser.add_argument("--profile", action="store_true", help='Internal: profile runtool execution')
     parser.add_argument("--trace_to", help='Internal: trace runtool execution into given folder')
-    parser.add_argument("--collector", choices=list(get_collectors().iterkeys()) + ['default'])
+    parser.add_argument("--collector", choices=list(get_collectors()) + ['default'])
     parser.add_argument("--strip_aliens", action="store_true", help='Filters out all but target processes')
     parser.add_argument("--system_wide", action="store_true", help='Includes all captured data(can kill viewer)')
     parser.add_argument("--remove_args", action="store_true", help='Deflates trace by removing arguments')
@@ -184,11 +185,11 @@ def parse_args(args):
         parsed_args = parser.parse_args(args[:separator])
         if parsed_args.input:
             parser.print_help()
-            print "Error: Input argument (-i) contradicts launch mode"
+            print("Error: Input argument (-i) contradicts launch mode")
             sys.exit(-1)
         if not parsed_args.output:
             parser.print_help()
-            print "Error: No output (-o) given in launch mode"
+            print("Error: No output (-o) given in launch mode")
             sys.exit(-1)
         victim = args[separator + 1:]
         victim[-1] = victim[-1].strip()  # removal of trailing '\r' - when launched from .sh
@@ -204,7 +205,7 @@ def parse_args(args):
             if not parsed_args.output:
                 parsed_args.output = parsed_args.input
             return parsed_args, None
-        print "--input argument is required for transformation mode."
+        print("--input argument is required for transformation mode.")
         parser.print_help()
         sys.exit(-1)
 
@@ -244,7 +245,7 @@ def main():
                 output = join_gt_output(args, output)
                 replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
                 for path in output:
-                    print os.path.abspath(path).replace(*replacement)
+                    print(os.path.abspath(path).replace(*replacement))
 
 
 def os_lib_ext():
@@ -276,19 +277,19 @@ class Remote:
     def execute(self, cmd):
         command = '%s "%s"' % (self.execute_prefix, cmd)
         if self.args.verbose:
-            print "command:", command
+            print("command:", command)
         out, err = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
         if err:
-            print "Error:", err
+            print("Error:", err)
             raise Exception(err)
         return out
 
     def copy(self, source, target):
         if self.args.verbose:
-            print "%s %s %s" % (self.copy_prefix, source, target)
+            print("%s %s %s" % (self.copy_prefix, source, target))
         out, err = subprocess.Popen("%s %s %s" % (self.copy_prefix, source, target), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
         if err:
-            print "Error:", err
+            print("Error:", err)
             raise Exception(err)
         return out
 
@@ -296,9 +297,9 @@ class Remote:
 def launch_remote(args, victim):
     remote = Remote(args)
 
-    print 'Getting target uname...',
+    print('Getting target uname...', end=' ')
     unix = remote.execute("uname")
-    print ':', unix
+    print(':', unix)
     if 'darwin' in unix.lower():
         search = os.path.join(args.bindir, '*IntelSEAPI.dylib')
         files = glob(search)
@@ -311,20 +312,20 @@ def launch_remote(args, victim):
         load_lib = 'INTEL_LIBITTNOTIFY' + bits
     target = '/tmp/' + os.path.basename(files[0])
 
-    print 'Copying corresponding library...'
-    print remote.copy(files[0], '%s:%s' % (args.ssh, target))
+    print('Copying corresponding library...')
+    print(remote.copy(files[0], '%s:%s' % (args.ssh, target)))
 
-    print 'Making temp dir...',
+    print('Making temp dir...', end=' ')
     trace = remote.execute('mktemp -d' + (' -t SEA_XXX' if 'darwin' in unix.lower() else '')).strip()
-    print ':', trace
+    print(':', trace)
 
     output = args.output
     args.output = trace + '/nop'
 
-    print 'Starting ftrace...'
+    print('Starting ftrace...')
 
     ftrace = get_collectors()['ftrace'](args, remote)
-    print 'Executing:', ' '.join(victim), '...'
+    print('Executing:', ' '.join(victim), '...')
 
     variables = dict()
     variables[load_lib] = target
@@ -333,23 +334,23 @@ def launch_remote(args, victim):
         variables['INTEL_SEA_VERBOSE'] = '1'
     if args.ring:
         variables['INTEL_SEA_RING'] = str(args.ring)
-    suffix = ' '.join(['%s=%s' % pair for pair in variables.iteritems()])
-    print remote.execute(suffix + ' '.join(victim))
+    suffix = ' '.join(['%s=%s' % pair for pair in iteritems(variables)])
+    print(remote.execute(suffix + ' '.join(victim)))
     if ftrace:
         args.trace = ftrace.stop()
     args.output = output
 
     local_tmp = tempfile.mkdtemp()
-    print 'Copying result:'
-    print remote.copy('-r %s:%s' % (args.ssh, trace), local_tmp)
+    print('Copying result:')
+    print(remote.copy('-r %s:%s' % (args.ssh, trace), local_tmp))
 
-    print 'Removing temp dir...'
+    print('Removing temp dir...')
     remote.execute('rm -r %s' % trace)
 
-    print 'Transformation...'
+    print('Transformation...')
     files = glob(os.path.join(local_tmp, '*', 'pid-*'))
     if not files:
-        print "Error: Nothing captured"
+        print("Error: Nothing captured")
         sys.exit(-1)
     args.input = files[0]
     if args.trace:
@@ -357,7 +358,7 @@ def launch_remote(args, victim):
     output = transform(args)
     output = join_gt_output(args, output)
     shutil.rmtree(local_tmp)
-    print "result:", output
+    print("result:", output)
 
 
 def launch(args, victim):
@@ -372,11 +373,11 @@ def launch(args, victim):
         search = os.path.sep.join([args.bindir, "*IntelSEAPI" + bits + os_lib_ext()])
         files = glob(search)
         if not len(files):
-            print "Warning: didn't find any files for:", search
+            print("Warning: didn't find any files for:", search)
             continue
         paths.append((bits, files[0]))
     if not len(paths):
-        print "Error: didn't find any *IntelSEAPI%s files. Please check that you run from bin directory, or use --bindir." % os_lib_ext()
+        print("Error: didn't find any *IntelSEAPI%s files. Please check that you run from bin directory, or use --bindir." % os_lib_ext())
         sys.exit(-1)
     if macosx:
         env["DYLD_INSERT_LIBRARIES"] = paths[0][1]
@@ -389,7 +390,7 @@ def launch(args, victim):
             env["INTEL_LIBITTNOTIFY64"] = paths['64']
             env["INTEL_JIT_PROFILER64"] = paths['64']
 
-    env["INTEL_SEA_FEATURES"] = os.environ['INTEL_SEA_FEATURES'] if os.environ.has_key('INTEL_SEA_FEATURES') else ""
+    env["INTEL_SEA_FEATURES"] = os.environ['INTEL_SEA_FEATURES'] if 'INTEL_SEA_FEATURES' in os.environ else ""
     env["INTEL_SEA_FEATURES"] += (" " + str(args.format)) if args.format else ""
     env["INTEL_SEA_FEATURES"] += " stacks" if args.stacks else ""
     env["INTEL_SEA_FEATURES"] += " memcount|memstat" if args.memory else ""
@@ -408,14 +409,14 @@ def launch(args, victim):
     env['VK_LAYER_PATH'] = (os.environ['VK_LAYER_PATH'] + os.pathsep + args.bindir) if 'VK_LAYER_PATH' in os.environ else args.bindir
 
     if args.dry:
-        for key, val in env.iteritems():
+        for (key, val) in iteritems(env):
             if val:
-                print key + "=" + val
+                print(key + "=" + val)
         return
 
     if args.verbose:
-        print "Running:", victim
-        print "Environment:", str(env)
+        print("Running:", victim)
+        print("Environment:", str(env))
 
     os.environ.update(env)
 
@@ -462,20 +463,20 @@ def launch(args, victim):
 
         log = open(os.path.join((tempfile.gettempdir() if sys.platform == 'win32' else '/tmp'), datetime.now().strftime('sea_%H_%M_%S__%d_%m_%Y.log')), 'a')
         tracer.set_output(log)
-        print "For execution details see:", log.name
+        print("For execution details see:", log.name)
         tracer = tracer(args)  # turning class into instance
         if mdapi:
             mdapi.start()
 
         if sys.platform != 'win32':  # collector start may be long, so we freeze victim during this time
-            print "PID:", proc.pid
+            print("PID:", proc.pid)
             import signal
             os.kill(proc.pid, signal.SIGCONT)
 
     try:
-        print "Waiting application to exit..."
+        print("Waiting application to exit...")
         proc.wait()
-        print "Stopping collectors..."
+        print("Stopping collectors...")
     except KeyboardInterrupt:
         os.kill(proc.pid, signal.SIGABRT)
 
@@ -502,7 +503,7 @@ def transform_all(args):
     traces = set(args.trace if args.trace else [])
 
     importers = get_importers()
-    for ext in importers.iterkeys():
+    for ext in importers:
         for file in glob(os.path.join(args.input, '*.' + ext)):
             if not any(sub in file for sub in ['.etl.', '.dtrace.', 'merged.']):
                 traces.add(file)
@@ -537,10 +538,10 @@ def transform_all(args):
 
     replacement = ('/', '\\') if sys.platform == 'win32' else ('\\', '/')
     for path in output:
-        print os.path.abspath(path).replace(*replacement), format_bytes(os.path.getsize(path))
+        print(os.path.abspath(path).replace(*replacement), format_bytes(os.path.getsize(path)))
 
     save_domains()
-    print "limits:", Callbacks.get_globals()['limits']
+    print("limits:", Callbacks.get_globals()['limits'])
     return output
 
 
@@ -651,12 +652,12 @@ def parse_jit(tree, path):
 def sea_reader(args):  # reads the structure of .sea format folder into dictionary
     folder = args.input
     if not os.path.exists(folder):
-        print """Error: folder "%s" doesn't exist""" % folder
+        print("""Error: folder "%s" doesn't exist""" % folder)
     tree = default_tree(args)
     pos = folder.rfind("-")  # pid of the process is encoded right in the name of the folder
     tree["pid"] = int(folder[pos + 1:])
     folder = folder.replace("\\", "/").rstrip("/")
-    toplevel = os.walk(folder).next()
+    toplevel = next(os.walk(folder))
     for filename in toplevel[2]:
         with open("/".join([folder, filename]), "r") as file:
             if filename.endswith(".str"):  # each string_handle_create writes separate file, name is the handle, content is the value
@@ -669,7 +670,7 @@ def sea_reader(args):  # reads the structure of .sea format folder into dictiona
         tree["domains"][domain] = {"files": []}
         for file in os.walk("/".join([folder, domain])).next()[2]:  # each thread of this domain has separate file with data
             if not file.endswith(".sea"):
-                print "Warning: weird file found:", file
+                print("Warning: weird file found:", file)
                 continue
             filename = file[:-4]
 
@@ -699,7 +700,7 @@ class Progress:
         self.shown_steps = 0
         self.message = message
         if verbose_progress:
-            print message, "[",
+            print(message, "[", end=' ')
             sys.stdout.flush()
 
     def __enter__(self):
@@ -715,7 +716,7 @@ class Progress:
         if self.shown_steps < show_steps:
             if verbose_progress:
                 for i in range(show_steps - self.shown_steps):
-                    print ".",
+                    print(".", end=' ')
                     sys.stdout.flush()
             self.shown_steps = show_steps
 
@@ -724,7 +725,7 @@ class Progress:
             g_progress_interceptor(self.message, self.total, self.total)
         self.show_progress(self.steps)
         if verbose_progress:
-            print "]"
+            print("]")
         return False
 
     @staticmethod
@@ -769,7 +770,7 @@ def read_chunk_header(file):
 
 def transform(args):
     if args.verbose:
-        print "Transform:", str(args)
+        print("Transform:", str(args))
     tree = sea_reader(args)  # parse the structure
     if args.cuts and args.cuts == ['all'] or not args.cuts:
         return transform2(args, tree)
@@ -780,7 +781,7 @@ def transform(args):
             if args.cuts and current_cut not in args.cuts:
                 continue
             args.output = (output + "!" + current_cut) if current_cut else output
-            print "Cut #", current_cut if current_cut else "<None>"
+            print("Cut #", current_cut if current_cut else "<None>")
 
             def skip_fn(path):
                 filename = os.path.split(path)[1]
@@ -829,7 +830,7 @@ class TaskCombinerCommon:
     def check_leaks(self):
         if not self.prev_memory:
             return
-        args = dict([(size, int(count)) for size, count in self.memory.iteritems() if size and int(count)])
+        args = dict([(size, int(count)) for (size, count) in iteritems(self.memory) if size and int(count)])
         self.process(self.prev_memory['pid']).thread(-1).marker('process', 'Memory Leaks (block size, count)').set(self.prev_memory['time'], args)
 
 
@@ -841,9 +842,9 @@ class TaskCombinerCommon:
             begin = end.copy()
             begin['time'] = self.time_bounds[0]
             self.complete_task(TaskTypes[begin['type']].split("_")[0], begin, end)
-        for domain, threads in self.domains.iteritems():
-            for tid, records in threads['tasks'].iteritems():
-                for id, per_id_records in records['byid'].iteritems():
+        for (domain, threads) in iteritems(self.domains):
+            for (tid, records) in iteritems(threads['tasks']):
+                for (id, per_id_records) in iteritems(records['byid']):
                     for begin in per_id_records:
                         end = begin.copy()
                         end['time'] = self.time_bounds[1]
@@ -869,7 +870,7 @@ class TaskCombinerCommon:
                 tasks = get_tasks(id)
                 if not tasks:  # they can be stacked
                     tasks = get_tasks(None)
-                    if not tasks or not tasks[-1].has_key('id') or tasks[-1]['id'] != id:
+                    if not tasks or 'id' not in tasks[-1] or tasks[-1]['id'] != id:
                         return None
             else:
                 tasks = get_tasks(None)
@@ -879,21 +880,21 @@ class TaskCombinerCommon:
                 return None
 
         def find_task(id):
-            for thread_stacks in domain['tasks'].itervalues():  # look in all threads
-                if thread_stacks['byid'].has_key(id) and thread_stacks['byid'][id]:
+            for thread_stacks in itervalues(domain['tasks']):  # look in all threads
+                if id in thread_stacks['byid'] and thread_stacks['byid'][id]:
                     return thread_stacks['byid'][id][-1]
                 else:
                     for item in thread_stacks['stack']:
-                        if item.has_key('id') and item['id'] == id:
+                        if 'id' in item and item['id'] == id:
                             return item
 
         def get_stack(tid):
             stack = []
-            for domain in self.domains.itervalues():
-                if not domain['tasks'].has_key(tid):
+            for domain in itervalues(self.domains):
+                if tid not in domain['tasks']:
                     continue
                 thread = domain['tasks'][tid]
-                for byid in thread['byid'].itervalues():
+                for byid in itervalues(thread['byid']):
                     stack += byid
                 if thread['stack']:
                     stack += thread['stack']
@@ -911,7 +912,7 @@ class TaskCombinerCommon:
             return None
 
         if fn == "task_begin" or fn == "task_begin_overlapped":
-            if not (data.has_key('str') or data.has_key('pointer')):
+            if not ('str' in data or 'pointer' in data):
                 data['str'] = 'Unknown'
             self.time_bounds[0] = min(self.time_bounds[0], data['time'])
             if 'delta' in data and data['delta']:  # turbo mode, only begins are written
@@ -933,12 +934,12 @@ class TaskCombinerCommon:
                     self.complete_task('task', item, data)
             else:
                 assert (self.tree["ring_buffer"] or self.tree['cuts'])
-                if data.has_key('str'):  # nothing to show without name
+                if 'str' in data:  # nothing to show without name
                     self.no_begin.append(data)
         elif fn == "frame_begin":
-            get_tasks(data['id'] if data.has_key('id') else None).append(data)
+            get_tasks(data['id'] if 'id' in data else None).append(data)
         elif fn == "frame_end":
-            frames = get_tasks(data['id'] if data.has_key('id') else None)
+            frames = get_tasks(data['id'] if 'id' in data else None)
             index = get_last_index(frames, 7)
             if index is not None:
                 item = frames.pop(index)
@@ -957,11 +958,11 @@ class TaskCombinerCommon:
             else:  # global metadata
                 self.global_metadata(data)
         elif fn == "object_snapshot":
-            if data.has_key('args'):
+            if 'args' in data:
                 args = data['args'].copy()
             else:
                 args = {'snapshot': {}}
-            if data.has_key('data'):
+            if 'data' in data:
                 state = data['data']
                 for pair in state.split(","):
                     (key, value) = tuple(pair.split("="))
@@ -970,7 +971,7 @@ class TaskCombinerCommon:
             self.complete_task(fn, data, data)
         elif fn in ["marker", "counter", "object_new", "object_delete"]:
             if fn == "marker" and data['data'] == 'task':
-                markers = get_tasks("marker_" + (data['id'] if data.has_key('id') else ""))
+                markers = get_tasks("marker_" + (data['id'] if 'id' in data else ""))
                 if markers:
                     item = markers.pop()
                     item['type'] = 7  # frame_begin
@@ -994,7 +995,7 @@ class TaskCombinerCommon:
                 if data['domain'] == 'Memory':
                     size = int(data['str'].split('<')[1].split('>')[0])
                     prev_value = 0.
-                    if self.memory.has_key(size):
+                    if size in self.memory:
                         prev_value = self.memory[size]
                     delta = data['delta'] - prev_value  # data['delta'] has current value of the counter
                     self.total_memory += delta * size
@@ -1024,14 +1025,14 @@ class TaskCombinerCommon:
                         self.compress_counter(cache, data)
                         values.append(data)
                         return
-                if data.has_key('id') and thread['args'].has_key(data['id']):
+                if 'id' in data and data['id'] in thread['args']:
                     data['args'] = thread['args'][data['id']]
                     del thread['args'][data['id']]
                 self.complete_task(fn, data, data)
         elif fn == "relation":
             self.relation(
                 data,
-                get_task(data['id'] if data.has_key('id') else None),
+                get_task(data['id'] if 'id' in data else None),
                 get_task(data['parent']) or find_task(data['parent'])
             )
         else:
@@ -1056,7 +1057,7 @@ class TaskCombinerCommon:
         return False
 
     def flush_counters(self, domain, data):
-        for name, counter in domain['counters'].iteritems():
+        for (name, counter) in iteritems(domain['counters']):
             common_data = data.copy()
             common_data['time'] = counter['begin'] + (counter['end'] - counter['begin']) / 2
             common_data['str'] = name
@@ -1064,9 +1065,9 @@ class TaskCombinerCommon:
             self.complete_task('counter', common_data, common_data)
 
     def flush_compressed_counters(self):
-        for pid, threads in self.memcounters.iteritems():
-            for tid, counters in threads.iteritems():
-                for name, counter in counters.iteritems():
+        for (pid, threads) in iteritems(self.memcounters):
+            for (tid, counters) in iteritems(threads):
+                for (name, counter) in iteritems(counters):
                     self.compress_counter(counter, None)
 
 
@@ -1085,7 +1086,7 @@ class Callbacks(TaskCombinerCommon):
         self.on_finalize_callbacks = []
         if hasattr(self.args, 'user_input') and os.path.isdir(self.args.user_input):
             tid_map = build_tid_map(self.args, self.args.user_input)
-            self.allowed_pids = set(tid_map.itervalues())
+            self.allowed_pids = set(tid_map.values())
         for fmt in args.format:
             self.callbacks.append(get_exporters()[fmt](args, tree))
 
@@ -1139,9 +1140,9 @@ class Callbacks(TaskCombinerCommon):
     def finalize(self):
         for decoder in self.sea_decoders:
             decoder.finalize()
-        for kind, data in self.tasks_from_samples.iteritems():
-            for pid, threads in data.iteritems():
-                for tid, tasks in threads.iteritems():
+        for (kind, data) in iteritems(self.tasks_from_samples):
+            for (pid, threads) in iteritems(data):
+                for (tid, tasks) in iteritems(threads):
                     self.handle_stack(pid, tid, tasks.last_stack_time + TIME_SHIFT_FOR_GT * len(tasks) + 1, [], kind)
         for function in self.on_finalize_callbacks:
             function(self)
@@ -1277,7 +1278,7 @@ class Callbacks(TaskCombinerCommon):
                         to_remove = []
                         del self.overlapped[id]  # the task has ended, removing it from the pipeline
                         time_shift = 0
-                        for begin_data in sorted(self.overlapped.itervalues(), key=lambda data: data['realtime']):  # finish all and start again to form melting task queue
+                        for begin_data in sorted(itervalues(self.overlapped), key=lambda data: data['realtime']):  # finish all and start again to form melting task queue
                             time_shift += 1  # making sure the order of tasks on timeline, probably has to be done in Chrome code rather
                             end_data = begin_data.copy()  # the end of previous part of task is also here
                             end_data['time'] = call_data['time'] - time_shift  # new begin for every task is here
@@ -1665,7 +1666,7 @@ class Callbacks(TaskCombinerCommon):
         # Find affected tasks, those to the right of most recent of removed. These affected are to be 'restarted'
         if to_remove:
             leftmost_time = min(tasks[ptr]['begin'] for ptr in to_remove)
-            for ptr, task in tasks.iteritems():
+            for (ptr, task) in iteritems(tasks):
                 if task['begin'] > leftmost_time and ptr not in to_remove:
                     to_remove.append(ptr)
                     to_add.append(task.copy())
@@ -1730,7 +1731,7 @@ class Callbacks(TaskCombinerCommon):
 #   task.end(%timestamp%)
 
 
-class FileWrapper:
+class FileWrapper():
     def __init__(self, path, args, tree, domain, tid):
         self.args = args
         self.tree = tree
@@ -1744,6 +1745,9 @@ class FileWrapper:
         self.file.close()
 
     def next(self):
+        self.__next__()
+
+    def __next__(self):
         self.record = self.read()
 
     def get_record(self):
@@ -1818,7 +1822,7 @@ def transform2(args, tree, skip_fn=None):
             return callbacks.get_result()
 
         wrappers = {}
-        for domain, content in tree["domains"].iteritems():  # go thru domains
+        for (domain, content) in iteritems(tree["domains"]):  # go thru domains
             for tid, path in content["files"]:  # go thru per thread files
                 parts = split_filename(path)
 
@@ -1826,7 +1830,7 @@ def transform2(args, tree, skip_fn=None):
                 if file_wrapper.get_record():  # record is None if something wrong with file reading
                     wrappers.setdefault(parts['dir'] + '/' + parts['name'], []).append(file_wrapper)
 
-        for unordered in wrappers.itervalues():  # chain wrappers by time
+        for unordered in itervalues(wrappers):  # chain wrappers by time
             ordered = sorted(unordered, key=lambda wrapper: wrapper.get_record()['time'])
             prev = None
             for wrapper in ordered:
@@ -1836,7 +1840,7 @@ def transform2(args, tree, skip_fn=None):
 
         files = []
         (left_limit, right_limit) = callbacks.get_limits()
-        for unordered in wrappers.itervalues():
+        for unordered in itervalues(wrappers):
             for wrapper in unordered:
                 if right_limit and wrapper.get_record()['time'] > right_limit:
                     continue
@@ -1848,7 +1852,7 @@ def transform2(args, tree, skip_fn=None):
                 files.append(wrapper)
 
         if args.verbose:
-            print path
+            print(path)
             progress = DummyWith()
         else:
             size = sum([file.get_size() for file in files])
@@ -1868,24 +1872,24 @@ def transform2(args, tree, skip_fn=None):
                         earliest = file
                 if not record:  # all finished
                     break
-                earliest.next()
+                next(earliest)
 
                 if args.verbose:
-                    print "%d\t%s\t%s" % (count, TaskTypes[record['type']], record)
+                    print("%d\t%s\t%s" % (count, TaskTypes[record['type']], record))
                 elif count % ProgressConst == 0:
                     progress.tick(sum([file.get_pos() for file in files]))
                 callbacks.on_event(TaskTypes[record['type']], record)
                 count += 1
 
         callbacks("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': tree["pid"], 'tid': -1, 'delta': -1})
-        for pid, name in tree['groups'].iteritems():
+        for (pid, name) in iteritems(tree['groups']):
             callbacks("metadata_add", {'domain': 'IntelSEAPI', 'str': '__process__', 'pid': int(pid), 'tid': -1, 'delta': -1, 'data': name})
 
     return callbacks.get_result()
 
 
 def get_module_by_ptr(tree, ptr):
-    keys = list(tree['modules'].iterkeys())
+    keys = list(tree['modules'])
     keys.sort()  # looking for first bigger the address, previous is the module we search for
     item = keys[0]
     for key in keys[1:]:
@@ -1951,12 +1955,12 @@ def resolve_cmd(args, path, load_addr, ptr, cache={}):
         err = traceback.format_exc()
         import gc
         gc.collect()
-        print "gc.collect()"
+        print("gc.collect()")
     except:
         err = traceback.format_exc()
     if err:
-        print cmd
-        print err
+        print(cmd)
+        print(err)
         return ''
 
     if sys.platform == 'win32':
@@ -2050,7 +2054,7 @@ def resolve_stack(args, tree, data):
 
 
 def attachme():
-    print "Attach me!"
+    print("Attach me!")
     while not sys.gettrace():
         pass
     import time
@@ -2102,7 +2106,7 @@ struct_decoders = {
 
 
 def represent_data(tree, name, data):
-    for key in struct_decoders.iterkeys():
+    for key in struct_decoders:
         if key in name:
             return struct_decoders[key](data)
     if all((31 < ord(chr) < 128) or (chr in ['\t', '\r', '\n']) for chr in data):  # string we will show as string
@@ -2215,7 +2219,7 @@ def save_domains():
 
     filter = subst_env_vars(filter)
     with open(filter, 'w') as file:
-        for key, value in is_domain_enabled.domains.iteritems():
+        for (key, value) in iteritems(is_domain_enabled.domains):
             file.write('%s%s\n' % ('#' if not value else '', key))
 
 
@@ -2257,8 +2261,8 @@ class GraphCombiner(TaskCombiner):
             if begin['type'] == 0:  # non-overlapped only
                 # We expect parents to be reported in the end order (when the end time becomes known)
                 orphans = self.per_thread.setdefault(begin['tid'], [])
-                left_index = bisect_right(orphans, begin['time'], lambda (b,_): b['time'])  # first possible child
-                right_index = bisect_right(orphans, end['time'], lambda (b,_): b['time']) - 1  # last possible child
+                left_index = bisect_right(orphans, begin['time'], lambda b__: b__[0]['time'])  # first possible child
+                right_index = bisect_right(orphans, end['time'], lambda b__: b__[0]['time']) - 1  # last possible child
                 for i in xrange(right_index, left_index - 1, -1):  # right to left to be able deleting from array
                     orphan = orphans[i]
                     if orphan[1]['time'] < end['time']:  # a parent is found!
@@ -2289,14 +2293,14 @@ class GraphCombiner(TaskCombiner):
             elif 'delete' in type:
                 object['destroy'] = begin['time']
         else:
-            print "Unhandled:", type
+            print("Unhandled:", type)
 
     def finish(self):
-        for tid, orphans in self.per_thread.iteritems():
+        for (tid, orphans) in iteritems(self.per_thread):
             last_time = 0
             for orphan in orphans:
                 if (orphan[1]['time'] < last_time):
-                    print "FIXME: orphan[1]['time'] < last_time"
+                    print("FIXME: orphan[1]['time'] < last_time")
                 last_time = orphan[1]['time']
                 begin = orphan[0]
                 self.add_relation({'label': 'executes', 'from': self.make_id("threads", str(tid)),
@@ -2313,7 +2317,7 @@ class GraphCombiner(TaskCombiner):
             self.add_relation({'label': self.get_name_ex(data), 'from': self.make_id(head['domain'], self.get_name_ex(head)), 'to': self.make_id(tail['domain'], self.get_name_ex(tail)), 'color': 'red'})
 
     def add_relation(self, relation):
-        key = frozenset(relation.iteritems())
+        key = frozenset(iteritems(relation))
         if key in self.relations:
             return
         self.relations[key] = relation
@@ -2410,5 +2414,5 @@ if __name__ == "__main__":
     start_time = time.time()
     main()
     elapsed = time.time() - start_time
-    print "Time Elapsed:", str(timedelta(seconds=elapsed)).split('.')[0]
+    print("Time Elapsed:", str(timedelta(seconds=elapsed)).split('.')[0])
 

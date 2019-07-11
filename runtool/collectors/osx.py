@@ -1,9 +1,11 @@
+from __future__ import print_function
 import os
 import sys
 import shutil
 import subprocess
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from sea_runtool import Collector, get_decoders
+from python_compatibility_layer import itervalues
 
 dtrace_context_switch = r"""
 
@@ -205,7 +207,7 @@ class DTraceCollector(Collector):
         self.subcollectors = set()
 
         decoders = get_decoders()
-        for decoder_group in decoders.itervalues():
+        for decoder_group in itervalues(decoders):
             for decoder_class in decoder_group:
                 if any('Subcollector' in str(name) for name in decoder_class.__bases__):
                     self.subcollectors.add(decoder_class)
@@ -224,7 +226,7 @@ class DTraceCollector(Collector):
             return path
         with open(path, 'w') as file:
             file.write(osxaskpass)
-        os.chmod(path, 0700)
+        os.chmod(path, 0o700)
         return path
 
     def gen_gpu_hooks(self, text):  # TODO: check /System/Library/Extensions/AppleIntelSKLGraphics.kext/Contents/Info.plist
@@ -286,7 +288,7 @@ class DTraceCollector(Collector):
                 else:
                     sibling = sibling.nextSibling
             if value != '0':
-                print "Warning: To enable Graphics profiling, set GraphicsFirmwareSelect to 0 in: %s\n\tThen: sudo kextcache -i / & reboot" % file_name
+                print('Warning: To enable Graphics profiling, set GraphicsFirmwareSelect to 0 in: %s\n\tThen: sudo kextcache -i / & reboot' % file_name)
 
     @staticmethod
     def gen_options(options):
@@ -351,7 +353,7 @@ class DTraceCollector(Collector):
     def get_pid_children(parent):
         (out, err) = DTraceCollector.execute('ps -o pid,ppid -ax', log=False)
         if err:
-            print err
+            print(err)
             return
         for line in out.split('\n'):
             if not line:
@@ -389,7 +391,7 @@ class DTraceCollector(Collector):
             return False
         (out, err) = cls.execute('csrutil status')
         if 'disabled' not in out:
-            print 'Please do: "csrutil disable" from Recovery OS terminal to be able using dtrace...'
+            print('Please do: "csrutil disable" from Recovery OS terminal to be able using dtrace...')
             return False
         return True
 

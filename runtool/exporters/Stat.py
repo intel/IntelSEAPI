@@ -1,6 +1,6 @@
 import cgi
 from sea_runtool import GraphCombiner
-
+from python_compatibility_layer import iteritems
 
 class Stat(GraphCombiner):
     def __init__(self, args, tree):
@@ -13,8 +13,8 @@ class Stat(GraphCombiner):
 
     def finish(self):
         GraphCombiner.finish(self)
-        for domain, data in self.per_domain.iteritems():
-            for task_name, task_data in data['tasks'].iteritems():
+        for (domain, data) in iteritems(self.per_domain):
+            for (task_name, task_data) in iteritems(data['tasks']):
                 time = task_data['time']
                 self.file.write('%s,%s,%s,%s,%s,%d\n' % (
                         cgi.escape(domain), cgi.escape(task_name),
@@ -28,7 +28,7 @@ class Stat(GraphCombiner):
         sorting = []
         for trace in traces:
             sorting.append((os.path.getsize(trace), trace))
-        sorting.sort(key=lambda (size, trace): size, reverse=True)
+        sorting.sort(key=lambda size_trace: size_trace[0], reverse=True)
         shutil.copyfile(sorting[0][1], output + ".csv")
         return output + ".csv"
 

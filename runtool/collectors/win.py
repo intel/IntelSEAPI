@@ -1,3 +1,4 @@
+from __future__ import print_function
 import os
 import sys
 import time
@@ -10,7 +11,6 @@ import subprocess
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from sea_runtool import Collector, is_domain_enabled
 import sea
-
 
 def relog_etl(frm, to):
     sea.ITT('win').relog(frm, to)
@@ -48,7 +48,7 @@ class WPRCollector(Collector):
                     break
         if not res:
             return None
-        statics['res'] = sorted(res, key=lambda(_, ver): [int(item) for item in ver.split('.')], reverse=True)[0][0]
+        statics['res'] = sorted(res, key=lambda __ver: [int(item) for item in __ver[1].split('.')], reverse=True)[0][0]
         return statics['res']
 
     @staticmethod
@@ -171,7 +171,7 @@ class GPUViewCollector(Collector):
 
         (out, err) = self.execute('logman stop GPA_GPUVIEW -ets')
         if err and complete:
-            print err
+            print(err)
 
         environ = os.environ.copy()
         environ['TLOG'] = 'NORMAL'
@@ -193,7 +193,7 @@ class GPUViewCollector(Collector):
             cmd = '"%s" -merge Merged.etl IntelSEAPI.etl "%s"' % (xperf, os.path.basename(file))
             (out, err) = Collector.execute(cmd, cwd=started)
             if err and (os.path.basename(file) not in err):
-                print err
+                print(err)
             relog_etl(os.path.join(started, os.path.basename(file)), file)
             shutil.rmtree(started)
         else:
