@@ -103,7 +103,9 @@
 
     #include <pthread.h>
     #include <assert.h>
-    //#include <execinfo.h>
+    #ifndef USE_MUSL_LIBC
+        #include <execinfo.h>
+    #endif
     #include <dlfcn.h>
     #include <string.h>
 
@@ -141,14 +143,16 @@
     #else
         const int frames_to_skip = 7;
     #endif
-        // int trace_size = backtrace(trace, stack_depth);
-        // for (int i = frames_to_skip; i < trace_size; ++i)
-        // {
-        //     Dl_info dl_info = {};
-        //     dladdr(trace[i], &dl_info);
-        //     if (dl_info.dli_fname && strstr(dl_info.dli_fname, "/IntelSEAPI."))
-        //         return true;
-        // }
+        #ifndef USE_MUSL_LIBC
+            int trace_size = backtrace(trace, stack_depth);
+            for (int i = frames_to_skip; i < trace_size; ++i)
+            {
+                Dl_info dl_info = {};
+                dladdr(trace[i], &dl_info);
+                if (dl_info.dli_fname && strstr(dl_info.dli_fname, "/IntelSEAPI."))
+                    return true;
+            }
+        #endif
         return false;
     }
 
@@ -253,36 +257,40 @@
 
             void InitHooks()
             {
-                // g_origMalloc = __malloc_hook;
-                // g_origFree = __free_hook;
-                // __malloc_hook = MallocHook;
-                // __free_hook = FreeHook;
+                #ifndef USE_MUSL_LIBC
+                    g_origMalloc = __malloc_hook;
+                    g_origFree = __free_hook;
+                    __malloc_hook = MallocHook;
+                    __free_hook = FreeHook;
+                #endif
             }
             void (* volatile __malloc_initialize_hook)() = InitHooks;
 
-            // void* MallocHook(size_t size, const void * context)
-            // {
-            //     if (pthread_getspecific(tls_key) || HasSEAInStack())
-            //         return g_origMalloc(size, context);
-            //     CRecursionScope scope;
-            //
-            //     __itt_heap_allocate_begin(g_heap, size, 0);
-            //     void* res = g_origMalloc(size, context);
-            //     __itt_heap_allocate_end(g_heap, &res, size, 0);
-            //
-            //     return res;
-            // }
-            //
-            // void FreeHook(void* ptr, const void* context)
-            // {
-            //     if (pthread_getspecific(tls_key) || HasSEAInStack())
-            //         return g_origFree(ptr, context);
-            //     CRecursionScope scope;
-            //
-            //     __itt_heap_free_begin(g_heap, ptr);
-            //     g_origFree(ptr, context);
-            //     __itt_heap_free_end(g_heap, ptr);
-            // }
+            #ifndef USE_MUSL_LIBC
+                void* MallocHook(size_t size, const void * context)
+                {
+                    if (pthread_getspecific(tls_key) || HasSEAInStack())
+                        return g_origMalloc(size, context);
+                    CRecursionScope scope;
+
+                    __itt_heap_allocate_begin(g_heap, size, 0);
+                    void* res = g_origMalloc(size, context);
+                    __itt_heap_allocate_end(g_heap, &res, size, 0);
+
+                    return res;
+                }
+
+                void FreeHook(void* ptr, const void* context)
+                {
+                    if (pthread_getspecific(tls_key) || HasSEAInStack())
+                        return g_origFree(ptr, context);
+                    CRecursionScope scope;
+
+                    __itt_heap_free_begin(g_heap, ptr);
+                    g_origFree(ptr, context);
+                    __itt_heap_free_end(g_heap, ptr);
+                }
+            #endif
         #endif
 
      #endif

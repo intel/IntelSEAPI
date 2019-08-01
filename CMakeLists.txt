@@ -23,6 +23,7 @@ set(CMAKE_MACOSX_RPATH 1)
 OPTION(JDK "Enable Java build")
 OPTION(CO_PILOT "Enable co-pilot build")
 OPTION(FORCE_32 "Force a 32bit compile on 64bit" OFF)
+OPTION(USE_MUSL_LIBC "Use musl's libc implementation during compilation" OFF)
 
 if (ANDROID_ARCH_NAME MATCHES "arm\\.*")
     set(ARM 1)
@@ -50,6 +51,12 @@ else()
     endif()
     add_definitions(-DNDEBUG)
 endif()
+
+IF(USE_MUSL_LIBC)
+    set(CC "musl-gcc")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -static -Os -DUSE_MUSL_LIBC")
+    # see https://stackoverflow.com/a/41873196 for flag rationale
+ENDIF()
 
 # Replace /MD with /MT. IntelSEAPI must have own/static CRT
 set (Flags
