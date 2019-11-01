@@ -53,8 +53,8 @@ else()
 endif()
 
 IF(USE_MUSL_LIBC)
-    set(CC "musl-gcc")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -static -Os -DUSE_MUSL_LIBC")
+    SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -static -Os -DUSE_MUSL_LIBC")
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static -Os -DUSE_MUSL_LIBC")
     # see https://stackoverflow.com/a/41873196 for flag rationale
 ENDIF()
 
