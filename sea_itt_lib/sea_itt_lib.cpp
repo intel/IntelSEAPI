@@ -151,6 +151,8 @@ void UnchainGlobal(__itt_global* pOld)
 void __itt_report_error(__itt_error_code, ...){}
 
 
+__itt_domain* g_pIntelSEAPIDomain = nullptr;
+
 extern "C" {
 
     SEA_EXPORT void ITTAPI __itt_api_init(__itt_global* pGlob, __itt_group_id id)
@@ -158,11 +160,14 @@ extern "C" {
         if (!g_bInitialized)
         {
             g_bInitialized = true;
+            sea::SetGlobalCrashHandler();
 
             __itt_global* pGlobal = GetITTGlobal();
             __itt_mutex_init(&pGlobal->mutex);
             pGlobal->mutex_initialized = 1;
             sea::CIttLocker locker;
+            using namespace sea;
+            g_pIntelSEAPIDomain = UNICODE_AGNOSTIC(domain_create)("IntelSEAPI");
             __itt_api_init(pGlobal, id);
             pGlobal->api_initialized = 1;
         }

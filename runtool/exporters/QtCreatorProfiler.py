@@ -1,4 +1,5 @@
-import cgi
+from __future__ import print_function
+import html
 from sea_runtool import TaskCombiner, get_name, to_hex
 
 #https://github.com/danimo/qt-creator/blob/master/src/plugins/qmlprofiler/qmlprofilertracefile.cpp
@@ -39,7 +40,7 @@ class QTProfiler(TaskCombiner):
         name = get_name(begin)
 
         details = (type + ":") if type != 'task' else ""
-        if begin.has_key('parent'):
+        if 'parent' in begin:
             details += to_hex(begin['parent']) + "->"
         details += name
 
@@ -51,15 +52,15 @@ class QTProfiler(TaskCombiner):
             kind = 'Javascript'
 
         record = (
-            begin['__file__'].replace("\\", "/") if begin.has_key('__file__') else "",
-            begin['__line__'] if begin.has_key('__line__') else "0",
+            begin['__file__'].replace("\\", "/") if '__file__' in begin else "",
+            begin['__line__'] if '__line__' in begin else "0",
             kind,
             "%s | %s" % (details, begin['domain']),
             name
         )
-        record = tuple([cgi.escape(item) for item in record])
+        record = tuple([html.escape(item) for item in record])
 
-        if self.event_map.has_key(record):
+        if record in self.event_map:
             index = self.event_map[record]
         else:
             index = len(self.events)
@@ -74,9 +75,9 @@ class QTProfiler(TaskCombiner):
                 args['value'] = begin['delta']
             else:  # TODO: add multi-value support
                 return
-        if begin.has_key('args'):
+        if 'args' in begin:
             args = begin['args']
-            if end.has_key('args'):
+            if 'args' in end:
                 args.update(end['args'])
         if args:
             self.notes.append((start_time, dur, index, args))
@@ -86,21 +87,21 @@ class QTProfiler(TaskCombiner):
 
     def write_header(self):
         # at this moment print is redirected to output file
-        print '<?xml version="1.0" encoding="UTF-8"?>'
-        print '<trace version="1.02" traceStart="%d" traceEnd="%d">' % (self.start_time, self.end_time)
-        print '<eventData totalTime="%d">' % (self.end_time - self.start_time)
+        print('<?xml version="1.0" encoding="UTF-8"?>')
+        print('<trace version="1.02" traceStart="%d" traceEnd="%d">' % (self.start_time, self.end_time))
+        print('<eventData totalTime="%d">' % (self.end_time - self.start_time))
         counter = 0
         for event in self.events:
-            print '<event index="%d"><filename>%s</filename><line>%s</line><type>%s</type><details>%s</details><displayname>%s</displayname></event>' \
-                  % (counter, event[0], event[1], event[2], event[3], event[4])
+            print('<event index="%d"><filename>%s</filename><line>%s</line><type>%s</type><details>%s</details><displayname>%s</displayname></event>' \
+                  % (counter, event[0], event[1], event[2], event[3], event[4]))
             counter += 1
-        print '</eventData><profilerDataModel>'
+        print('</eventData><profilerDataModel>')
 
     def write_footer(self, file):
         file.write('</profilerDataModel><noteData>\n')
         for note in self.notes:
-            args = "\n".join([str(key) + " = " + str(val).replace("{","").replace("}","") for key, val in note[3].iteritems()])
-            file.write('<note startTime="%d" duration="%d" eventIndex="%d">%s</note>\n' % (note[0], note[1], note[2], cgi.escape(args)))
+            args = "\n".join([str(key) + " = " + str(val).replace("{","").replace("}","") for key, val in note[3].items()])
+            file.write('<note startTime="%d" duration="%d" eventIndex="%d">%s</note>\n' % (note[0], note[1], note[2], html.escape(args)))
         file.write('</noteData><v8profile totalTime="0"/></trace>\n')
 
     def finish(self):
@@ -112,7 +113,7 @@ class QTProfiler(TaskCombiner):
             if fi.isfirstline():
                 self.write_header()
                 wrote_header = True
-            print line,
+            print(line, end='')
         if wrote_header:
             with open(self.file_name, "a") as file:
                 self.write_footer(file)
@@ -124,39 +125,39 @@ class QTProfiler(TaskCombiner):
         import xml.dom.minidom as minidom
         output += ".qtd"
         with open(output, "w") as file:  # FIXME: doesn't work on huge traces, consider using "iterparse" approach
-            print >> file, '<?xml version="1.0" encoding="UTF-8"?>'
+            print('<?xml version="1.0" encoding="UTF-8"?>', file=file)
             traces = [minidom.parse(trace) for trace in traces]  # parse all traces right away
             traceStarts = sorted([int(dom.documentElement.attributes['traceStart'].nodeValue) for dom in traces]) #earliest start time
             traceEnds = sorted([int(dom.documentElement.attributes['traceEnd'].nodeValue) for dom in traces], reverse=True)#latest end time
-            print >> file, '<trace version="1.02" traceStart="%d" traceEnd="%d">' % (traceStarts[0], traceEnds[0])
-            print >> file, '<eventData totalTime="%d">' % (traceEnds[0] - traceStarts[0])
+            print('<trace version="1.02" traceStart="%d" traceEnd="%d">' % (traceStarts[0], traceEnds[0]), file=file)
+            print('<eventData totalTime="%d">' % (traceEnds[0] - traceStarts[0]), file=file)
             event_count = []  # accumulate event count to map indices
             for dom in traces:  # first we go by events
                 events = dom.getElementsByTagName('eventData')[0].getElementsByTagName('event')
                 for event in events:  # and correct each event index, adding count of events in previous files
                     index = int(event.attributes['index'].nodeValue) + sum(event_count)
                     event.setAttribute('index', str(index))
-                    print >> file, event.toxml()
+                    print(event.toxml(), file=file)
                 event_count.append(len(events))  # for next traces to adjust index start
-            print >> file, '</eventData><profilerDataModel>'
+            print('</eventData><profilerDataModel>', file=file)
             index = 0
             for dom in traces:
                 ranges = dom.getElementsByTagName('profilerDataModel')[0].getElementsByTagName('range')
                 for range in ranges:
                     eventIndex = int(range.attributes['eventIndex'].nodeValue) + sum(event_count[:index])
                     range.setAttribute('eventIndex', str(eventIndex))
-                    print >> file, range.toxml()
+                    print(range.toxml(), file=file)
                 index += 1
-            print >> file, '</profilerDataModel><noteData>'
+            print('</profilerDataModel><noteData>', file=file)
             index = 0
             for dom in traces:
                 notes = dom.getElementsByTagName('noteData')[0].getElementsByTagName('note')
                 for note in notes:
                     eventIndex = int(note.attributes['eventIndex'].nodeValue) + sum(event_count[:index])
                     note.setAttribute('eventIndex', str(eventIndex))
-                    print >> file, note.toxml()
+                    print(note.toxml(), file=file)
                 index += 1
-            print >> file, '</noteData><v8profile totalTime="0"/></trace>'
+            print('</noteData><v8profile totalTime="0"/></trace>', file=file)
         return output
 
 EXPORTER_DESCRIPTORS = [{

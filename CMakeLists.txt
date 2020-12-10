@@ -23,6 +23,8 @@ set(CMAKE_MACOSX_RPATH 1)
 OPTION(JDK "Enable Java build")
 OPTION(CO_PILOT "Enable co-pilot build")
 OPTION(FORCE_32 "Force a 32bit compile on 64bit" OFF)
+OPTION(FAT_BINARY "Sets CMAKE_OSX_ARCHITECTURES" ON)
+OPTION(INSTALLER "Sets INSTALLER (NSIS/ZIP)" NSIS)
 
 if (ANDROID_ARCH_NAME MATCHES "arm\\.*")
     set(ARM 1)
@@ -106,7 +108,6 @@ if (EXISTS "${PROJECT_SOURCE_DIR}/RadTelemetry")
     set (RAD_TELEMETRY_DIR ${PROJECT_SOURCE_DIR}/RadTelemetry)
 endif()
 
-
 if (WIN32)
     TARGET_LINK_LIBRARIES(IntelSEAPI)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi /MP")
@@ -117,11 +118,8 @@ if (WIN32)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /GS /sdl")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /NXCompat /DynamicBase")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NXCompat /DynamicBase")
-    if(NOT ARCH_64)
-        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /SafeSEH")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SafeSEH")
-    endif()
-
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /SAFESEH:NO")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SAFESEH:NO")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG") #in release as well
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG") #in release as well
 elseif (APPLE)
@@ -129,7 +127,9 @@ elseif (APPLE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -std=c++11 -fPIC -Wno-unused-parameter -fstack-protector-strong -fPIE -O2 -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fPIE -Wl")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fPIE -Wl")
-    set(CMAKE_OSX_ARCHITECTURES "i386;x86_64")
+    if (FAT_BINARY)
+        set(CMAKE_OSX_ARCHITECTURES "i386;x86_64")
+    endif()
 elseif (ANDROID_NDK)
     TARGET_LINK_LIBRARIES(IntelSEAPI dl)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fPIE -pthread -fstack-protector-strong -fPIE -O2 -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security")
@@ -147,9 +147,10 @@ endif()
 
 add_subdirectory(ittnotify)
 add_subdirectory(sea_itt_lib)
+
 if (WIN32)
     if(NOT ARCH_64 AND CMAKE_BUILD_TYPE STREQUAL "Debug") #Compiler Automated Instrumentation
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Gh /GH")
+        # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Gh /GH")  FIXME: stopped working
     endif()
 else()
     #SET_TARGET_PROPERTIES(IntelSEAPI PROPERTIES COMPILE_FLAGS "-finstrument-functions")
@@ -177,7 +178,9 @@ endif(DOXYGEN_FOUND)
 set(CPACK_PACKAGE_NAME "IntelSEAPI")
 set(CPACK_PACKAGE_VENDOR "Intel")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Intel(R) Single Event API")
-set(CPACK_PACKAGE_VERSION "1.0.0")
+# string(TIMESTAMP TODAY "%y.%m.%d")
+#set(CPACK_PACKAGE_VERSION "${TODAY}")
+set(CPACK_PACKAGE_VERSION "delete_me")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "IntelSEAPI")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Intel(R) Single Event API")
 set(CPACK_PACKAGE_DESCRIPTION_FILE "${PROJECT_SOURCE_DIR}/README.txt")
@@ -188,8 +191,22 @@ set(CPACK_RESOURCE_FILE_WELCOME "${PROJECT_SOURCE_DIR}/README.txt")
 install(
     FILES
         ${PROJECT_SOURCE_DIR}/README.txt
+        ${PROJECT_SOURCE_DIR}/isea.sh
+        ${PROJECT_SOURCE_DIR}/isea.htm
     DESTINATION .
 )
+
+if (WIN32)
+    install(
+        FILES
+            ${PROJECT_SOURCE_DIR}/isea.bat
+        DESTINATION bin
+    )
+    install(
+        DIRECTORY "${PROJECT_SOURCE_DIR}/pypy"
+        DESTINATION bin
+    )
+endif()
 
 install(
     DIRECTORY "${PROJECT_SOURCE_DIR}/ittnotify/include"
@@ -246,17 +263,21 @@ if (WIN32)
         DESTINATION ETW
     )
 
-    set(CPACK_GENERATOR NSIS)
+    if(INSTALLER STREQUAL "NSIS")
+        set(CPACK_GENERATOR NSIS)
 
-    #run at exit:
-    set(CPACK_NSIS_EXECUTABLES_DIRECTORY "ETW")
-    set(CPACK_NSIS_MUI_FINISHPAGE_RUN "register.bat")
-    set(CPACK_NSIS_DISPLAY_NAME "Intel(R) Single Event API")
+        #run at exit:
+        set(CPACK_NSIS_EXECUTABLES_DIRECTORY "ETW")
+        set(CPACK_NSIS_MUI_FINISHPAGE_RUN "register.bat")
+        set(CPACK_NSIS_DISPLAY_NAME "Intel(R) Single Event API")
 
-    set(CPACK_NSIS_CONTACT "alexander.a.raud@intel.com")
+        set(CPACK_NSIS_CONTACT "alexander.a.raud@intel.com")
 
-    SET(CPACK_NSIS_INSTALL_ROOT "c:\\\\Intel")
-
+        SET(CPACK_NSIS_INSTALL_ROOT "c:\\\\Intel")
+        SET(CPACK_NSIS_MODIFY_PATH ON)
+    else()
+        set(CPACK_GENERATOR ${INSTALLER})
+    endif()
 else()
 
     set(CPACK_BUNDLE_NAME "IntelSEAPI")

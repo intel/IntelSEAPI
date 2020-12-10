@@ -17,6 +17,8 @@
 **********************************************************************************************************************************************************************************************************************************************************************************************/
 
 #include "ittnotify.h"
+#include "isea_test.h"
+
 #if defined(_DEBUG) && !defined(__ANDROID__)
 
 #ifdef UNICODE
@@ -25,6 +27,10 @@
     __itt_heap_function g_heap = __itt_heap_function_create("CRT", "Memory");
 #endif
 
+
+
+bool bCollectMemory = std::string::npos != get_environ_value("INTEL_SEA_FEATURES").find("mem");
+    
 #ifdef _WIN32
 #if _MSC_VER == 1800 //VS2013
     #define _CRTBLD //hack, no words
@@ -96,7 +102,7 @@
         return true;
     }
 
-    bool bInit = InitMemHooks();
+    bool bInit = bCollectMemory && InitMemHooks();
 
 
 #else
@@ -211,7 +217,7 @@
             return true;
         }
 
-        bool bInit = InitMemHooks();
+        bool bInit = bCollectMemory && InitMemHooks();
 
     #elif defined(__linux__) && defined(_DEBUG)
 

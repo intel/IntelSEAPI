@@ -73,6 +73,8 @@ namespace sea {
 
 
 __itt_global* GetITTGlobal();
+extern __itt_domain* g_pIntelSEAPIDomain;
+
 
 namespace sea {
     extern std::string g_savepath;

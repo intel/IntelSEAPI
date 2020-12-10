@@ -1,5 +1,10 @@
+from __future__ import print_function
+import os
 import sys
 import socket
+
+sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+from python_compat import basestring
 
 def resolve_host(ip):
     try:
@@ -7,20 +12,21 @@ def resolve_host(ip):
     except:
         return None
 
+
 def convert_numbers(obj):
     if isinstance(obj, dict):
-        for k, v in obj.iteritems():
+        for k, v in obj.items():
             obj[k] = convert_numbers(v)
     elif isinstance(obj, list):
         new = [convert_numbers(v) for v in obj]
         del obj[:]
         obj.extend(new)
-    elif hasattr(obj, '__iter__'):
-        for v in obj:
-            convert_numbers(v)
     elif isinstance(obj, basestring):
         if obj.isdigit():
             return int(obj)
+    elif hasattr(obj, '__iter__'):
+        for v in obj:
+            convert_numbers(v)
     return obj
 
 
@@ -60,8 +66,8 @@ class MSNT_SystemTraceDecoder:
         elif info['EventName'] == 'SystemConfig':
             if info['Opcode'] in ['Video', 'NIC', 'PhyDisk', 'LogDisk', 'CPU', 'Platform']:
                 self.callbacks.add_metadata(info['Opcode'], convert_numbers(data))
-        elif sys.gettrace():
-            print 'EventName:', info['EventName'], 'Opcode:', info['Opcode']
+        else:
+            self.callbacks.set_thread_name(int(data['ProcessId']), int(data['ThreadId']), data['ThreadName'])
 
     def on_receive(self, size, now, pid, source, target):
         receiver = self.tcpip.setdefault(source, {'packets': [], 'started': None})
@@ -104,7 +110,7 @@ class MSNT_SystemTraceDecoder:
             receiver['started'] = None
 
     def finalize(self):
-        for target, receiver in self.tcpip.iteritems():
+        for target, receiver in self.tcpip.items():
             self.end_receiver(receiver)
             packets = receiver['packets']
             if packets:

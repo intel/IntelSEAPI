@@ -73,7 +73,7 @@
     #define LIB_ITT LIB_ITT_NAME ".so"
 #endif
 
-static std::string get_environ_value(const std::string& name)
+std::string get_environ_value(const std::string& name)
 {
 #ifdef _WIN32
     size_t sz = 0;
@@ -92,8 +92,12 @@ static std::string get_environ_value(const std::string& name)
 
 bool IsVerboseMode()
 {
-    static bool bVerboseMode = !!get_environ_value("INTEL_SEA_VERBOSE").size();
+#if defined(_DEBUG) && defined(__ANDROID__)
+    return true;
+#else
+    static bool bVerboseMode = get_environ_value("INTEL_SEA_VERBOSE").size();
     return bVerboseMode;
+#endif
 }
 #define VerbosePrint(...) {if (IsVerboseMode()) printf(__VA_ARGS__);}
 
@@ -272,7 +276,8 @@ int main(int argc, char* argv[])
 
     const char* api_ver = __itt_api_version();
     VerbosePrint("ITT Version: %s\n", api_ver ? api_ver : "Not loaded");
-
+    if (!api_ver)
+        return -1;
     //std::thread thrd(ChangePaths); //only for stress testing
     Main(work_seconds);
     //thrd.join();

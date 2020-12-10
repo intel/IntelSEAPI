@@ -139,6 +139,7 @@ struct SRecord
     void* function;
 };
 double* WriteRecord(ERecordType type, const SRecord& record);
+void WriteMeta(const CTraceEventFormat::SRegularFields& main, __itt_string_handle* pKey, const char* name, double* pDelta=nullptr);
 
 namespace sea {
     struct IHandler;

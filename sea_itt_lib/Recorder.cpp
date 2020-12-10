@@ -438,6 +438,13 @@ CMemMap::~CMemMap()
 using namespace sea;
 const bool g_bWithStacks = !!(GetFeatureSet() & sfStack);
 
+
+void WriteMeta(const CTraceEventFormat::SRegularFields& main, __itt_string_handle* pKey, const char* name, double* pDelta)
+{
+    WriteRecord(ERecordType::Metadata, SRecord{ main, *g_pIntelSEAPIDomain, __itt_null, __itt_null, pKey, pDelta, name, strlen(name) });
+}
+
+
 class CSEARecorder: public IHandler
 {
 #ifdef __ANDROID__
@@ -450,23 +457,22 @@ class CSEARecorder: public IHandler
         __itt_string_handle* pKey = UNICODE_AGNOSTIC(string_handle_create)("__process__");
         const char * name = GetProcessName(true);
         __itt_global* pGlobal = GetITTGlobal();
-        if (!pGlobal->domain_list)
-        {
-            UNICODE_AGNOSTIC(domain_create)("IntelSEAPI");
-            assert(pGlobal->domain_list);
-        }
-        double delta = -1;//sort order - highest for processes written thru SEA
-        WriteRecord(ERecordType::Metadata, SRecord{ main, *pGlobal->domain_list, __itt_null, __itt_null, pKey, &delta, name, strlen(name) });
 
-        std::ofstream ss(GetDir(g_savepath) + "process.dct");
-        ss << "{";
-        ss << "'time_freq':" << GetTimeFreq();
+        double delta = -1;//sort order - highest for processes written thru SEA
+        WriteMeta(main, pKey, name, &delta);
+
+        if (!g_savepath.empty())
+        {
+            std::ofstream ss(GetDir(g_savepath) + "process.dct");
+            ss << "{";
+            ss << "'time_freq':" << GetTimeFreq();
 #if INTPTR_MAX == INT64_MAX
-        ss << ", 'bits':64";
+            ss << ", 'bits':64";
 #else
-        ss << ", 'bits':32";
+            ss << ", 'bits':32";
 #endif
-        ss << "}";
+            ss << "}";
+        }
     }
 
     void TaskBegin(STaskDescriptor& oTask, bool bOverlapped) override

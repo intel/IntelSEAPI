@@ -161,14 +161,14 @@ class PprofHandler(object):
                     num_labels[key].append(label.numX)
 
             if len(labels) > 0:
-                for key, value in labels.iteritems():
+                for key, value in labels.items():
                     label = sample.Label.add()
                     label.key = key
                     for val in value:
                         label.value.append(val)
 
             if len(num_labels) > 0:
-                for key, value in num_labels.iteritems():
+                for key, value in num_labels.items():
                     label = sample.NumLabel.add()
                     label.key = key
                     for val in value:

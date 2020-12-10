@@ -27,12 +27,20 @@
 #include <cstring>
 #include <limits>
 #include <stack>
+#include <string.h>
 
 #ifdef _WIN32
     #include <io.h>
     #include <direct.h>
 #else
     #include <pthread.h>
+    #include <libgen.h>
+#endif
+
+#ifdef __APPLE__
+    //#define __APPLE_API_UNSTABLE
+    #include <sys/kdebug.h>
+    #include <sys/kdebug_signpost.h>
 #endif
 
 namespace sea {
@@ -167,29 +175,57 @@ bool PathExists(const std::string& path)
 #endif
 }
 
+int mkpath(const char *path, uint32_t mode)
+{
+    struct stat sb = {};
+
+    if (!stat(path, &sb))
+        return 0;
+
+    char parent[1024] = {};
+#ifdef _WIN32
+    strcpy_s(parent, path);
+#else
+    strcpy(parent, path);
+#endif
+    char* last_slash = strrchr(parent, '//');
+    if (!last_slash) {
+        VerbosePrint("Invalid dir: %s\n", parent);
+        return -1;
+    }
+    *last_slash = 0;
+
+    int res = mkpath(parent, mode);
+    if (res == -1)
+    {
+        VerbosePrint("Failed to create dir: %s err=%d\n", parent, errno);
+        return res;
+    }
+    else
+    {
+        VerbosePrint("Created dir: %s\n", parent);
+    }
+
+#ifdef _WIN32
+    return _mkdir(path);
+#else
+    return mkdir(path, mode);
+#endif
+}
+
 std::string GetDir(std::string path, const std::string& append)
 {
     if (path.empty()) return path;
     path += append;
+    VerbosePrint("GetDir: %s\n", path.c_str());
 
+    std::replace(path.begin(), path.end(), '\\', '/');
     char lastSym = path[path.size() - 1];
-    if (lastSym != '/' && lastSym != '\\')
+    if (lastSym != '/')
         path += "/";
 
-    struct stat st = {};
     std::string dir_name = path.substr(0, path.length() - 1);
-    if (stat(dir_name.c_str(), &st) != 0) //no dir
-    {
-#ifdef _WIN32
-        int res = _mkdir(dir_name.c_str());
-#else
-        int res = mkdir(dir_name.c_str(), FilePermissions);
-#endif
-        if (res == -1)
-        {
-            VerbosePrint("Failed to create dir: %s err=%d", dir_name.c_str(), errno);
-        }
-    }
+    mkpath(dir_name.c_str(), FilePermissions);
     return path;
 }
 
@@ -349,6 +385,7 @@ CTraceEventFormat::SRegularFields GetRegularFields(__itt_clock_domain* clock_dom
 
 __itt_domain* UNICODE_AGNOSTIC(domain_create)(const char* name)
 {
+    ITT_FUNCTION_STAT();
     __itt_domain *h_tail = NULL, *h = NULL;
 
     if (name == NULL)
@@ -405,6 +442,7 @@ inline __itt_string_handle* create_and_add_string_handle_to_list(const char* nam
 
 __itt_string_handle* ITTAPI UNICODE_AGNOSTIC(string_handle_create)(const char* name)
 {
+    ITT_FUNCTION_STAT();
     if (name == NULL)
     {
         return NULL;
@@ -646,7 +684,6 @@ void counter_set_value(__itt_counter id, void *value_ptr)
 
 void UNICODE_AGNOSTIC(sync_create)(void *addr, const char *objtype, const char *objname, int attribute)
 {
-    return; //XXX
     ITT_FUNCTION_STAT();
 
     std::string name((attribute == __itt_attr_mutex) ? "mutex:" : "barrier:");
@@ -657,7 +694,7 @@ void UNICODE_AGNOSTIC(sync_create)(void *addr, const char *objtype, const char *
     __itt_id id = __itt_id_make(addr, 0);
 
     CTraceEventFormat::SRegularFields rf = GetRegularFields();
-    WriteRecord(ERecordType::ObjectNew, SRecord{rf, *GetITTGlobal()->domain_list, id, __itt_null, pName});
+    WriteRecord(ERecordType::ObjectNew, SRecord{rf, *g_pIntelSEAPIDomain, id, __itt_null, pName});
 }
 
 #ifdef _WIN32
@@ -669,21 +706,21 @@ void sync_createW(void *addr, const wchar_t *objtype, const wchar_t *objname, in
 
 void sync_destroy(void *addr)
 {
-    return; //XXX
     ITT_FUNCTION_STAT();
 
     __itt_id id = __itt_id_make(addr, 0);
     CTraceEventFormat::SRegularFields rf = GetRegularFields();
-    WriteRecord(ERecordType::ObjectDelete, SRecord{rf, *GetITTGlobal()->domain_list, id, __itt_null});
+    WriteRecord(ERecordType::ObjectDelete, SRecord{rf, *g_pIntelSEAPIDomain, id, __itt_null});
 }
 
 inline void SyncState(void * addr, const char * state)
 {
-    return; //XXX
+    ITT_FUNCTION_STAT();
+
     __itt_id id = __itt_id_make(addr, 0);
 
     CTraceEventFormat::SRegularFields rf = GetRegularFields();
-    WriteRecord(ERecordType::ObjectSnapshot, SRecord{rf, *GetITTGlobal()->domain_list, id, __itt_null, nullptr, nullptr, state, strlen(state)});
+    WriteRecord(ERecordType::ObjectSnapshot, SRecord{rf, *g_pIntelSEAPIDomain, id, __itt_null, nullptr, nullptr, state, strlen(state)});
 }
 
 void UNICODE_AGNOSTIC(sync_rename)(void * addr, const char * name)
@@ -746,7 +783,7 @@ __itt_clock_domain* clock_domain_create(__itt_get_clock_info_fn fn, void* fn_dat
 {
     ITT_FUNCTION_STAT();
     CIttLocker lock;
-    __itt_domain* pDomain = GetITTGlobal()->domain_list;
+    __itt_domain* pDomain = g_pIntelSEAPIDomain;
     DomainExtra* pDomainExtra = (DomainExtra*)pDomain->extra2;
     __itt_clock_domain** ppClockDomain = &pDomainExtra->pClockDomain;
     while (*ppClockDomain && (*ppClockDomain)->next)
@@ -769,6 +806,8 @@ __itt_clock_domain* clock_domain_create(__itt_get_clock_info_fn fn, void* fn_dat
 
 void clock_domain_reset()
 {
+    ITT_FUNCTION_STAT();
+
     TraverseDomains([](__itt_domain& domain){
         DomainExtra* pDomainExtra = (DomainExtra*)domain.extra2;
         if (!pDomainExtra) return;
@@ -854,7 +893,7 @@ __itt_track_group* track_group_create(__itt_string_handle* pName, __itt_track_gr
 {
     ITT_FUNCTION_STAT();
     CIttLocker lock;
-    __itt_domain* pDomain = GetITTGlobal()->domain_list;
+    __itt_domain* pDomain = g_pIntelSEAPIDomain;
     DomainExtra* pDomainExtra = (DomainExtra*)pDomain->extra2;
     __itt_track_group** ppTrackGroup = &pDomainExtra->pTrackGroup;
     while (*ppTrackGroup && (*ppTrackGroup)->next)
@@ -895,7 +934,6 @@ __itt_track* track_create(__itt_track_group* track_group, __itt_string_handle* n
     {
         g_handlers[i]->SetThreadName(*pRF, name->strA);
     }
-
 
     return *ppTrack = new __itt_track{name, track_group, track_type, 0, pRF};
 }
@@ -1503,6 +1541,45 @@ void heap_free_end(__itt_heap_function h, void* addr)
     ITT_FUNCTION_STAT();
 }
 
+__itt_domain* get_events_domain()
+{
+    static __itt_domain* s_pEvents = UNICODE_AGNOSTIC(domain_create)("sea_events");
+    return s_pEvents;
+}
+
+__itt_event UNICODE_AGNOSTIC(event_create)(const char *name, int namelen)
+{
+    ITT_FUNCTION_STAT();
+    __itt_domain* pEvents = get_events_domain();
+    __itt_string_handle* pStr = UNICODE_AGNOSTIC(string_handle_create)(name);
+    return intptr_t(pStr) - intptr_t(pEvents);
+}
+
+int event_start(__itt_event event)
+{
+    ITT_FUNCTION_STAT();
+    __itt_domain* pEvents = get_events_domain();
+    __itt_string_handle* pStr = reinterpret_cast<__itt_string_handle*>(intptr_t(pEvents) + event);
+    task_begin_overlapped(pEvents, __itt_id_make(pEvents, (unsigned long long)pStr), __itt_null, pStr);
+    return event;
+}
+
+int event_end(__itt_event event)
+{
+    ITT_FUNCTION_STAT();
+    __itt_domain* pEvents = get_events_domain();
+    __itt_string_handle* pStr = reinterpret_cast<__itt_string_handle*>(intptr_t(pEvents) + event);
+    task_end_overlapped(pEvents, __itt_id_make(pEvents, (unsigned long long)pStr));
+    return event;
+}
+
+#ifdef _WIN32
+__itt_event ITTAPI event_createW(const wchar_t *name, int namelen)
+{
+    return UNICODE_AGNOSTIC(event_create)(W2L(name).c_str(), namelen);
+}
+#endif
+
 #ifdef _WIN32
     #define WIN(something) something
 #else
@@ -1572,6 +1649,10 @@ _AW(ITT_STUB_IMPL,heap_function_create)\
     ITT_STUB_IMPL(heap_allocate_end)\
     ITT_STUB_IMPL(heap_free_begin)\
     ITT_STUB_IMPL(heap_free_end)\
+_AW(ITT_STUB_IMPL,event_create)\
+WIN(_AW(ITT_STUB_IMPL,event_create))\
+    ITT_STUB_IMPL(event_start)\
+    ITT_STUB_IMPL(event_end)\
     ORIGINAL_FUNCTIONS()\
     ITT_STUB_NO_IMPL(thread_ignore)\
 _AW(ITT_STUB_NO_IMPL,thr_name_set)\
@@ -1624,9 +1705,6 @@ WIN(ITT_STUB_NO_IMPL(model_iteration_taskW))\
     ITT_STUB_NO_IMPL(heap_record)\
     ITT_STUB_NO_IMPL(task_group)\
     ITT_STUB_NO_IMPL(counter_inc_v3)\
-_AW(ITT_STUB_NO_IMPL,event_create)\
-    ITT_STUB_NO_IMPL(event_start)\
-    ITT_STUB_NO_IMPL(event_end)\
 _AW(ITT_STUB_NO_IMPL,sync_set_name)\
 _AW(ITT_STUB_NO_IMPL,notify_sync_name)\
     ITT_STUB_NO_IMPL(notify_sync_prepare)\
@@ -1838,6 +1916,47 @@ void SetRing(uint64_t nanoseconds)
     }
 #endif
 
+#ifdef __APPLE__
+    bool WriteKTraceTimeSyncMarkers()
+    {
+        for (size_t i = 0; i < 5; ++i)
+        {
+            kdebug_signpost(APPSDBG_CODE(DBG_MACH_CHUD, 0x15EA), CTraceEventFormat::GetTimeNS(), 0x15EA15EA, 0x15EA15EA, 0x15EA15EA);
+            syscall(SYS_kdebug_trace, APPSDBG_CODE(DBG_MACH_CHUD, 0x15EA) | DBG_FUNC_NONE, CTraceEventFormat::GetTimeNS(), 0x15EA15EA, 0x15EA15EA, 0x15EA15EA);
+        }
+        return true;
+    }
+#endif
+
+#ifdef _WIN32
+
+typedef ULONG(__stdcall* TEtwNotificationRegister)(
+    LPCGUID Guid,
+    ULONG Type,
+    PVOID Callback,
+    PVOID Context,
+    REGHANDLE* RegHandle);
+
+TEtwNotificationRegister g_fnOrigEtwNotificationRegister = nullptr;
+
+ ULONG _stdcall MyEtwNotificationRegister(
+    LPCGUID Guid,
+    ULONG Type,
+    PVOID Callback,
+    PVOID Context,
+    REGHANDLE* RegHandle)
+{
+     WCHAR strGuid[100] = {};
+     StringFromGUID2(*Guid, strGuid, sizeof(strGuid) - 1);
+     char str[100] = {};
+     sprintf_s(str, "%ls", strGuid);
+     VerbosePrint("\nEventRegister, provider: %s\n", str);
+     static __itt_string_handle* pKey = UNICODE_AGNOSTIC(string_handle_create)("EventRegister::Provider");
+     WriteMeta(GetRegularFields(), pKey, str);
+     return g_fnOrigEtwNotificationRegister(Guid, Type, Callback, Context, RegHandle);
+}
+#endif
+
 void InitSEA()
 {
     for (size_t i = 0; (i < MAX_HANDLERS) && g_handlers[i]; ++i)
@@ -1869,6 +1988,8 @@ void InitSEA()
 
 #ifdef _WIN32 //adding information about process explicitly
     ReportModule(GetModuleHandle(NULL));
+#elif defined(__APPLE__)
+    dlopen("libmtlshim.dylib", RTLD_LAZY);
 #else
     //XXX ReportModule(dlopen(NULL, RTLD_LAZY));
 #endif
@@ -2017,7 +2138,7 @@ extern "C" //plain C interface for languages like python
         return __itt_counter_create_typed(
             reinterpret_cast<__itt_string_handle*>(name)->strA,
             reinterpret_cast<__itt_domain*>(domain)->nameA,
-            __itt_metadata_double
+            __itt_metadata_u64
         );
     }
 
@@ -2047,8 +2168,11 @@ extern "C" //plain C interface for languages like python
 
     SEA_EXPORT void itt_write_time_sync_markers()
     {
-#ifdef __linux
+#ifdef __linux__
         sea::WriteFTraceTimeSyncMarkers();
+#endif
+#ifdef __APPLE__
+        sea::WriteKTraceTimeSyncMarkers();
 #endif
     }
 };

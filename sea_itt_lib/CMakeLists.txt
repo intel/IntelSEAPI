@@ -21,9 +21,7 @@ SET(CUR_DIR "${PROJECT_SOURCE_DIR}/sea_itt_lib")
 
 set(INCLUDE_DIRS . ..)
 
-
 if (WIN32)
-
     add_custom_command(OUTPUT "${PROJECT_BINARY_DIR}/IntelSEAPI.rc" "${PROJECT_BINARY_DIR}/IntelSEAPI.h"
         PRE_BUILD
         COMMAND mc -um ${CUR_DIR}/IntelSEAPI.man -h ${PROJECT_BINARY_DIR} -r ${PROJECT_BINARY_DIR}
@@ -52,7 +50,6 @@ if (WIN32)
         IntelSEAPI.wpaProfile
         register.bat
     )
-    
 elseif(APPLE)
     set(INCLUDE_DIRS ${INCLUDE_DIRS} /usr/local/include)
     link_directories(/usr/local/lib)
@@ -76,7 +73,6 @@ else()
         set(LINK_LIBS ${LINK_LIBS} pcp_mmv pcp)
     endif()
 endif()
-
 
 if(RAD_TELEMETRY_DIR)
     set(INCLUDE_DIRS ${INCLUDE_DIRS} ${RAD_TELEMETRY_DIR}/include)
@@ -138,7 +134,6 @@ if(JDK)
     elseif(NOT ANDROID)
         set(INCLUDE_DIRS ${INCLUDE_DIRS} ${JDK} ${JDK}/include ${JDK}/include/linux)
     endif()
-
 endif()
 
 add_library(sea_itt_lib SHARED
@@ -200,4 +195,3 @@ target_include_directories(sea_itt_lib PUBLIC
 )
 
 TARGET_LINK_LIBRARIES(sea_itt_lib ittnotify ${LINK_LIBS})
-

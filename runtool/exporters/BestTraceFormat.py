@@ -12,10 +12,10 @@ class BestTraceFormat(TaskCombiner):
         """Open the .btf file and write its header."""
         TaskCombiner.__init__(self, args, tree)
         self.file = open(self.get_targets()[-1], "w+b")
-        self.file.write('#version 2.1.3\n')
-        self.file.write('#creator GDP-SEA\n')
-        self.file.write('#creationDate 2014-02-19T11:39:20Z\n')
-        self.file.write('#timeScale ns\n')
+        self._write('#version 2.1.3\n')
+        self._write('#creator GDP-SEA\n')
+        self._write('#creationDate 2014-02-19T11:39:20Z\n')
+        self._write('#timeScale ns\n')
 
     def get_targets(self):
         return [self.args.output + ".btf"]
@@ -28,8 +28,12 @@ class BestTraceFormat(TaskCombiner):
         """
         # <Time>,<Source>,<SourceInstance >,<TargetType>,<Target>,<TargetInstance>,<Event>,<Note>
         if 'str' in b and type == "task":
-            self.file.write("%d,%s,0,R,%s,-1,start\n" % (b['time'], b['str'], b['str']))
-            self.file.write("%d,%s,0,R,%s,-1,terminate\n" % (e['time'], b['str'], b['str']))
+            self._write("%d,%s,0,R,%s,-1,start\n" % (b['time'], b['str'], b['str']))
+            self._write("%d,%s,0,R,%s,-1,terminate\n" % (e['time'], b['str'], b['str']))
+
+    def _write(self, string):
+        # file was opened in binary format so we should use byte-string
+        self.file.write(string.encode())
 
     def finish(self):
         """ Close the .btf file"""

@@ -1,27 +1,40 @@
+from __future__ import print_function
 import os
 import sys
-#sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))  # uncomment for debugging single file
+
+if __name__ == "__main__":
+    sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))  # for debugging single file
+
 
 import sea
 import json
 import codecs
-import strings
 import tempfile
 import subprocess
 from datetime import datetime
-from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst, get_importers
+from sea_runtool import TaskCombiner, Progress, resolve_stack, to_hex, ProgressConst, get_importers, message
+from python_compat import unicode
 
-MAX_GT_SIZE = 50 * 1024 * 1024
+MAX_GT_SIZE = 150 * 1024 * 1024
 GT_FLOAT_TIME = True
 
 
 class GoogleTrace(TaskCombiner):
 
     class ContextSwitch:
-        def __init__(self, parent, file):
+        def __init__(self, parent, file_name):
             self.parent = parent
-            self.file = file + '.ftrace'
+            self.file = (parent.args.user_input + ".ftrace") if parent.args.single else os.path.join(parent.args.user_input, 'transform', os.path.basename(file_name) + ".ftrace")
             self.ftrace = None
+
+        def init(self, time, cpu, tid, name):
+            if not self.ftrace:
+                self.ftrace = open(self.file, 'w')
+                self.ftrace.write("# tracer: nop\n")
+                args = (name, tid, cpu, self.parent.convert_time(time) / 1000000., self.parent.convert_time(time) / 1000000.)
+                ftrace = "%s-%d [%03d] .... %.6f: tracing_mark_write: trace_event_clock_sync: parent_ts=%.6f\n" % args
+                self.ftrace.write(ftrace)
+                self.parent.targets.append(self.file)
 
         def write(self, time, cpu, prev_tid, prev_state, next_tid, prev_prio=0, next_prio=0, prev_name=None, next_name=None):
             if not prev_name:
@@ -29,12 +42,7 @@ class GoogleTrace(TaskCombiner):
             if not next_name:
                 next_name = '%d' % next_tid
             if not self.ftrace:
-                self.ftrace = open(self.file, 'w')
-                self.ftrace.write("# tracer: nop\n")
-                args = (prev_name, prev_tid, cpu, self.parent.convert_time(time) / 1000000., self.parent.convert_time(time) / 1000000.)
-                ftrace = "%s-%d [%03d] .... %.6f: tracing_mark_write: trace_event_clock_sync: parent_ts=%.6f\n" % args
-                self.ftrace.write(ftrace)
-                self.parent.targets.append(self.file)
+                self.init(time, cpu, prev_tid, prev_name)
             args = (
                 prev_name, prev_tid, cpu, self.parent.convert_time(time) / 1000000.,
                 prev_name, prev_tid, prev_prio, prev_state,
@@ -43,10 +51,25 @@ class GoogleTrace(TaskCombiner):
             ftrace = "%s-%d [%03d] .... %.6f: sched_switch: prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s ==> next_comm=%s next_pid=%d next_prio=%d\n" % args
             self.ftrace.write(ftrace)
 
+        def wakeup(self, time, cpu, prev, next):
+            if not self.ftrace:
+                self.init(time, cpu, prev['tid'], prev['name'])
+            args = (
+                prev['name'], prev['tid'], cpu, self.parent.convert_time(time) / 1000000.,
+                next['name'], next['tid'], cpu
+            )
+            ftrace = "%s-%d [%03d] .... %.6f: sched_wakeup: comm=%s pid=%d prio=0 target_cpu=%d\n" % args
+            self.ftrace.write(ftrace)
+
     def context_switch(self, time, cpu, prev, next):
         if not self.cs:
             self.cs = GoogleTrace.ContextSwitch(self, self.args.input)
         self.cs.write(time, cpu, prev['tid'], prev['state'], next['tid'], prev['prio'], next['prio'], prev['name'], next['name'])
+
+    def wakeup(self, time, cpu, prev, next):
+        if not self.cs:
+            self.cs = GoogleTrace.ContextSwitch(self, self.args.input)
+        self.cs.wakeup(time, cpu, prev, next)
 
     def __init__(self, args, tree):
         TaskCombiner.__init__(self, args, tree)
@@ -64,7 +87,7 @@ class GoogleTrace(TaskCombiner):
             handled = []
             for trace in self.args.trace:
                 if not os.path.exists(trace):
-                    print "Error: File not found:", trace
+                    print("Error: File not found:", trace)
                     continue
                 if trace.endswith(".etl"):
                     self.handle_etw_trace(trace)
@@ -79,17 +102,21 @@ class GoogleTrace(TaskCombiner):
                     self.handle_perf(trace)
                     handled.append(trace)
                 else:
-                    print "Error: unsupported extension:", trace
+                    print("Error: unsupported extension:", trace)
                 args.trace = [trace for trace in args.trace if trace not in handled]
         self.start_new_trace()
 
     def start_new_trace(self):
-        self.targets.append("%s-%d.json" % (self.args.output, self.trace_number))
+        if os.path.isdir(self.args.user_input):
+            path = os.path.join(self.args.user_input, 'transform', os.path.basename(self.args.output) + ("-%d.json" % self.trace_number))
+        else:
+            path = self.args.user_input + "-%d.json" % self.trace_number
+        self.targets.append(path)
         self.trace_number += 1
-        self.file = codecs.open(self.targets[-1], "wb+", 'utf-8')
+        self.file = codecs.open(self.targets[-1], "wb+", 'utf-8', errors='ignore')
         self.file.write('{\n"traceEvents": [\n\n')  # second \n is for the rare case when there are no events, and finish cuts last two symbols
 
-        for key, value in self.tree["threads"].iteritems():
+        for key, value in self.tree["threads"].items():
             pid_tid = key.split(',')
             self.file.write(
                 '{"name": "thread_name", "ph":"M", "pid":%s, "tid":%s, "args": {"name":"%s(%s)"}},\n' % (pid_tid[0], pid_tid[1], value, pid_tid[1])
@@ -216,7 +243,7 @@ class GoogleTrace(TaskCombiner):
             source_scale_start = time_sync[index - 1][Source] + int(diff[Source] * 0.75)  # to keep the precision
             target_scale_start = (time_sync[index - 1][Target] + (diff[Target] * 0.25)) * 1000000.  # multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
 
-            print "Timelines correlation precision is +- %f us" % (diff[Target] / 2. * 1000000.)
+            print("Timelines correlation precision is +- %f us" % (diff[Target] / 2. * 1000000.))
         else:
             source_scale_start = time_sync[0][Source]
             target_scale_start = time_sync[0][Target] * 1000000.  # multiplying by 1000000. to have time in microseconds (ftrace/target time was in seconds)
@@ -226,11 +253,16 @@ class GoogleTrace(TaskCombiner):
         ratio = 1000000. * diff[Target] / diff[Source]  # when you multiply Source value with this ratio you get Target units. Multiplying by 1000000. to have time is microseconds (ftrace/target time was in seconds)
         return source_scale_start, target_scale_start, ratio
 
+    @staticmethod
+    def prep_name(name):
+        res = str(name).replace("\\", "\\\\").replace('"', r'\"')
+        return res.encode('utf-8') if sys.version_info[0] < 3 else res
+
     def global_metadata(self, data):
         if data['str'] == "__process__":  # this is the very first record in the trace
             if 'data' in data:
                 self.file.write(
-                    '{"name": "process_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\").encode('utf-8'))
+                    '{"name": "process_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), self.prep_name(data['data']))
                 )
             if 'delta' in data:
                 self.file.write(
@@ -240,13 +272,13 @@ class GoogleTrace(TaskCombiner):
                 self.file.write(
                     '{"name": "process_labels", "ph":"M", "pid":%d, "tid":%s, "args": {"labels":"%s"}},\n' % (data['pid'], data['tid'], ','.join(data['labels']))
                 )
-            if data['tid'] >= 0 and not self.tree['threads'].has_key('%d,%d' % (data['pid'], data['tid'])):  # marking the main thread
+            if data['tid'] >= 0 and (('%d,%d' % (data['pid'], data['tid'])) not in self.tree['threads']):  # marking the main thread
                 self.file.write(
                     '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%s, "args": {"name":"%s"}},\n' % (data['pid'], data['tid'], "<main>")
                 )
         elif data['str'] == "__thread__":
             self.file.write(
-                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), data['data'].replace("\\", "\\\\").encode('utf-8'))
+                '{"name": "thread_name", "ph":"M", "pid":%d, "tid":%d, "args": {"name":"%s"}},\n' % (int(data['pid']), int(data['tid']), self.prep_name(data['data']))
             )
             if 'delta' in data:
                 self.file.write(
@@ -268,14 +300,14 @@ class GoogleTrace(TaskCombiner):
             template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%.3f, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
         else:
             template = '{"ph":"%s", "name": "relation", "pid":%d, "tid":%s, "ts":%d, "id":%s, "args":{"name": "%s"}, "cat":"%s"},\n'
-        if not data.has_key('str'):
+        if 'str' not in data:
             data['str'] = "unknown"
         self.file.write(template % ("s", items[0]['pid'], items[0]['tid'], self.convert_time(items[0]['time']), relation_id, data['str'], data['domain']))
         self.file.write(template % ("f", items[1]['pid'], items[1]['tid'], self.convert_time(items[1]['time'] - 1), relation_id, data['str'], data['domain']))
 
     def format_value(self, arg):  # this function must add quotes if value is string, and not number/float, do this recursively for dictionary
         if type(arg) == type({}):
-            return "{" + ", ".join(['"%s":%s' % (key, self.format_value(value)) for key, value in arg.iteritems()]) + "}"
+            return "{" + ", ".join(['"%s":%s' % (key, self.format_value(value)) for key, value in arg.items()]) + "}"
         try:
             val = float(arg)
             if float('inf') != val:
@@ -289,7 +321,7 @@ class GoogleTrace(TaskCombiner):
 
     def format_args(self, arg):  # this function must add quotes if value is string, and not number/float, do this recursively for dictionary
         if type(arg) == type({}):
-            return dict([(key, self.format_args(value)) for key, value in arg.iteritems()])
+            return dict([(key, self.format_args(value)) for key, value in arg.items()])
         try:
             val = float(arg)
             if float('inf') != val:
@@ -299,8 +331,8 @@ class GoogleTrace(TaskCombiner):
                     return val
         except:
             pass
-        return arg.strip()
 
+        return arg
 
     Phase = {'task': 'X', 'counter': 'C', 'marker': 'i', 'object_new': 'N', 'object_snapshot': 'O', 'object_delete': 'D', 'frame': 'X'}
 
@@ -309,7 +341,7 @@ class GoogleTrace(TaskCombiner):
             if self.last_task == (type, begin, end):
                 return
             self.last_task = (type, begin, end)
-        assert (GoogleTrace.Phase.has_key(type))
+        assert (type in GoogleTrace.Phase)
         if begin['type'] == 7:  # frame_begin
             if 'id' not in begin:
                 begin['id'] = id(begin)  # Async events are groupped by cat & id
@@ -334,7 +366,7 @@ class GoogleTrace(TaskCombiner):
                 json.loads(res)
             except Exception as exc:
                 import traceback
-                print "\n" + exc.message + ":\n" + res + "\n"
+                print("\n" + exc.message + ":\n" + res + "\n")
                 traceback.print_stack()
                 self.format_task(GoogleTrace.Phase[type], type, begin, end)
             res += ',\n'
@@ -344,6 +376,7 @@ class GoogleTrace(TaskCombiner):
         if self.file.tell() > MAX_GT_SIZE:
             self.finish(intermediate=True)
             self.start_new_trace()
+            message('warning', 'Chrome Trace File Limit Exceeded on %d' % end['time'])
 
     def handle_stack(self, task, stack, name='stack'):
         if not stack:
@@ -383,7 +416,7 @@ class GoogleTrace(TaskCombiner):
         res = []
         res.append('{"ph":"%s"' % phase)
         res.append(', "pid":%(pid)d' % begin)
-        if begin.has_key('tid'):
+        if 'tid' in begin:
             res.append(', "tid":%(tid)d' % begin)
         if GT_FLOAT_TIME:
             res.append(', "ts":%.3f' % (self.convert_time(begin['time'])))
@@ -448,7 +481,7 @@ class GoogleTrace(TaskCombiner):
             total = 0
             breakdown = {}
             children = 0
-            for size, values in begin['memory'].iteritems():
+            for size, values in begin['memory'].items():
                 if size is None:  # special case for children attribution
                     children = values
                 else:
@@ -467,8 +500,8 @@ class GoogleTrace(TaskCombiner):
 
     def handle_leftovers(self):
         TaskCombiner.handle_leftovers(self)
-        for counters in self.counters.itervalues():  # workaround: google trace forgets counter last value
-            for counter in counters.itervalues():
+        for counters in self.counters.values():  # workaround: google trace forgets counter last value
+            for counter in counters.values():
                 counter['time'] += 1  # so, we repeat it on the end of the trace
                 self.complete_task("counter", counter, counter)
 
@@ -481,7 +514,7 @@ class GoogleTrace(TaskCombiner):
         if not intermediate:
             if self.samples:
                 self.file.write('], "stackFrames": {\n')
-                for id, frame in self.frames.iteritems():
+                for id, frame in self.frames.items():
                     self.file.write('"%s": %s,\n' % (id, json.dumps(frame)))
                 if self.frames:  # deleting last two symbols from the file as we can't leave comma at the end due to json restrictions
                     self.remove_last(2)
@@ -494,7 +527,7 @@ class GoogleTrace(TaskCombiner):
                 self.frames = {}
             if self.metadata:
                 self.file.write('\n],\n')
-                for key, value in self.metadata.iteritems():
+                for key, value in self.metadata.items():
                     self.file.write('"%s": %s,\n' % (key, json.dumps(value[0] if len(value) == 1 else value)))
                 self.remove_last(2)  # remove trailing ,\n
                 self.file.write('\n}')
@@ -505,23 +538,21 @@ class GoogleTrace(TaskCombiner):
         self.file.close()
 
     @staticmethod
-    def get_catapult_path(args):
-        if args.no_catapult:
-            return None
-        if 'INTEL_SEA_CATAPULT' in os.environ and os.path.exists(os.environ['INTEL_SEA_CATAPULT']):
-            return os.environ['INTEL_SEA_CATAPULT']
+    def unpack_catapult(bindir):
+        path = os.path.join(bindir, 'catapult', 'tracing')
+        if os.path.exists(path):
+            message('info', 'Catapult is taken from: ' + path)
+            return path
+        zip_path = os.path.join(bindir, 'catapult.zip')
+        if os.path.exists(zip_path):
+            print("Extracting catapult...")
+            from zipfile import PyZipFile
+            pzf = PyZipFile(zip_path)
+            pzf.extractall(bindir)
+            return path
         else:
-            path = os.path.join(args.bindir, 'catapult', 'tracing')
-            if os.path.exists(path):
-                return path
-            zip_path = os.path.join(args.bindir, 'catapult.zip')
-            if os.path.exists(zip_path):
-                print "Extracting catapult..."
-                from zipfile import PyZipFile
-                pzf = PyZipFile(zip_path)
-                pzf.extractall(args.bindir)
-                return path
-            return None
+            print("Error: Catapult is not found at", zip_path)
+        return None
 
     @staticmethod
     def join_traces(traces, output, args):
@@ -545,43 +576,17 @@ class GoogleTrace(TaskCombiner):
             traces = [file for file in traces if not file.endswith('.ftrace')]
             traces.append(merged)
 
-        catapult_path = GoogleTrace.get_catapult_path(args)
-        if catapult_path:
-            import threading
-            proc = threading.Thread(target=GoogleTrace.catapult, args=(catapult_path, output, traces))
-            proc.start()
-            with Progress(0, 0, strings.catapulting) as progress:
-                count = 0
-                while proc.is_alive():
-                    progress.tick(count)
-                    count += 1
-                    proc.join(0.5)
-            return output + '.html'
-        else:
+        if args.no_catapult:
             return GoogleTrace.zip_traces(traces, output)
 
-    @staticmethod
-    def catapult(catapult_path, output, traces):
-        sys.path.append(catapult_path)
-        from tracing_build import trace2html
-        import codecs
-        with codecs.open(output + '.html', 'w', 'utf-8') as new_file:
-            def WriteHTMLForTracesToFile(trace_filenames, output_file, config_name=None):
-                trace_data_list = []
-                for filename in trace_filenames:
-                    with open(filename, 'r') as f:
-                        trace_data = f.read()
-                        try:
-                            trace_data = json.loads(trace_data)
-                        except ValueError:
-                            pass
-                        trace_data_list.append(trace_data)
-                project_title = getattr(__builtins__, 'sea_project_title', 'Intel(R) Single Event API')
-                title = os.path.basename(output).split('_')[0] + ": " + project_title
-                trace2html.WriteHTMLForTraceDataToFile(trace_data_list, title, output_file, config_name)
+        result_file = args.user_input + '.isea.htm'
+        project_title = getattr(__builtins__, 'sea_project_title', 'Intel(R) Single Event API')
+        isea = os.path.join(args.bindir, '../isea.htm')
+        trace_name = os.path.basename(output).replace('\\', '/').split('/')[-1].split('_')[0] + ": " + project_title
 
-            WriteHTMLForTracesToFile(traces, new_file)
-        return output + '.html'
+        pack_isea(traces, isea, result_file, trace_name)
+
+        return result_file
 
     @staticmethod
     def zip_traces(traces, output):
@@ -594,6 +599,38 @@ class GoogleTrace(TaskCombiner):
                     zip.write(file, os.path.basename(file))
                     count += 1
         return output + ".zip"
+
+
+def read_file(filename):
+    with codecs.open(filename, 'r', 'utf-8') as fh:
+        return fh.read()
+
+
+def pack_isea(traces, isea_htm, result_file, trace_name):
+    with codecs.open(result_file, 'w', 'utf-8') as target:
+        with codecs.open(isea_htm, 'r', 'utf-8') as source:
+            for line in source:
+                if '{{ISEA_TRACE_NAME}}' in line:
+                    target.write(line.replace('{{ISEA_TRACE_NAME}}', trace_name))
+                elif '{{ISEA_DATA}}' in line:
+                    for trace in traces:
+                        print('Packing:', trace)
+                        ext = trace.rsplit('.', 1)[-1]
+                        if os.stat(trace).st_size > 1000:
+                            target.write('\n<script type="application/%s" name="isea_data">' % ext)
+                            with codecs.open(trace, 'r', 'utf-8') as fd:
+                                for line in fd:
+                                    target.write(line)
+                            target.write('</script>\n')
+                        else:
+                            data = read_file(trace)
+                            if ext == 'json':
+                                content = json.loads(data)
+                                if 'traceEvents' in content and not content['traceEvents']:
+                                    continue
+                            target.write('<script type="application/%s" name="isea_data">%s</script>\n' % (ext, data))
+                else:
+                    target.write(line)
 
 
 EXPORTER_DESCRIPTORS = [{
@@ -609,6 +646,19 @@ def support_no_console(log):
         sys.stderr = open(log, "w")
         sys.stdin = open(os.devnull, "r")
 
-if __name__ != "__main__":
+
+if __name__ == "__main__":
+    import glob
+    root = sys.argv[1]
+    traces = []
+    for file in glob.glob(os.path.join(root, '*.*')):
+        traces.append(file)
+    args = lambda :None
+    args.bindir = os.path.realpath(os.path.join(os.path.dirname(__file__), '..'))
+    args.no_catapult = None
+    args.user_input = root
+    args.debug = False
+    GoogleTrace.join_traces(traces, root, args)
+else:
     support_no_console(os.path.join(tempfile.gettempdir(), datetime.now().strftime('sea_%H_%M_%S__%d_%m_%Y.log')))
 
