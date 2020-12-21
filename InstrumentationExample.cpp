@@ -2,7 +2,7 @@
 #   Intel� Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
-#   Copyright (c) 2015, Intel Corporation
+#   Copyright (c) 2021, Intel Corporation
 #   All rights reserved.
 #
 #   Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
@@ -90,6 +90,8 @@ void ITTAPI get_clock_info(__itt_clock_info* clock_info, void*)
 __itt_clock_domain* clock_domain = nullptr;
 __itt_string_handle* handle_stacked = __itt_string_handle_create("stacked");
 
+__itt_counter manual_counter = __itt_counter_create("manual", "counter");
+
 #ifndef _WIN32
     #define sprintf_s sprintf
 #endif
@@ -116,18 +118,20 @@ void workerthread(int data)
     TaskStack(5);
     __itt_id id = __itt_id_make(threadname, data);
     __itt_id_create(g_domain, id);
+    __itt_event event = __itt_event_create("event_test", 0);
     // Each worker thread does some number of "work" tasks
     uint64_t counter = 0;
     while (!g_done)
     {
         __itt_sync_acquired((void*)&workerthread);
-
+        __itt_event_start(event);
         ITT_COUNTER("random", rand());
         bool bOverlapped = !(rand() % 2);
         unsigned long long start = TClock::now().time_since_epoch().count();
         __itt_task_begin(g_domain, id, __itt_null, handle_work);
         std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 10));
         __itt_sync_releasing((void*)&workerthread);
+        __itt_event_end(event);
 
         if (rand() % 5 == 1)
         {
@@ -150,6 +154,12 @@ void workerthread(int data)
         {
             __itt_task_end_overlapped(g_domain, id);
         }
+
+        __itt_counter_set_value(manual_counter, &counter);
+
+        uint64_t data[3] = {counter++, counter*2, counter*3};
+        __itt_metadata_add(g_domain, __itt_null, handle_stacked, __itt_metadata_u64, 3, data);
+
     }
     TaskStack(5);
     __itt_id_destroy(g_domain, id);

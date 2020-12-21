@@ -2,7 +2,7 @@
 #   Intel® Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
-#   Copyright (c) 2015, Intel Corporation
+#   Copyright (c) 2021, Intel Corporation
 #   All rights reserved.
 #
 #   Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
@@ -151,6 +151,8 @@ void UnchainGlobal(__itt_global* pOld)
 void __itt_report_error(__itt_error_code, ...){}
 
 
+__itt_domain* g_pIntelSEAPIDomain = nullptr;
+
 extern "C" {
 
     SEA_EXPORT void ITTAPI __itt_api_init(__itt_global* pGlob, __itt_group_id id)
@@ -158,11 +160,14 @@ extern "C" {
         if (!g_bInitialized)
         {
             g_bInitialized = true;
+            sea::SetGlobalCrashHandler();
 
             __itt_global* pGlobal = GetITTGlobal();
             __itt_mutex_init(&pGlobal->mutex);
             pGlobal->mutex_initialized = 1;
             sea::CIttLocker locker;
+            using namespace sea;
+            g_pIntelSEAPIDomain = UNICODE_AGNOSTIC(domain_create)("IntelSEAPI");
             __itt_api_init(pGlobal, id);
             pGlobal->api_initialized = 1;
         }

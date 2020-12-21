@@ -1,3 +1,4 @@
+from __future__ import print_function
 import os
 import sys
 import time
@@ -16,6 +17,11 @@ def relog_etl(frm, to):
     sea.ITT('win').relog(frm, to)
 
 
+def async_exec(cmd, title=None, env=None):
+    cmd = 'start "%s" /MIN /LOW %s' % (title if title else cmd, cmd)
+    subprocess.Popen(cmd, shell=True, stdin=None, stdout=None, stderr=None, creationflags=0x00000008, env=env)  # DETACHED_PROCESS
+
+
 class WPRCollector(Collector):
     def __init__(self, args):
         Collector.__init__(self, args)
@@ -25,8 +31,6 @@ class WPRCollector(Collector):
             self.file = os.path.join(args.output, "wpa-%s.etl" % (self.args.cuts[0] if self.args.cuts else '0'))
         else:
             self.file = os.path.join(args.output, "wpa.etl")
-        if self.wpr:
-            self.start()
 
     @classmethod
     def detect(cls, statics={}):
@@ -37,6 +41,7 @@ class WPRCollector(Collector):
         for wpr in wprs:
             proc = subprocess.Popen('"%s" /?' % wpr, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             (out, err) = proc.communicate()
+            out = out.decode()
             if err:
                 return None
             for line in out.split('\n'):
@@ -48,7 +53,7 @@ class WPRCollector(Collector):
                     break
         if not res:
             return None
-        statics['res'] = sorted(res, key=lambda(_, ver): [int(item) for item in ver.split('.')], reverse=True)[0][0]
+        statics['res'] = sorted(res, key=lambda __ver: [int(item) for item in __ver[1].split('.')], reverse=True)[0][0]
         return statics['res']
 
     @staticmethod
@@ -67,6 +72,9 @@ class WPRCollector(Collector):
             yield parts[0], parts[0] in ['DiskIO', 'FileIO', 'GPU', 'GeneralProfile', 'Handle', 'Heap', 'Network', 'Power', 'Video', 'VirtualAllocation']
 
     def start(self):
+        if not self.wpr:
+            print("Failed to start without WPR...")
+            return
         if self.is_recording():
             self.cancel()
         profile = os.path.normpath(os.path.join(self.args.bindir, '..', 'ETW', 'IntelSEAPI.wprp'))
@@ -107,13 +115,13 @@ class WPRCollector(Collector):
                 time.sleep(1)
             return [self.file]
         else:
-            sea.prepare_environ(self.args)
-            self.stop_wpr(self.wpr, self.file, self.args.output)
+            env = sea.prepare_environ(self.args)
+            self.stop_wpr(self.wpr, self.file, self.args.output, env)
             return [self.file]
 
     @classmethod
-    def stop_wpr(cls, wpr, file, output):
-        (out, err) = cls.execute('"%s" -stop "%s"' % (wpr, file))
+    def stop_wpr(cls, wpr, file, output, env=None):
+        (out, err) = cls.execute('"%s" -stop "%s"' % (wpr, file), env=env)
         if err:
             return []
         assert(file in out)
@@ -171,7 +179,7 @@ class GPUViewCollector(Collector):
 
         (out, err) = self.execute('logman stop GPA_GPUVIEW -ets')
         if err and complete:
-            print err
+            print(err)
 
         environ = os.environ.copy()
         environ['TLOG'] = 'NORMAL'
@@ -193,7 +201,7 @@ class GPUViewCollector(Collector):
             cmd = '"%s" -merge Merged.etl IntelSEAPI.etl "%s"' % (xperf, os.path.basename(file))
             (out, err) = Collector.execute(cmd, cwd=started)
             if err and (os.path.basename(file) not in err):
-                print err
+                print(err)
             relog_etl(os.path.join(started, os.path.basename(file)), file)
             shutil.rmtree(started)
         else:
@@ -254,6 +262,10 @@ class ETWTrace(Collector):
                 if is_domain_enabled('OculusVR'):
                     file.write('"{553787FC-D3D7-4F5E-ACB2-1597C7209B3C}"\n')
                     count += 1
+                if is_domain_enabled('Intel_Graphics_D3D10'):
+                    file.write('"{AD367E62-97EF-4B20-8235-E8AB49DB0C23}"\n')
+                    count += 1
+
             if count:
                 cmd = 'logman start GPA_SEA -ct perf -bs 1024 -nb 120 480'
                 cmd += ' -pf "%s" -o "%s" %s -ets' % (logman_pf, self.files[0], (('-max %d -f bincirc' % (self.args.ring * 15)) if self.args.ring else ''))
@@ -332,6 +344,11 @@ class ETWTrace(Collector):
                     return self
             else:
                 del self.files[-1]
+
+        self.files.append('%s/etw_profilers.logman' % self.args.output)
+        cmd = 'cmd /c logman query providers ^> "%s"' % self.files[-1]
+        async_exec(cmd, 'Collecting ETW providers')
+
         return self
 
     def stop(self, wait=True):  # TODO: stop without waits
@@ -349,6 +366,7 @@ class ETWTrace(Collector):
             proc = subprocess.Popen('xperf -stop GPA_SEA', shell=True)
         if wait:
             proc.wait()
+
         return self.files
 
 

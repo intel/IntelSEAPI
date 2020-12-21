@@ -1,3 +1,4 @@
+from __future__ import print_function
 import os
 from sea_runtool import default_tree, Callbacks, Progress, get_decoders
 
@@ -39,7 +40,7 @@ def transform_log(args):
                         if len(parts) != 5:
                             continue
                         if not parts[0].startswith('Timestamp'):
-                            print "Error: this log format is not supported. Expected log from OSX's 'log stream'"
+                            print("Error: this log format is not supported. Expected log from OSX's 'log stream'")
                         header = parts
                         continue
                     else:
@@ -57,8 +58,13 @@ def transform_log(args):
                         log.handle_record(time, pid, tid, type, activity, msg)
     return callbacks.get_result()
 
-IMPORTER_DESCRIPTORS = [{
+
+""" FIXME: obsolete module?
+IMPORTER_DESCRIPTORS = [
+{
     'format': 'log',
     'available': True,
     'importer': transform_log
-}]
+}
+]
+"""

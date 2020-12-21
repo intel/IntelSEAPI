@@ -1,3 +1,4 @@
+from __future__ import print_function
 import os
 import subprocess
 from sea_runtool import Collector, subst_env_vars
@@ -8,8 +9,6 @@ class Android(Collector):
         Collector.__init__(self, args)
         self.adb = self.detect()
         self.file = None
-        if self.adb:
-            self.start()
 
     def is_root(self, statics={}):
         if statics:
@@ -33,7 +32,7 @@ class Android(Collector):
             version = parts[parts.index('version') + 1]
             systraces.append((version, adb))
         if systraces:
-            sorted_by_version = sorted(systraces, key=lambda(ver, _): [int(item) for item in ver.split('.')], reverse=True)
+            sorted_by_version = sorted(systraces, key=lambda ver__: [int(item) for item in ver__[0].split('.')], reverse=True)
             return '"%s"' % sorted_by_version[0][1]
         else:
             return None
@@ -56,6 +55,9 @@ class Android(Collector):
         return out, err
 
     def start(self):
+        if not self.adb:
+            print("Failed to run without adb...")
+            return
         self.file = os.path.join(subst_env_vars(self.args.input), 'atrace-%s.ftrace' % (self.args.cuts[0] if self.args.cuts else '0'))
         self.echo('0', '/sys/kernel/debug/tracing/tracing_on')
         self.echo('', '/sys/kernel/debug/tracing/trace')

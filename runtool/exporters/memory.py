@@ -59,7 +59,7 @@ class Memory(TaskCombiner):
             end_data['time'] = offset + length
             end_data['type'] = 1
             gt.complete_task('task', call_data, end_data)
-            for pair, child in node['children'].iteritems():
+            for pair, child in node['children'].items():
                 offset += export_node(pair[1], child, offset)
             return length
         export_node('global scope', self.mem_stat, 0)
@@ -73,7 +73,7 @@ class Memory(TaskCombiner):
         if type != 'task' or 'memory' not in begin:
             return
         score = self.mem.setdefault(begin['str'], {'self': 0, 'children': 0})
-        for size, values in begin['memory'].iteritems():
+        for size, values in begin['memory'].items():
             if size is None:  # special case for children attribution
                 score['children'] += values
             else:
@@ -82,7 +82,7 @@ class Memory(TaskCombiner):
     def finish(self):
         with open(self.get_targets()[0], "w+b") as file:
             file.write('name,self,children\n')
-            for key, value in self.mem.iteritems():
+            for key, value in self.mem.items():
                 file.write('%s,%f,%f\n' % (key, value['self'], value['children']))
         if self.mem_stat:
             self.export_mem_stat()

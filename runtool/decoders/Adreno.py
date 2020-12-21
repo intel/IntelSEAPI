@@ -1,3 +1,4 @@
+from __future__ import print_function
 
 TRACK_INDEX, TRACK_NAME = -1, 'GPU'
 
@@ -32,7 +33,7 @@ class Adreno:
         if not delta:
             return
         thread = self.gpu.thread(ctx, 'GPU %d' % ctx)
-        for i in xrange(abs(delta)):
+        for i in range(abs(delta)):
             if delta > 0:
                 task = thread.task(str(self.task_counter), 'Adreno', overlapped=True).begin(timestamp + len(self.gpu_tasks) * 1000, self.task_counter)
                 self.gpu_tasks.append(task)
@@ -51,7 +52,7 @@ class Adreno:
         state['queued'] = queued
         if not delta:
             return
-        for i in xrange(abs(delta)):
+        for i in range(abs(delta)):
             if delta > 0:
                 self.cpu_tasks.append(
                     self.callbacks.process(pid).thread(tid)
@@ -92,11 +93,11 @@ class Adreno:
         elif name == 'adreno_cmdbatch_submitted':
             args = self.parse_args(args)
             self.gpu_queue(int(args['ctx']), int(args['inflight']), timestamp)
-            # print 'submitted', args
+            # print('submitted', args)
         elif name == 'adreno_cmdbatch_retired':
             args = self.parse_args(args)
             self.gpu_queue(int(args['ctx']), int(args['inflight']), timestamp)
-            # print 'retired', args
+            # print('retired', args)
         elif name == 'kgsl_waittimestamp_entry':  # ctx here is important, but absent in _exit, and adreno_drawctxt_wait does the same
             """
             thread = self.callbacks.process(pid).thread(tid)
@@ -173,7 +174,7 @@ class Adreno:
         elif name in ['kgsl_mem_timestamp_queue', 'kgsl_mem_timestamp_free']:
             pass
         else:
-            print name
+            print(name)
 
     def finalize(self):
         pass

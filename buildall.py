@@ -2,7 +2,7 @@
 #   Intel(R) Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
-#   Copyright (c) 2015, Intel Corporation
+#   Copyright (c) 2021, Intel Corporation
 #   All rights reserved.
 #
 #   Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
@@ -21,6 +21,7 @@ import os
 import sys
 import shutil
 import fnmatch
+import datetime
 import subprocess
 
 
@@ -28,8 +29,7 @@ install_dest = r"./../installer"
 
 
 def get_share_folder():
-    import datetime
-    folder_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    folder_name = datetime.datetime.now().strftime("%Y%m%d")
     return os.path.join(install_dest, folder_name)
 
 
@@ -39,12 +39,19 @@ def run_shell(cmd):
 
 
 def replace_in_file(file, what_by):
-    import fileinput
-    for line in fileinput.input(file, inplace=True):
-        for (what, by) in what_by:
-            if what in line:
-                line = line.replace(what, by)
-        sys.stdout.write(line)
+    from tempfile import mkstemp
+    fd, tmp_path = mkstemp()
+    with open(tmp_path,'wb') as dst:
+        with open(file, mode='rb') as src:
+            for line in src:
+                for (what, by) in what_by:
+                    if what in line:
+                        line = line.replace(what, by)
+                dst.write(line)
+    shutil.copymode(file, tmp_path)
+    os.remove(file)
+    shutil.move(tmp_path, file)
+    os.close(fd)
 
 
 def get_yocto():
@@ -114,12 +121,16 @@ def locate_exact(what):
         return []
     return [item for item in items if item.endswith(what)]
 
+
 def find_in(locations, what):
     try:
         items = subprocess.check_output(['find'] + locations + ['-name', what]).decode("utf-8").split('\n')
     except Exception:
         return []
     return [item for item in items if item.endswith(what)]
+
+def run(cmd):
+    return subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
 
 def GetJDKPath():
     if sys.platform == 'win32':
@@ -129,7 +140,7 @@ def GetJDKPath():
             return bush[subkeys[-1]]['JavaHome']
         return None
     else:
-        path, err = subprocess.Popen("which javah", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+        path, err = run("which javah")
         if err or not path:
             return None
         if sys.platform == 'darwin':
@@ -189,16 +200,22 @@ def get_vs_versions():  # https://www.mztools.com/articles/2008/MZ2008003.aspx
     return sorted(versions)
 
 
-def detect_cmake():
+def detect_cmake(args):
+    if args.cmake:
+        return args.cmake
     if sys.platform == 'darwin':
-        path, err = subprocess.Popen("which cmake", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+        path, err = run("which cmake")
         if not path.strip():
-            path, err = subprocess.Popen("which xcrun", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+            path, err = run("which xcrun")
             if not path.strip():
                 print("No cmake and no XCode found...")
                 return None
             return 'xcrun cmake'
     return 'cmake'
+
+
+def detect_nsis():
+    return os.path.exists(r'c:\Program Files (x86)\NSIS\NSIS.exe')
 
 
 def main():
@@ -213,6 +230,7 @@ def main():
     parser.add_argument("-c", "--clean", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--no_java", action="store_true")
+    parser.add_argument("--cmake")
     if sys.platform == 'win32' and vs_versions:
         parser.add_argument("--vs", choices=vs_versions, default=vs_versions[0])
     args = parser.parse_args()
@@ -236,6 +254,14 @@ def main():
     perf_co_pilot = find_in(['/usr/lib', '/usr/local/lib'], 'libpcp_mmv.a') if sys.platform != 'win32' else None
     print("Found co-pilot:", perf_co_pilot)
 
+    perf_co_pilot = False  # Enable when fully supported
+
+    fat_binary = False  # Mac only and only before xcode 10
+    xcode_version, err = run('xcodebuild -version')
+    if not err:
+        xcode_version = int(xcode_version.split()[1].split('.')[0])
+        fat_binary = xcode_version < 10
+
     work_dir = os.getcwd()
     print(work_dir)
     if args.clean:
@@ -253,7 +279,7 @@ def main():
         print("work_folder: ", work_folder)
         os.chdir(work_folder)
 
-        cmake = detect_cmake()
+        cmake = detect_cmake(args)
         if not cmake:
             print("Error: cmake is not found")
             return
@@ -279,20 +305,28 @@ def main():
             else:
                 print("Set ANDROID_NDK environment to build Android!")
             continue
+        suffix = ''
         if sys.platform == 'win32':
             if vs_versions:
-                generator = ('Visual Studio %s' % args.vs) + (' Win64' if bits == '64' else '')
+                if int(args.vs) >= 16:
+                    generator = ('Visual Studio %s' % args.vs)
+                    suffix += ' -A x64' if bits == '64' else '-A Win32'
+                else:
+                    generator = ('Visual Studio %s' % args.vs) + (' Win64' if bits == '64' else '')
             else:
                 generator = 'Ninja'
         else:
             generator = 'Unix Makefiles'
         run_shell('%s "%s" -G"%s" %s' % (cmake, work_dir, generator, " ".join([
             ("-DFORCE_32=ON" if bits == '32' else ""),
+            ("-DFAT_BINARY=OFF" if not fat_binary else ""),
             ("-DCMAKE_BUILD_TYPE=Debug" if args.debug else ""),
             ("-DYOCTO=1" if yocto else ""),
             (('-DJDK="%s"' % jdk_path) if jdk_path else ""),
             ('-DCO_PILOT=1' if perf_co_pilot else ""),
-            ('-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON' if args.verbose else '')
+            ('-DINSTALLER=ZIP' if not detect_nsis() else "-DINSTALLER=NSIS"),
+            ('-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON' if args.verbose else ''),
+            suffix
         ])))
         if sys.platform == 'win32':
             install = args.install and bits == target_bits[-1]
@@ -308,18 +342,32 @@ def main():
             run_shell('%s --build . --config %s --target package' % (cmake, ('Debug' if args.debug else 'Release')))
 
             installer = glob.glob(os.path.join(work_folder, "IntelSEAPI*.sh"))[0]
-            print(installer)
-            if sys.platform == 'darwin':
-                replace_in_file(installer, [
-                    ('toplevel="`pwd`"', 'toplevel="/Applications"'),
-                    ('exit 0', 'open "${toplevel}/ReadMe.txt"; mkdir -p ~/"Library/Application Support/Instruments/PlugIns/Instruments"; ln -F -s "${toplevel}/dtrace/IntelSEAPI.instrument" ~/"Library/Application Support/Instruments/PlugIns/Instruments/IntelSEAPI.instrument"; exit 0')
-                ])
-            elif 'linux' in sys.platform:
-                replace_in_file(installer, [
-                    ('toplevel="`pwd`"', 'toplevel="/opt/intel"'),
-                    ('exit 0', 'open "${toplevel}/ReadMe.txt"; exit 0')
-                ])
+            name = os.path.join(work_folder, 'IntelSEAPI-%s.sh' % str(datetime.date.today())[2:].replace('-', '.'))
+            os.rename(installer, os.path.join(work_folder, name))
+            installer = name
+            print('Installer:', installer)
 
-if __name__== "__main__":
+            to_replace = []
+            if sys.platform != 'win32':
+                if sys.platform == 'darwin':
+                    to_replace += [
+                        (b'toplevel="`pwd`"', b'toplevel="/Applications"'),
+                        (b'IntelSEAPI-delete_me-Darwin', b'IntelSEAPI'),
+                    ]
+                elif 'linux' in sys.platform:
+                    to_replace += [
+                        (b'toplevel="`pwd`"', b'toplevel="/opt/intel"'),
+                        (b'IntelSEAPI-delete_me-Linux', b'IntelSEAPI'),
+                    ]
+                to_replace += [
+                    (b'exit 0', b'python ${toplevel}/runtool/sea_runtool.py install;exit 0'),
+                    (b'delete_me', b'')
+                ]
+            if to_replace:
+                replace_in_file(installer, to_replace)
+            shutil.rmtree(glob.glob(os.path.join(work_folder, '_CPack_Packages'))[0])
+
+
+if __name__ == "__main__":
     main()
 

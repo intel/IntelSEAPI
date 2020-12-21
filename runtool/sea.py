@@ -1,7 +1,7 @@
 #   Intel(R) Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
-#   Copyright (c) 2015, Intel Corporation
+#   Copyright (c) 2021, Intel Corporation
 #   All rights reserved.
 #
 #   Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
@@ -23,6 +23,7 @@ import time
 import platform
 import threading
 from ctypes import cdll, c_char_p, c_void_p, c_ulonglong, c_int, c_double, c_long, c_bool, c_short, c_wchar_p, c_uint32, POINTER, CFUNCTYPE
+from sea_runtool import reset_global, global_storage
 
 
 class Dummy:
@@ -77,10 +78,15 @@ class Track:
         return False
 
 
-def prepare_environ(args, recording=False):  # FIXME: avoid using global os.environ!
+def prepare_environ(args):
+    if 'sea_env' in global_storage(None):
+        return global_storage('sea_env')
+    env = os.environ.copy()
+    if args.verbose == 'info':
+        env['INTEL_SEA_VERBOSE'] = '1'
     bitness = '32' if '32' in platform.architecture()[0] else '64'
     env_name = 'INTEL_LIBITTNOTIFY' + bitness
-    if env_name not in os.environ or 'SEAPI' not in os.environ[env_name]:
+    if env_name not in env or 'SEAPI' not in env[env_name]:
         if sys.platform == 'win32':
             dl_name = 'IntelSEAPI%s.dll' % bitness
         elif sys.platform == 'darwin':
@@ -88,36 +94,51 @@ def prepare_environ(args, recording=False):  # FIXME: avoid using global os.envi
         else:
             dl_name = 'libIntelSEAPI%s.so' % bitness
 
-        os.environ[env_name] = os.path.join(args.bindir, dl_name)
-    os.environ['PATH'] = os.environ['PATH'] + os.pathsep + args.bindir
-    if recording:
-        if 'INTEL_SEA_SAVE_TO' not in os.environ and args.output:
-            os.environ['INTEL_SEA_SAVE_TO'] = os.path.join(args.output, 'pid')
-    elif 'INTEL_SEA_SAVE_TO' in os.environ:
-        del os.environ['INTEL_SEA_SAVE_TO']
-    return os.environ
+        env[env_name] = os.path.join(args.bindir, dl_name)
+    if args.bindir not in env['PATH']:
+        env['PATH'] += os.pathsep + args.bindir
+
+    if sys.platform == 'darwin' and args.mtlshim:
+        if 'DYLD_INSERT_LIBRARIES' not in env:
+            env['DYLD_INSERT_LIBRARIES'] = os.path.join(args.bindir, 'libmtlshim.dylib')
+        elif 'libmtlshim.dylib' not in env['DYLD_INSERT_LIBRARIES']:
+            env['DYLD_INSERT_LIBRARIES'] += ':' + os.path.join(args.bindir, 'libmtlshim.dylib')
+        env['ITT'] = '1'
+
+    reset_global('sea_env', env)
+    return global_storage('sea_env')
 
 
-class ITT:
+class ITT(object):
     scope_global = 1
     scope_process = 2
     scope_thread = 3
     scope_task = 4
 
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super(ITT, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self, domain):
+        if hasattr(self, 'lib'):
+            return
         bitness = 32 if '32' in platform.architecture()[0] else 64
         env_name = 'INTEL_LIBITTNOTIFY' + str(bitness)
         self.lib = None
         self.strings = {}
         self.tracks = {}
         self.counters = {}
-        if env_name not in os.environ:
+        env = global_storage('sea_env')
+        if env_name not in env:
             print("Warning:", env_name, "is not set...")
             return
-        if os.path.exists(os.environ[env_name]):
-            self.lib = cdll.LoadLibrary(os.environ[env_name])
+        if os.path.exists(env[env_name]):
+            self.lib = cdll.LoadLibrary(env[env_name])
         if not self.lib:
-            print("Warning: Failed to load", os.environ[env_name], "...")
+            print("Warning: Failed to load", env[env_name], "...")
             return
 
         # void* itt_create_domain(const char* str)
@@ -202,32 +223,14 @@ class ITT:
             # bool parse_standard_source(const char* file, get_receiver_t get_receiver, receive_t receive)
             self.lib.parse_standard_source.argtypes = [c_char_p, self.get_receiver_t, self.receive_t]
             self.lib.parse_standard_source.restype = c_bool
-        if hasattr(self.lib, 'mdapi_dump'):
-            # const char* mdapi_dump()
-            self.lib.mdapi_dump.argtypes = [c_uint32]
-            self.lib.mdapi_dump.restype = c_char_p
 
-            # void(uint32_t report, const char* name, double value)
-            self.mdapi_metric_callback_t = CFUNCTYPE(None, c_uint32, c_char_p, c_double)
-
-            # bool(const void* buff, uint32_t size, uint32_t count)
-            self.mdapi_stream_receiver_t = CFUNCTYPE(c_bool, c_void_p, c_uint32, c_uint32, c_ulonglong, c_ulonglong)
-
-            # const char * mdapi_stream(const char * szGroupName, const char * szMetricSetSymbolName, unsigned int nsTimerPeriod, uint32_t pid, CMDAPIHandler::TStreamCallback callback)
-            self.lib.mdapi_stream.argtypes = [c_char_p, c_char_p, c_uint32, c_uint32, self.mdapi_stream_receiver_t]
-            self.lib.mdapi_stream.restype = c_char_p
-
-            #const char* mdapi_decode(const char* szGroupName, const char* szMetricSetSymbolName, const void* reportsData, uint32_t size, uint32_t count, CMDAPIHandler::TMetricCallback callback)
-            self.lib.mdapi_decode.argtypes = [c_char_p, c_char_p, c_void_p, c_uint32, c_uint32, self.mdapi_metric_callback_t]
-            self.lib.mdapi_decode.restype = c_char_p
-
-        self.domain = self.lib.itt_create_domain(domain)
+        self.domain = self.lib.itt_create_domain(domain.encode())
 
     def get_string_id(self, text):
         try:
             return self.strings[text]
         except:
-            id = self.strings[text] = self.lib.itt_create_string(text)
+            id = self.strings[text] = self.lib.itt_create_string(bytes(text, encoding='utf-8'))
             return id
 
     def marker(self, text, scope=scope_process, timestamp=0, id=0):
@@ -281,10 +284,9 @@ class ITT:
             return self.lib.resolve_pointer(module, addr)
 
     def time_sync(self):
-        if 'linux' in sys.platform:
-            if not self.lib:
-                return
-            self.lib.itt_write_time_sync_markers()
+        if not self.lib:
+            return
+        self.lib.itt_write_time_sync_markers()
 
     def parse_standard_source(self, path, reader):
         if not hasattr(self.lib, 'parse_standard_source'):
@@ -307,7 +309,7 @@ class ITT:
             receivers.append(receiver)
             return len(receivers)  # Should be: cast(pointer(py_object(receiver)), c_void_p).value, but it doesn't work, so we return index of the array
 
-        return self.lib.parse_standard_source(path, self.get_receiver_t(get_receiver), self.receive_t(receive))
+        return self.lib.parse_standard_source(bytes(path, encoding='utf-8'), self.get_receiver_t(get_receiver), self.receive_t(receive))
 
     def can_parse_standard_source(self):
         return hasattr(self.lib, 'parse_standard_source')
@@ -338,25 +340,6 @@ class ITT:
             return os.system('sips -s format gif -z %d %d "%s" --out "%s"' % (width, height, from_path, to_path))
         else:
             os.system('convert %s -resize %dx%d %s' % (from_path, width, height, to_path))
-
-    def mdapi_dump(self, level=0xFFFFffff, raw=False):
-        if not hasattr(self.lib, 'mdapi_dump'):
-            return None
-        dump = self.lib.mdapi_dump(level)
-        if raw:
-            return dump
-        return json.loads(dump)
-
-    def mdapi_stream(self, group, metric_set, period_ns, pid, receiver):  # receiver(buff, size, count): return True
-        if not hasattr(self.lib, 'mdapi_stream'):
-            return "Unsupported"
-        return self.lib.mdapi_stream(group, metric_set, period_ns, pid, self.mdapi_stream_receiver_t(receiver))
-
-    def mdapi_decode(self, group, metric_set, buff, size, count, metric_receiver):  # metric_receiver(report, metric_name, value)
-        if not hasattr(self.lib, 'mdapi_decode'):
-            return "Unsupported"
-        return self.lib.mdapi_decode(group, metric_set, buff, size, count, self.mdapi_metric_callback_t(metric_receiver))
-
 
 def get_memory_usage(statics={}):  # in bytes
     if os.name == 'nt':
@@ -400,57 +383,88 @@ def trace_execution(fn, args, save_to=None):
     if save_to:
         os.environ['INTEL_SEA_SAVE_TO'] = save_to
     itt = ITT("python")
+    listener = None
+
+    def extract_name(frame):
+        name = frame.f_code.co_name
+        if 'self' in frame.f_locals:
+            cls = frame.f_locals['self'].__class__.__name__
+            name = cls + "." + name
+        return name
 
     if itt.lib:
-        file_id = itt.get_string_id('__FILE__')
-        line_id = itt.get_string_id('__LINE__')
-        module_id = itt.get_string_id('__MODULE__')
-        trace_execution.frames = {}
-        trace_execution.recurrent = False
-        high_part = 2**32
+        class ITTListener:
+            def __init__(self):
+                self.file_id = itt.get_string_id('__FILE__')
+                self.line_id = itt.get_string_id('__LINE__')
+                self.module_id = itt.get_string_id('__MODULE__')
 
-        def profiler(frame, event, arg):  # https://pymotw.com/2/sys/tracing.html
-            if trace_execution.recurrent:
-                return
-            trace_execution.recurrent = True
-            task_id = id(frame.f_code)
-            if 'call' in event:
-                if task_id in trace_execution.frames:
-                    trace_execution.frames[task_id] += 1
-                else:
-                    trace_execution.frames[task_id] = 1
-                task_id += trace_execution.frames[task_id] * high_part
-                name = frame.f_code.co_name + ((' (%s)' % arg.__name__) if arg else '')
-                if 'self' in frame.f_locals:
-                    cls = frame.f_locals['self'].__class__.__name__
-                    name = cls + "." + name
-                # print event, name, task_id, arg
-                mdl = inspect.getmodule(frame)
+            def begin(self, name, filename, lineno, mdl, args, task_id, frame):
                 itt.lib.itt_task_begin_overlapped(itt.domain, task_id, 0, itt.get_string_id(name), 0)
-                itt.lib.itt_metadata_add_str(itt.domain, task_id, file_id, frame.f_code.co_filename)
-                itt.lib.itt_metadata_add(itt.domain, task_id, line_id, frame.f_code.co_firstlineno)
+                itt.lib.itt_metadata_add_str(itt.domain, task_id, self.file_id, filename)
+                itt.lib.itt_metadata_add(itt.domain, task_id, self.line_id, lineno)
                 if mdl:
-                    itt.lib.itt_metadata_add_str(itt.domain, task_id, module_id, mdl.__name__)
-            elif 'return' in event:
-                # print event, frame.f_code.co_name, task_id + trace_execution.frames[task_id] * high_part
-                if task_id in trace_execution.frames:
-                    itt.lib.itt_task_end_overlapped(itt.domain, 0, task_id + trace_execution.frames[task_id] * high_part)
-                    if trace_execution.frames[task_id] > 1:
-                        trace_execution.frames[task_id] -= 1
-                    else:
-                        del trace_execution.frames[task_id]
-                itt.counter('MEMORY_USAGE', get_memory_usage())
-            trace_execution.recurrent = False
+                    itt.lib.itt_metadata_add_str(itt.domain, task_id, self.module_id, mdl)
 
-        old_profiler = sys.getprofile()
-        sys.setprofile(profiler)
-        old_threading_profiler = threading.setprofile(profiler)
-        if fn:
-            fn(*args)
-            sys.setprofile(old_profiler)
-            threading.setprofile(old_threading_profiler)
-    elif fn:
+            def end(self, task_id):
+                itt.lib.itt_task_end_overlapped(itt.domain, 0, task_id)
+                itt.counter('MEMORY_USAGE', get_memory_usage())
+
+        listener = ITTListener(itt.lib)
+    else:
+        class Printer:
+            def __init__(self):
+                self.traced = set()
+
+            def begin(self, name, filename, lineno, mdl, args, task_id, frame):
+                if (filename, lineno) in self.traced:
+                    return
+                self.traced.add((filename, lineno))
+                if '<' not in filename and any(isinstance(value, bytes) for value in args.values()):
+                    print('%s:%d !BYTES! %s %s %s' % (filename, lineno, mdl, name, str(args)))
+                    print('%s:%d !PARENT! %s %s' % (frame.f_back.f_code.co_filename, frame.f_back.f_code.co_firstlineno, extract_name(frame.f_back), str(frame.f_back.f_locals)))
+
+            def end(self, task_id):
+                pass
+
+        listener = Printer()
+
+    trace_execution.frames = {}
+    trace_execution.recurrent = False
+    high_part = 2**32
+
+    def profiler(frame, event, arg):  # https://pymotw.com/2/sys/tracing.html
+        if trace_execution.recurrent:
+            return
+        trace_execution.recurrent = True
+        task_id = id(frame.f_code)
+        if 'call' in event:
+            if task_id in trace_execution.frames:
+                trace_execution.frames[task_id] += 1
+            else:
+                trace_execution.frames[task_id] = 1
+            task_id += trace_execution.frames[task_id] * high_part
+            name = extract_name(frame)
+            # print event, name, task_id, arg
+            mdl = inspect.getmodule(frame)
+            listener.begin(name, frame.f_code.co_filename, frame.f_code.co_firstlineno, mdl.__name__ if mdl else None, frame.f_locals, task_id, frame)
+        elif 'return' in event:
+            # print event, frame.f_code.co_name, task_id + trace_execution.frames[task_id] * high_part
+            if task_id in trace_execution.frames:
+                listener.end(task_id + trace_execution.frames[task_id] * high_part)
+                if trace_execution.frames[task_id] > 1:
+                    trace_execution.frames[task_id] -= 1
+                else:
+                    del trace_execution.frames[task_id]
+        trace_execution.recurrent = False
+
+    old_profiler = sys.getprofile()
+    sys.setprofile(profiler)
+    old_threading_profiler = threading.setprofile(profiler)
+    if fn:
         fn(*args)
+        sys.setprofile(old_profiler)
+        threading.setprofile(old_threading_profiler)
 
 
 def stack_task(itt):
@@ -479,6 +493,26 @@ def test_itt():
             itt.task_submit("submitted", ts, dur / 2)
 
 
+def as_admin():
+    if sys.platform != 'win32':
+        return True
+
+    from ctypes import windll
+
+    def is_admin():
+        try:
+            return windll.shell32.IsUserAnAdmin()
+        except:
+            return False
+
+    if is_admin():
+        return True
+    else:
+        # Re-run the program with admin rights
+        windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+    return False
+
+
 def main():
     itt = ITT("python")
     return trace_execution(test_itt)
@@ -498,6 +532,7 @@ def main():
             return Receiver(provider, opcode, taskName)
 
     itt.parse_standard_source(r"etw-1.etl", Reader())
+
 
 if __name__ == "__main__":
     main()

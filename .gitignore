@@ -1,8 +1,12 @@
-build_win/
+build_*/
 *.pyc
 *.pyo
 bin/
 .vs/
 obj/
 *.user
-
+runtool/SEARunTool.pyproj
+runtool/.idea/
+.idea/
+tags
+cmake-build*

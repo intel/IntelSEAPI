@@ -2,7 +2,7 @@
 #   Intel(R) Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
-#   Copyright (c) 2015, Intel Corporation
+#   Copyright (c) 2021, Intel Corporation
 #   All rights reserved.
 #
 #   Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
@@ -41,20 +41,16 @@
     #include <fcntl.h>
 #endif
 
-#ifdef STANDARD_SOURCES
-    #include <standardsources.h>
-#else
-    #if defined(__ANDROID__)
-    namespace std { //android NDK is missing this functionality
-        template <typename T>
-        std::string to_string(T value)
-        {
-            std::ostringstream os;
-            os << value;
-            return os.str();
-        }
+#if defined(__ANDROID__)
+namespace std { //android NDK is missing this functionality
+    template <typename T>
+    std::string to_string(T value)
+    {
+        std::ostringstream os;
+        os << value;
+        return os.str();
     }
-    #endif
+}
 #endif
 
 static std::string get_environ_value(const std::string& name)
@@ -252,3 +248,7 @@ const size_t StackSize = 100;
 using TStack = void*[StackSize];
 size_t GetStack(TStack& stack);
 std::string GetStackString();
+
+namespace sea {
+    void SetGlobalCrashHandler();
+}

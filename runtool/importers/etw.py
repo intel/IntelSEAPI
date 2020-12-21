@@ -1,13 +1,15 @@
+from __future__ import print_function
 import os
 import sys
 import glob
-import base64
+import base64, binascii
 import struct
-from sea_runtool import default_tree, Callbacks, Progress, ProgressConst, TaskTypes, format_bytes, build_tid_map, resolve_pointer, get_decoders
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+from sea_runtool import default_tree, Callbacks, Progress, ProgressConst, TaskTypes, format_bytes, build_tid_map, resolve_pointer, get_decoders, message
 import sea
 import strings
 
+from python_compat import basestring, unicode
 
 
 class ETWXML:
@@ -35,9 +37,8 @@ class ETWXML:
                         yield elem
                         elem.clear()
                     level -= 1
-        except ET.ParseError, exc:
-            print "\nError: Bad XML file: %s\n", file
-            print exc.message
+        except ET.ParseError as exc:
+            message('error', "\nError: Bad XML file: %s\n%s" % (file, exc.message))
 
     def as_dict(self, elem):
         return dict((self.tag_name(child.tag), child) for child in elem.getchildren())
@@ -47,24 +48,24 @@ class ETWXML:
         system = self.as_dict(system)
         if not system:
             return res
-        if system.has_key('TimeCreated'):
+        if 'TimeCreated' in system:
             time_created = system['TimeCreated']
             try:
                 res['time'] = time_created.attrib['RawTime']
             except KeyError:
                 res['time'] = time_created.attrib['SystemTime']
-        if system.has_key('Task'):
+        if 'Task' in system:
             task = system['Task']
             res['Task'] = task.text
-        if system.has_key('EventID'):
+        if 'EventID' in system:
             EventID = system['EventID']
             res['EventID'] = EventID.text
-        if system.has_key('Opcode'):
+        if 'Opcode' in system:
             Opcode = system['Opcode']
             res['Opcode'] = Opcode.text
         provider = system['Provider']
-        execution = system['Execution'] if system.has_key('Execution') else None
-        res['provider'] = provider.attrib['Name'] if provider.attrib.has_key('Name') else provider.attrib['Guid'] if provider.attrib.has_key('Guid') else None
+        execution = system['Execution'] if 'Execution' in system else None
+        res['provider'] = provider.attrib['Name'] if 'Name' in provider.attrib else provider.attrib['Guid'] if 'Guid' in provider.attrib else None
         if execution != None:
             res['pid'] = execution.attrib['ProcessID']
             res['tid'] = execution.attrib['ThreadID']
@@ -83,7 +84,7 @@ class ETWXML:
     def parse_rendering_info(self, info):
         res = {}
         info = self.as_dict(info)
-        for key, data in info.iteritems():
+        for key, data in info.items():
             res[key] = data.text.strip() if data.text else ""
         return res
 
@@ -97,7 +98,7 @@ class ETWXML:
             if not system:
                 continue
             if system['provider'] in self.providers or system['provider'].upper() in self.providers:
-                if children.has_key('BinaryEventData'):
+                if 'BinaryEventData' in children:
                     self.callback(system, children['BinaryEventData'].text, self.as_dict(children['ExtendedTracingInfo'])['EventGuid'].text)
                 else:
                     data = None
@@ -134,23 +135,20 @@ class STDSRCReader:
         def receive(self, time, args):
             system = self.parse_system(time, args)
             system['EventName'] = system['Task']
-            data = dict((key, val) for (key, val) in args.iteritems() if key and not key.startswith('hdr:'))
+            data = dict((key, val) for (key, val) in args.items() if key and not key.startswith('hdr:'))
             if not data and 'hdr:EventMessage' in args and args['hdr:EventMessage']:
-                if len(args['hdr:EventMessage']) % 4 == 0:  # base64
-                    try:
-                        data = base64.b64decode(args['hdr:EventMessage'])
-                    except TypeError:
-                        pass  # Incorrect padding?
-                    try:
-                        data = data.decode('UTF-16').split(u'\x00')[0]  # try to take it as string
-                    except:
-                        pass  # it's a BLOB, nothing to do with it
-                        """
-                        if sys.gettrace():
-                            print "Failed to decode base64:", args['hdr:EventMessage']
-                        """
-                else:
-                    data = args['hdr:EventMessage']
+                def decode(msg):
+                    if len(msg) % 4 == 0:  # base64
+                        try:
+                            data = base64.b64decode(msg)
+                            try:
+                                return data.decode('UTF-16').split(u'\x00')[0]  # try to take it as string
+                            except:
+                                message('error', "Failed to decode base64: " + args['hdr:EventMessage'])
+                        except binascii.Error:
+                            pass
+                    return msg
+                data = decode(args['hdr:EventMessage'])
 
             self.reader.on_event(system, data, system)
 
@@ -199,16 +197,19 @@ def parse_int(text):
 
 def volume_to_drive(path, drives={}):
     if not drives:
-        import ctypes
-        from ctypes.wintypes import create_unicode_buffer
-        buffer = create_unicode_buffer(1024)
-        for letter in range(ord('a'), ord('z') + 1):
-            drive = unicode(chr(letter) + ':').upper()
-            if not ctypes.windll.kernel32.QueryDosDeviceW(drive, buffer, 1024):
-                continue
-            drives[buffer.value] = drive
-        drives[r'\SystemRoot'] = os.path.expandvars('%systemroot%')
-    for (volume, drive) in drives.iteritems():
+        if sys.platform == 'win32':
+            import ctypes
+            from ctypes.wintypes import create_unicode_buffer
+            buffer = create_unicode_buffer(1024)
+            for letter in range(ord('a'), ord('z') + 1):
+                drive = unicode(chr(letter) + ':').upper()
+                if not ctypes.windll.kernel32.QueryDosDeviceW(drive, buffer, 1024):
+                    continue
+                drives[buffer.value] = drive
+            drives[r'\SystemRoot'] = os.path.expandvars('%systemroot%')
+        else:
+            drives[r'\SystemRoot'] = 'c:'
+    for (volume, drive) in drives.items():
         path = path.replace(volume, drive)
     assert ('systemroot' not in path.lower())
     return path
@@ -233,7 +234,7 @@ class GPUQueue:
                 to_remove = []
                 del packets[id]  # the task has ended, removing it from the pipeline
                 time_shift = 0
-                for begin_data in sorted(packets.itervalues(), key=lambda data: data['realtime']):  # finish all and start again to form melting task queue
+                for begin_data in sorted(packets.values(), key=lambda data: data['realtime']):  # finish all and start again to form melting task queue
                     time_shift += 1  # making sure the order of tasks on timeline, probably has to be done in Chrome code rather
                     end_data = begin_data.copy()  # the end of previous part of task is also here
                     end_data['time'] = call_data['time'] - time_shift  # new begin for every task is here
@@ -249,6 +250,8 @@ class GPUQueue:
                 for id in to_remove:  # FIXME: but it's better somehow to detect never ending tasks and not show them at all or mark somehow
                     del packets[id]  # the task end was probably lost
 
+
+Unwanted = ['PagingPreparation', 'DdiBuildPagingBuffer', 'GpuVirtualAddressRange', 'ProcessAllocationDetails', 'ProcessAllocation', 'MonitoredFence', 'Device', 'Context']
 
 class ETWXMLHandler(GPUQueue):
     def __init__(self, args, callbacks):
@@ -371,9 +374,9 @@ class ETWXMLHandler(GPUQueue):
         """
 
     def get_process_name_by_tid(self, tid):
-        if self.thread_pids.has_key(tid):
+        if tid in self.thread_pids:
             pid = self.thread_pids[tid]
-            if self.process_names.has_key(pid):
+            if pid in self.process_names:
                 name = self.process_names[pid]['name']
             else:
                 name = "PID:%d" % parse_int(pid)
@@ -389,34 +392,35 @@ class ETWXMLHandler(GPUQueue):
         return file_name[0] + " " + "/".join(file_name[1:])
 
     def MSNT_SystemTrace(self, system, data, info):
+        def unwanted_file(name):
+            return any(sub in name.lower() for sub in ['.sea/', '.sea ', '.str pid-', '.dll', '.exe', '.mui', '/windows/', '\\windows\\', '.sys'])
+
         if info['EventName'] == 'EventTrace':
             if info['Opcode'] == 'Header':
                 self.PerfFreq = int(data['PerfFreq'])
                 self.etw_header = (system, data, info)
-                try:
-                    ver = '.'.join(str(num) for num in struct.unpack('BBHL', struct.pack('Q', int(data['Version'])))[:-1])
-                    self.callbacks.add_metadata('OS', {'Windows': ver, 'Build': int(data['ProviderVersion'])})
-                except:
-                    print "Error: failed to parse OS version"
-
+                # https://docs.microsoft.com/en-us/windows/win32/etw/eventtrace-header
+                bytes = struct.unpack('B'*8, struct.pack('Q', int(data['Version'])))
+                ver = '.'.join([str(x) for x in bytes[0:2]])
+                self.callbacks.add_metadata('OS', {'Windows': ver, 'Build': int(data['ProviderVersion'])})
         elif info['EventName'] == 'DiskIo':
             if info['Opcode'] in ['FileDelete', 'FileRundown']:
-                if self.files.has_key(data['FileObject']):
+                if data['FileObject'] in self.files:
                     file = self.files[data['FileObject']]
-                    if file.has_key('pid'):
-                        call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type':11, 'id': parse_int(data['FileObject'])}
+                    if 'pid' in file and not unwanted_file(file['name']):
+                        call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type': 11, 'id': parse_int(data['FileObject'])}
                         self.callbacks.on_event("object_delete", call_data)
                     del self.files[data['FileObject']]
             elif info['Opcode'] in ['Read', 'Write', 'HardFault', 'FlushBuffers', 'WriteInit', 'ReadInit', 'FlushInit']:
-                tid = int(data['IssuingThreadId']) if data.has_key('IssuingThreadId') else parse_int(data['TThreadId']) if data.has_key('TThreadId') else None
-                if tid == None:
+                tid = int(data['IssuingThreadId']) if 'IssuingThreadId' in data else parse_int(data['TThreadId']) if 'TThreadId' in data else None
+                if tid is None:
                     return
-                if not data.has_key('FileObject'):
-                    if self.irps.has_key(data['Irp']):
+                if 'FileObject' not in data:
+                    if data['Irp'] in self.irps:
                         data['FileObject'] = self.irps[data['Irp']]
                     else:
                         return
-                if self.files.has_key(data['FileObject']) and self.thread_pids.has_key(tid):
+                if (data['FileObject'] in self.files) and (tid in self.thread_pids) and not unwanted_file(self.files[data['FileObject']]['name']):
                     file = self.files[data['FileObject']]
                     pid = parse_int(self.thread_pids[tid])
                     call_data = {'tid': tid, 'pid': pid, 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type': 10, 'id': parse_int(data['FileObject'])}
@@ -428,32 +432,33 @@ class ETWXMLHandler(GPUQueue):
                         creation['time'] = file['creation']
                         self.callbacks.on_event("object_new", creation)
                         file['creation'] = None
-                    if data.has_key('Irp'):
+                    if 'Irp' in data:
                         self.irps[data['Irp']] = data['FileObject']
                     data['OPERATION'] = info['Opcode']
                     call_data['args'] = {'snapshot': data}
                     self.callbacks.on_event("object_snapshot", call_data)
             else:
-                print info['Opcode']
+                message('warning', 'Unhandled:\t' + info['Opcode'])
         elif info['EventName'] == 'FileIo':
             if info['Opcode'] == 'FileCreate':
                 file_name = self.handle_file_name(data['FileName'])
-                if '.sea/' not in file_name:  # ignore own files - they are toooo many in the view
+                if not unwanted_file(file_name):  # ignore own files - they are toooo many in the view
                     self.files[data['FileObject']] = {'name': file_name, 'creation': self.convert_time(system['time'])}
             elif info['Opcode'] == 'Create':
                 file_name = self.handle_file_name(data['OpenPath'])
-                if '.sea/' not in file_name:  # ignore own files - they are toooo many in the view
+                if not unwanted_file(file_name):  # ignore own files - they are toooo many in the view
                     self.files[data['FileObject']] = {'name': file_name, 'creation': None}
                     call_data = {'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file_name, 'type': 9, 'id': parse_int(data['FileObject'])}
                     self.callbacks.on_event("object_new", call_data)
             elif info['Opcode'] in ['Close', 'FileDelete', 'Delete']:
-                if self.files.has_key(data['FileObject']):
+                if data['FileObject'] in self.files:
                     file = self.files[data['FileObject']]
-                    call_data = {'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type': 11, 'id': parse_int(data['FileObject'])}
-                    self.callbacks.on_event("object_delete", call_data)
+                    if not unwanted_file(file['name']):
+                        call_data = {'tid': int(system['tid']), 'pid': int(system['pid']), 'domain': 'MSNT_SystemTrace', 'time': self.convert_time(system['time']), 'str': file['name'], 'type': 11, 'id': parse_int(data['FileObject'])}
+                        self.callbacks.on_event("object_delete", call_data)
                     del self.files[data['FileObject']]
             elif info['Opcode'] not in ['OperationEnd', 'Cleanup', 'QueryInfo']:
-                if self.files.has_key(data['FileObject']):
+                if data['FileObject'] in self.files and not unwanted_file(self.files[data['FileObject']]['name']):
                     file = self.files[data['FileObject']]
                     tid = int(system['tid'])
                     pid = int(system['pid'])
@@ -461,7 +466,7 @@ class ETWXMLHandler(GPUQueue):
                     file['tid'] = tid
                     file['last_access'] = call_data['time']
                     file['pid'] = pid
-                    if data.has_key('IrpPtr'):
+                    if 'IrpPtr' in data:
                         self.irps[data['IrpPtr']] = data['FileObject']
                     data['OPERATION'] = info['Opcode']
                     call_data['args'] = {'snapshot': data}
@@ -523,7 +528,7 @@ class ETWXMLHandler(GPUQueue):
                     tree['modules'][parse_int(data['ImageBase'])] = [volume_to_drive(data['FileName']), parse_int(data['ImageSize'])]
             elif info['Opcode'] == 'CSwitch':
                 time = self.convert_time(system['time'])
-                if not self.callbacks.check_time_in_limits(time):
+                if not self.callbacks.check_time_in_limits(time, True):
                     return
                 # mandatory: prevState, nextComm, nextPid, nextPrio
                 prev_tid = parse_int(data['OldThreadId'])
@@ -553,7 +558,7 @@ class ETWXMLHandler(GPUQueue):
                 pid = parse_int(data['StackProcess'])
                 if pid in self.images:
                     stack = [0] * (len(data) - 3)
-                    for key in data.iterkeys():
+                    for key in data.keys():
                         num = key[5:]
                         if key.startswith('Stack') and num.isdigit():
                             stack[int(num) - 1] = parse_int(data[key]) if data[key] else 0
@@ -566,8 +571,7 @@ class ETWXMLHandler(GPUQueue):
                     for decoder in self.decoders[provider]:
                         decoder.handle_record(system, data, info)
                     return
-                if sys.gettrace():
-                    print 'Unsupported EventName:', info['EventName'], 'Opcode:', info['Opcode']
+                message('warning', 'Unsupported EventName:' + info['EventName'] + '\tOpcode:' + info['Opcode'])
         return
 
     def on_stack(self, time, pid, tid, stack):
@@ -589,7 +593,7 @@ class ETWXMLHandler(GPUQueue):
 
     def on_event(self, system, data, info):
         static = self.static  # FIXME: move to self. notation everywhere
-        if self.count % (ProgressConst / 8) == 0:
+        if self.progress.time_to_tick():
             self.progress.tick(self.file.tell())
         self.count += 1
 
@@ -613,7 +617,9 @@ class ETWXMLHandler(GPUQueue):
             'str': info['Task'] if ('Task' in info) and info['Task'] else 'Unknown',
             'args': data,
         }
-
+        if call_data['str'] in Unwanted:
+            message('warning', 'skipped Unwanted task: %s' % call_data['str'])
+            return
         if call_data['str'] == 'SelectContext':  # Microsoft-Windows-DxgKrnl <template tid="Context"> <template tid="NodeMetadata">
             context = data['hContext']
             node = data['NodeOrdinal']
@@ -631,11 +637,11 @@ class ETWXMLHandler(GPUQueue):
                 adapter = data['pDxgAdapter']
                 type = parse_int(data['AdapterType'])
                 flags = []
-                for key, val in ADAPTER_TYPE.iteritems():
+                for key, val in ADAPTER_TYPE.items():
                     if type & key:
                         flags.append(val)
                 if adapter in self.adapters:
-                    print "Existing adapter: %s \t new one: %s" % (str(self.adapters[adapter]), str((len(self.adapters), ' '.join(flags))))
+                    message('warning', "Existing adapter: %s \t new one: %s" % (str(self.adapters[adapter]), str((len(self.adapters), ' '.join(flags)))))
                 self.adapters[adapter] = (len(self.adapters), ' '.join(flags))
             return
 
@@ -658,17 +664,26 @@ class ETWXMLHandler(GPUQueue):
 
         if call_data['str'] == 'DmaPacket':  # Microsoft-Windows-DxgKrnl
             context = data['hContext']
-            if context not in self.context_to_node or 'Info' in opcode:
-                return  # no node info at this moment, just skip it. Or may be keep until it is known?
-            adapter, node = self.context_to_node[context]
+            if 'Info' in opcode:
+                return
+            thread_name = None
+            if context not in self.context_to_node:
+                adapter, node = 'Unknown', int(context, 16)
+                thread_name = '0x' + context
+            else:
+                adapter, node = self.context_to_node[context]
             if adapter not in self.adapters:
                 self.adapters[adapter] = (len(self.adapters), '')
             call_data['pid'] = -1 - self.adapters[adapter][0]  # GUI 'process'
             tid = int(node)
             call_data['tid'] = tid
+
+            if thread_name and call_data['tid'] not in self.thread_names:
+                self.thread_names[call_data['tid']] = (thread_name, call_data['pid'])
+
             PacketType = int(data['PacketType'])
             call_data['str'] = DMA_PACKET_TYPE[PacketType] if PacketType < len(DMA_PACKET_TYPE) else str(PacketType)
-            id = int(data['uliSubmissionId'] if data.has_key('uliSubmissionId') else data['uliCompletionId'])
+            id = int(data['uliSubmissionId'] if 'uliSubmissionId' in data else data['uliCompletionId'])
             call_data['id'] = id
             call_data['str'] += ":%d" % id
             ulQueueSubmitSequence = int(data['ulQueueSubmitSequence'])
@@ -695,16 +710,17 @@ class ETWXMLHandler(GPUQueue):
             if call_data['tid'] not in self.thread_names:
                 self.thread_names[call_data['tid']] = ("CPU Queue", call_data['pid'])
             id = int(data['SubmitSequence'])
-            if not data.has_key('PacketType'):  # workaround, PacketType is not set for Waits
-                if data.has_key('FenceValue'):
+            if 'PacketType' not in data:  # workaround, PacketType is not set for Waits
+                if 'FenceValue' in data:
                     call_data['str'] = 'WAIT'
                 else:
                     call_data['str'] = 'Unknown'
             else:
-                PacketType = long(data['PacketType'])
+                PacketType = int(data['PacketType'])
                 call_data['str'] = QUEUE_PACKET_TYPE[PacketType] if PacketType < len(QUEUE_PACKET_TYPE) else str(PacketType)
             if 'bPresent' in data and data['bPresent'] in ['1', 'true']:
                 call_data['str'] = "PRESENT_" + call_data['str']
+                self.process_frame_boundary(call_data)
             if 'bPreempted' in data and data['bPreempted'] in ['1', 'true']:
                 call_data['str'] += ":PREEMPTED"
             if 'bTimeouted' in data and data['bTimeouted'] in ['1', 'true']:
@@ -720,7 +736,7 @@ class ETWXMLHandler(GPUQueue):
                     self.callbacks.on_event("task_end_overlapped", closing)
                 static['queue'][id] = call_data
                 self.auto_break_gui_packets(call_data, call_data['tid'], True)
-                if data.has_key('FenceValue') and static['fence'].has_key(data['FenceValue']):
+                if ('FenceValue' in data) and (data['FenceValue'] in static['fence']):
                     relation = (call_data.copy(), static['fence'][data['FenceValue']], call_data)
                     relation[0]['parent'] = data['FenceValue']
                     del static['fence'][data['FenceValue']]
@@ -787,7 +803,7 @@ class ETWXMLHandler(GPUQueue):
             if 'Start' in opcode:
                 static['resident'].setdefault(system['tid'], []).append(data)
             elif 'Stop' in opcode:
-                resident = static['resident'][system['tid']] if static['resident'].has_key(system['tid']) else []
+                resident = static['resident'][system['tid']] if system['tid'] in static['resident'] else []
                 if len(resident):
                     saved = resident.pop()
                 else:
@@ -803,12 +819,12 @@ class ETWXMLHandler(GPUQueue):
                 self.thread_names[call_data['tid']] = ("CPU Queue", call_data['pid'])
             id = parse_int(data['PagingQueuePacket'])
             call_data['id'] = id
-            if data.has_key('PagingQueueType'):
+            if 'PagingQueueType' in data:
                 VidMmOpType = int(data['VidMmOpType'])
                 PagingQueueType = int(data['PagingQueueType'])
                 call_data['str'] = (PAGING_QUEUE_TYPE[PagingQueueType] if PagingQueueType < len(PAGING_QUEUE_TYPE) else str(PagingQueueType)) + ":" + (VIDMM_OPERATION[VidMmOpType] if VidMmOpType in VIDMM_OPERATION else str(VidMmOpType))
                 static['paging'][id] = call_data
-            elif static['paging'].has_key(id):  # doesn't have type on end
+            elif id in static['paging']:  # doesn't have type on end
                 start = static['paging'][id]
                 call_data['str'] = start['str']
                 call_data['pid'] = start['pid']
@@ -819,7 +835,7 @@ class ETWXMLHandler(GPUQueue):
                 return
             pDmaBuffer = data['pDmaBuffer']
             call_data['id'] = parse_int(pDmaBuffer)
-            if 'Stop' in opcode and static['dmabuff'].has_key(pDmaBuffer):
+            if ('Stop' in opcode) and (pDmaBuffer in static['dmabuff']):
                 call_data['args'].update(static['dmabuff'][pDmaBuffer])
                 del static['dmabuff'][pDmaBuffer]
         elif call_data['str'] == 'AddDmaBuffer':  # Microsoft-Windows-DxgKrnl
@@ -834,13 +850,17 @@ class ETWXMLHandler(GPUQueue):
             self.callbacks.on_event("object_snapshot", snap)
             return
         elif 'VSyncDPC' == call_data['str']:  # Microsoft-Windows-DxgKrnl
+            message('warning', 'VSyncDPC events need further debugging, disabled for now')
+            """ FIXME:
             if data['VidPnSourceId'] == '0':
                 self.callbacks.vsync(self.convert_time(data['FrameQPCTime']), data)
+            """
             return
         elif call_data['str'] == 'Present':  # Microsoft-Windows-DxgKrnl
             if 'Start' in opcode:
                 call_data["type"] = 0
                 type = "task_begin"
+                self.process_frame_boundary(call_data)
             elif 'Stop' in opcode:
                 call_data["type"] = 1
                 type = "task_end"
@@ -848,14 +868,14 @@ class ETWXMLHandler(GPUQueue):
                 return
             """XXX gives nothing
             elif call_data['str'] == 'Texture2D':
-                if not data.has_key('pID3D11Resource'):
+                if 'pID3D11Resource' not in data:
                     return
                 obj = data['pID3D11Resource']
-                if static['tex2d'].has_key(obj):
+                if obj in static['tex2d']:
                     obj = static['tex2d'][obj]
                     if 'Stop' in opcode:
                         del static['tex2d'][data['pID3D11Resource']]
-                if info.has_key('Message'):
+                if 'Message' in info:
                     data['OPERATION'] = info['Message']
                 else:
                     data['OPERATION'] = 'Texture2D'
@@ -869,13 +889,13 @@ class ETWXMLHandler(GPUQueue):
             elif call_data['str'] in ['Fence', 'MonitoredFence', 'SynchronizationMutex', 'ReportSyncObject']:
                 if 'Info' in opcode:
                     del call_data['data']
-                if data.has_key('pSyncObject'):
+                if 'pSyncObject' in data:
                     obj = data['pSyncObject']
                 else:
                     obj = data['hSyncObject']
                 call_data['id'] = int(obj, 16) #QueuePacket.ObjectArray refers to it
                 data['OPERATION'] = call_data['str']
-                if data.has_key('Reason'):
+                if 'Reason' in data:
                     data['OPERATION'] += ":" + SYNC_REASON[int(data['Reason'])]
                 call_data['str'] = "SyncObject:" + obj
                 call_data['args'] = {'snapshot': data}
@@ -900,26 +920,43 @@ class ETWXMLHandler(GPUQueue):
                 for callback in self.callbacks.callbacks:
                     callback.relation(*relation)
 
+    def process_frame_boundary(self, data):
+        name = data['str']
+        time = data['time']
+        thread = self.callbacks.process(data['pid']).thread(data['tid'])
+        auto_frame = thread.task_pool.setdefault('__sea_auto_frame__', {})
+
+        if name in auto_frame:
+            dur = time - auto_frame[name]
+            thread.frame('FRAME').complete(auto_frame[name], time - auto_frame[name], args={
+                'FPS': int(1e9 / dur),
+                'AbsTime': auto_frame[name],
+                'base': name
+            })
+            thread.counter(name + '_FPS').set_value(auto_frame[name], int(1e9 / dur))
+        auto_frame[name] = time
+
+
     def finish(self):
         if None in self.statistics:
-            for (pid, tid), track in self.statistics[None].iteritems():
+            for (pid, tid), track in self.statistics[None].items():
                 thread = self.callbacks.process(pid).thread(tid)
                 if track['zone']['last']:
                     thread.marker('task', track['zone']['name']).set(track['zone']['last'])
-        for adapter, (id, flags) in self.adapters.iteritems():
+        for adapter, (id, flags) in self.adapters.items():
             pid = -1 - id
             name = 'GPU Nodes of Adapter #%s%s:' % (str(id), (' (%s)' % flags) if flags else '')
             self.callbacks("metadata_add", {'domain': 'GPU', 'str': '__process__', 'pid': pid, 'tid': -1, 'data': name, 'delta': -2})
-            for (adptr, node), name in self.node_info.iteritems():
+            for (adptr, node), name in self.node_info.items():
                 if adapter != adptr:
                     continue
                 self.callbacks("metadata_add", {'domain': 'GPU', 'str': '__thread__', 'pid': pid, 'tid': node, 'data': name})
 
-        for id, file in self.files.iteritems():
-            if file.has_key('last_access'):  # rest aren't rendered anyways
+        for id, file in self.files.items():
+            if 'last_access' in file:  # rest aren't rendered anyways
                 call_data = {'tid': file['tid'], 'pid': file['pid'], 'domain': 'MSNT_SystemTrace', 'time': file['last_access'], 'str': file['name'], 'type': 11, 'id': parse_int(id)}
                 self.callbacks.on_event("object_delete", call_data)
-        decoder_set = set([decoder for decoders in self.decoders.itervalues() for decoder in decoders])
+        decoder_set = set([decoder for decoders in self.decoders.values() for decoder in decoders])
         for decoder in decoder_set:  # since one decoder can handle different providers
             decoder.finalize()
 
@@ -1000,7 +1037,7 @@ class ETWXMLHandler(GPUQueue):
             # 'MICROSOFT-WINDOWS-SHELL-CORE'
             None  # Win7 events
         ]
-        for provider in self.decoders.iterkeys():
+        for provider in self.decoders.keys():
             providers.append(provider)
         if self.args.input.endswith('.xml'):
             with open(self.args.input) as file:
@@ -1011,7 +1048,7 @@ class ETWXMLHandler(GPUQueue):
                     etwxml = ETWXML(self.on_event, providers)
                     unhandled_providers = etwxml.parse(file)
                     self.finish()
-                print "Unhandled providers:", str(unhandled_providers)
+                message('warning', "Unhandled providers:" + str(unhandled_providers))
         elif self.args.input.endswith('.etl'):
             with Progress(1000, 50, strings.parsing_files % (os.path.basename(self.args.input), format_bytes(os.path.getsize(self.args.input)))) as progress:
                 self.progress = progress
@@ -1019,14 +1056,15 @@ class ETWXMLHandler(GPUQueue):
                 self.file = reader
                 reader.parse(self.args.input)
                 self.finish()
-        for pid, data in self.process_names.iteritems():
+        for pid, data in self.process_names.items():
             proc_name = data['name']
             if len(data['cmd']) > len(proc_name):
                 proc_name = data['cmd'].replace('\\"', '').replace('"', '')
             pid = parse_int(pid)
             self.callbacks.set_process_name(pid, proc_name)
-            self.callbacks.set_process_name(-pid, 'Sampling: ' + proc_name)
-        for tid, (name, pid) in self.thread_names.iteritems():
+            if pid:
+                self.callbacks.set_process_name(-pid, 'Sampling: ' + proc_name)
+        for tid, (name, pid) in self.thread_names.items():
             thread_name = name.replace('\\"', '').replace('"', '')
             self.callbacks.set_thread_name(pid, tid, thread_name)
 
@@ -1043,6 +1081,7 @@ def transform_etw_xml(args):
     args.no_left_overs = False
     res = callbacks.get_result()
     return res
+
 
 IMPORTER_DESCRIPTORS = [
 {

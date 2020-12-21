@@ -2,7 +2,7 @@
 #   Intel(R) Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
-#   Copyright (c) 2015, Intel Corporation
+#   Copyright (c) 2021, Intel Corporation
 #   All rights reserved.
 #
 #   Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
@@ -22,6 +22,8 @@
 
 #ifdef _WIN32
     #include <Psapi.h>
+    #undef API_VERSION
+    #include <Dbghelp.h>
 #else
     #include <cxxabi.h>
     #include <dlfcn.h>
@@ -162,7 +164,50 @@ SModuleInfo Fn2Mdl(void* fn)
     return SModuleInfo{hModule, mi.SizeOfImage, filename};
 }
 
+LONG WINAPI CreateMiniDump(EXCEPTION_POINTERS* pep)
+{
+    typedef BOOL(WINAPI *PDUMPFN)(
+        HANDLE hProcess,
+        DWORD ProcessId,
+        HANDLE hFile,
+        MINIDUMP_TYPE DumpType,
+        PMINIDUMP_EXCEPTION_INFORMATION ExceptionParam,
+        PMINIDUMP_USER_STREAM_INFORMATION UserStreamParam,
+        PMINIDUMP_CALLBACK_INFORMATION CallbackParam
+    );
+
+    PDUMPFN fnMiniDumpWriteDump = (PDUMPFN)GetProcAddress(::LoadLibraryA("DbgHelp.dll"), "MiniDumpWriteDump");
+    if (!fnMiniDumpWriteDump) return EXCEPTION_EXECUTE_HANDLER;
+    std::string path = g_savepath.empty() ? "c:/temp" : g_savepath;
+    path += "/isea_minidump.dmp";
+    HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (!hFile || INVALID_HANDLE_VALUE == hFile) return EXCEPTION_EXECUTE_HANDLER;
+
+    MINIDUMP_EXCEPTION_INFORMATION mdei = {};
+    mdei.ThreadId = GetCurrentThreadId();
+    mdei.ExceptionPointers = pep;
+    mdei.ClientPointers = TRUE;
+
+
+    fnMiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile, MiniDumpNormal, (pep != 0) ? &mdei : 0, 0, 0);
+    CloseHandle(hFile);
+
+    return EXCEPTION_EXECUTE_HANDLER;
+
+}
+
+
+void SetGlobalCrashHandler()
+{
+    ::SetUnhandledExceptionFilter(CreateMiniDump);
+}
+
 #else
+
+void SetGlobalCrashHandler()
+{
+    //FIXME: implement
+}
 
 #include <sys/stat.h>
 

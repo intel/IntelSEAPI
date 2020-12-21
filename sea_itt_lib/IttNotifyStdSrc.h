@@ -2,7 +2,7 @@
 #   Intel® Single Event API
 #
 #   This file is provided under the BSD 3-Clause license.
-#   Copyright (c) 2015, Intel Corporation
+#   Copyright (c) 2021, Intel Corporation
 #   All rights reserved.
 #
 #   Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
@@ -73,6 +73,8 @@ namespace sea {
 
 
 __itt_global* GetITTGlobal();
+extern __itt_domain* g_pIntelSEAPIDomain;
+
 
 namespace sea {
     extern std::string g_savepath;

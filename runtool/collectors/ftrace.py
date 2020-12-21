@@ -5,6 +5,9 @@ import shutil
 import traceback
 import subprocess
 
+# http://www.brendangregg.com/perf.html
+# sudo perf probe --funcs
+
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 import sea
 
@@ -118,7 +121,6 @@ class FTrace(Collector):
         for event in supported_events:
             for path in glob.glob('/sys/kernel/debug/tracing/events/*/%s/enable' % event):
                 self.event_list.append(path)
-        self.start()
 
     def echo(self, what, where):
         self.log("echo %s > %s" % (what, where))
@@ -165,7 +167,8 @@ class FTrace(Collector):
             if os.path.exists(self.perf_file):
                 os.remove(self.perf_file)
             cmd = 'perf record -a -g -o "%s" --pid=%s' % (self.perf_file, self.args.target)
-            self.perf_proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setpgrp)
+            self.log(cmd)
+            self.perf_proc = subprocess.Popen(cmd, shell=True, stdout=self.get_output(), stderr=self.get_output(), preexec_fn=os.setpgrp)
 
     def copy_from_target(self, what, where):
         self.log("copy %s > %s" % (what, where))
@@ -197,6 +200,7 @@ class FTrace(Collector):
             shutil.copyfileobj(file_from, file_to)
         os.remove(file_name)
         results.append(self.file)
+        self.execute('chmod -R a+rwX "%s"' % self.args.output)
         return results
 
 
