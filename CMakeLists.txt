@@ -192,7 +192,6 @@ install(
     FILES
         ${PROJECT_SOURCE_DIR}/README.txt
         ${PROJECT_SOURCE_DIR}/isea.sh
-        ${PROJECT_SOURCE_DIR}/isea.htm
     DESTINATION .
 )
 
