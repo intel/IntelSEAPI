@@ -272,7 +272,6 @@ if (WIN32)
 
         set(CPACK_NSIS_CONTACT "alexander.a.raud@intel.com")
 
-        SET(CPACK_NSIS_INSTALL_ROOT "c:\\\\Intel")
         SET(CPACK_NSIS_MODIFY_PATH ON)
     else()
         set(CPACK_GENERATOR ${INSTALLER})
