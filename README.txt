@@ -1,6 +1,6 @@
 -= Welcome to Intel® Single Event API (Intel® SEAPI)! =-
 
-Disclamer: this product does not maintain the release cycle. Build and use on your own risk.
+**Disclaimer: this product does not maintain the release cycle. Build and use on your own risk.**
 
 Before reading further please visit wiki to see examples of visualization. https://github.com/01org/IntelSEAPI/wiki
 
